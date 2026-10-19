@@ -1,0 +1,5 @@
+{
+  "name": "c-sh",
+  "description": "c-sh (collabo sh): terminal sessions that stay connected between commands — ssh, telnet, rlogin, raw TCP, serial lines and local programs — opened once and driven one command at a time (open/run/enter/key/screen/read/wait)",
+  "bundled": true
+}

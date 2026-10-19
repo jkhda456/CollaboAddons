@@ -1,0 +1,27 @@
+[package]
+name = "collabo-sh"
+version = "0.1.0"
+edition = "2021"
+description = "c-sh: terminal sessions that stay connected (ssh, telnet, rlogin, raw TCP, serial, local programs), driven one command at a time"
+license = "MIT"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "c-sh"
+path = "src/main.rs"
+
+# The protocols (SSH included), the terminal and the daemon are our own code. Cryptography is the
+# guest's OpenSSL (libcrypto, the library python, curl and git link), called directly (crypto.rs);
+# regular expressions and the screen model (vt100) are the two pure-Rust crates below.
+[dependencies]
+libc = "0.2"
+regex-lite = "0.1"
+vt100 = "0.16"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
