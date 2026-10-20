@@ -1,0 +1,77 @@
+# Every source the python-extension add-on builds from: name, URL, sha256 of the download, and the
+# file name it is kept under in build/dl when the URL's own name says too little.
+# The Python packages are their PyPI sdists, but LIEF: its PyPI sdist only downloads the source at
+# install time, so it is the archive of its GitHub tag. The C libraries behind Pillow are the
+# versions Pillow 12.3.0's own wheels carry (.github/dependencies.json at its tag); their projects
+# sign their releases rather than publish checksums, and GitHub's tag archives have none: for those,
+# the hash of the download reviewed when it was added. libc++ is LLVM 19.1.7's, the release of the
+# host's clang-19. setuptools and pybind11 run Pillow's setup.py (pybind11 for its parallel compile).
+# zlib and xz: the python step's versions (python/sources.lock), built again position-independent
+# for the modules that use them (the interpreter's copies are neither exported nor PIC). The
+# libraries behind lxml are those of lxml 6.1.3's own static build, with the sha256 it pins
+# (buildlibxml.py's ARCHIVE_HASHES; libxml2 and libxslt: its Makefile's MANYLINUX_* versions).
+# pycparser is its pure-Python wheel. libffi: the release cffi's own wheels are built with is
+# older; this one has the wasm32 port the add-on's backend joins (packages/cffi). OpenSSL: the
+# version cryptography 50.0.2's own wheels carry (OpenSSL_version() of the wheel's module).
+# rpds-py: its sdist (the same files as its GitHub tag 2026.9.1, and PKG-INFO). mcp: its wheel and
+# those of what it needs, resolved from PyPI for CPython 3.13 on Linux (packages/mcp).
+
+# toolchain and build tools (run on the host)
+llvm          https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.7/llvm-project-19.1.7.src.tar.xz                                    82401fea7b79d0078043f7598b835284d6650a75b93e64b6f761ea7b63097501
+cython        https://files.pythonhosted.org/packages/bf/77/67b0b24e45073a699610e50f00c18474ff9b09ea29ecc95083bdf5e60acd/cython-3.3.0-py3-none-any.whl    9b24b5c8cd536946b62086fcafee6d5509d3f549f72d553d2336af87ffbe0da1
+setuptools    https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl 51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670
+pybind11      https://files.pythonhosted.org/packages/33/fd/8762f7ee3e4e4be6d1d846cffb4916dd9bb02b2f800d3603718a0efe494c/pybind11-3.1.0-py3-none-any.whl  b8488090f8acffbcb6b5d6a85571a6827a0a2981ffb75e5a0b27b87c4a6b7dd0
+
+# libraries more than one package builds
+zlib          https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz         9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
+
+# packages/numpy
+numpy         https://files.pythonhosted.org/packages/95/b0/c7453d0b6e2073c3264468b106ee1563750cecc910965e67357e3698c83e/numpy-2.5.4.tar.gz             9a94cf751c9ad8ebaa835bcd3d40dacf8534ad086b88c38029b65123c7999d2a
+
+# packages/pillow
+pillow        https://files.pythonhosted.org/packages/1c/3d/bb7fca845737cf9d7dbde16ed1843984665ff2e0a518f5db43e77ec540b9/pillow-12.3.0.tar.gz           3b8182a766685eaa002637e28b4ec8d6b18819a0c71f579bf0dbaa5830297cce
+xz            https://github.com/tukaani-project/xz/releases/download/v5.6.4/xz-5.6.4.tar.gz              269e3f2e512cbd3314849982014dc199a7b2148cf5c91cedc6db629acdf5e09b
+jpegturbo     https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.1.4.1/libjpeg-turbo-3.1.4.1.tar.gz                                 ecae8008e2cc9ade2f2c1bb9d5e6d4fb73e7c433866a056bd82980741571a022
+freetype      https://download.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.xz                                                             36bc4f1cc413335368ee656c42afca65c5a3987e8768cc28cf11ba775e785a5f
+libwebp       https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.6.0.tar.gz                                            e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564
+tiff          https://download.osgeo.org/libtiff/tiff-4.7.1.tar.gz                                                                                   f698d94f3103da8ca7438d84e0344e453fe0ba3b7486e04c5bf7a9a3fabe9b69
+lcms2         https://github.com/mm2/Little-CMS/releases/download/lcms2.19.1/lcms2-2.19.1.tar.gz                                                     bfc54f7bab59fbc921012014a8032e4cba4abd46db47d46b76416a8c0b2815c8
+openjpeg      https://github.com/uclouvain/openjpeg/archive/v2.5.4.tar.gz                                                                            a695fbe19c0165f295a8531b1e4e855cd94d0875d2f88ec4b61080677e27188a  openjpeg-2.5.4.tar.gz
+
+# packages/lief
+lief          https://github.com/lief-project/LIEF/archive/refs/tags/1.0.0.tar.gz                                                                    2cf412695ff739d82e129db441e5c2025f3bb4873a3d3a1d3dd4cf300b682abd  LIEF-1.0.0.tar.gz
+
+# packages/lxml
+lxml          https://files.pythonhosted.org/packages/23/ad/28ecd7cb894d172f3c9c80a075eeeb2017ac62e3632cee05a5f9493547eb/lxml-6.1.3.tar.gz             45222d94ddd511536f3b2f7d9deae3b2339b4ce0f075f1ca25703b07cad9dd21
+libxml2       https://download.gnome.org/sources/libxml2/2.14/libxml2-2.14.6.tar.xz                                                                  7ce458a0affeb83f0b55f1f4f9e0e55735dbfc1a9de124ee86fb4a66b597203a
+libxslt       https://download.gnome.org/sources/libxslt/1.1/libxslt-1.1.43.tar.xz                                                                   5a3d6b383ca5afc235b171118e90f5ff6aa27e9fea3303065231a6d403f0183a
+libiconv      https://ftp.gnu.org/pub/gnu/libiconv/libiconv-1.19.tar.gz                                                                              88dd96a8c0464eca144fc791ae60cd31cd8ee78321e67397e25fc095c4a19aa6
+
+# packages/pycparser
+pycparser     https://files.pythonhosted.org/packages/90/11/0e6f11117525ff0eec40ebac3d313376f102df93ca44ad9e893ee85e4f89/pycparser-3.11-py3-none-any.whl  51d5a8ba2be0bbe440b99d2112604c95bbbc3c2748a64260186c541e1729cd80
+
+# packages/cffi
+cffi          https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz             dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be
+libffi        https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz                                                          7da3e2d9a171eb0a038f592ecad3ff2bb2550f3496d87b3b29ad0cf4430c0db4
+
+# packages/cryptography
+cryptography  https://files.pythonhosted.org/packages/9d/af/182eb91b0df3fe75c4d9f26fe70684569566745f6ba7e5c9c73a862c5252/cryptography-50.0.2.tar.gz     7b46165bb56eb4704e2eaaf86f3c940d19154535d9b0ca7d6d590b04060e00d5
+openssl       https://github.com/openssl/openssl/releases/download/openssl-4.0.3/openssl-4.0.3.tar.gz                                                325b5c806167c13b40b1ffeadfe0248197c00eccc4cf123ec1e28d2d2fd216d9
+
+# packages/rpds-py (its PyPI sdist: the crate and its Cargo.lock, the Python stub)
+rpds-py       https://files.pythonhosted.org/packages/42/68/3bd46b8a5e01d3c2ebdf9c5e9497912e3fe0cde02bac21a7130ca866e403/rpds_py-2026.9.1.tar.gz         4793ef7f78268b124b73fa933440f01d258bbae01de9fa53e9080c9ab0425a12
+
+# packages/mcp: mcp and what it needs that the Python image has not, pure-Python wheels
+mcp           https://files.pythonhosted.org/packages/20/d7/4a2878f128df729db3ca04e71bfce26405cc2e0c9ebe19c592feeb4c61b9/mcp-2.3.0-py3-none-any.whl  dd0c44c089d16453e8ae31a3877a0054d7a2314caaa81f5e0541b9b1734b2377
+mcp-types     https://files.pythonhosted.org/packages/ce/48/32583066b155bb5d4507e7887dc88ee23118cc4de8e2a12870c49719e2a8/mcp_types-2.3.0-py3-none-any.whl 968efdbdaedfab06adae40d378a34395f1090c5921d4be3c9cde283aaf76d91d
+jsonschema    https://files.pythonhosted.org/packages/69/90/f63fb5873511e014207a475e2bb4e8b2e570d655b00ac19a9a0ca0a385ee/jsonschema-4.26.0-py3-none-any.whl d489f15263b8d200f8387e64b4c3a75f06629559fb73deb8fdfb525f2dab50ce
+jsonschema-specifications https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl 98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe
+referencing   https://files.pythonhosted.org/packages/2c/58/ca301544e1fa93ed4f80d724bf5b194f6e4b945841c5bfd555878eea9fcb/referencing-0.37.0-py3-none-any.whl 381329a9f99628c9069361716891d34ad94af76e461dcb0335825aecc7692231
+attrs         https://files.pythonhosted.org/packages/64/b4/17d4b0b2a2dc85a6df63d1157e028ed19f90d4cd97c36717afef2bc2f395/attrs-26.1.0-py3-none-any.whl c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309
+opentelemetry-api https://files.pythonhosted.org/packages/1e/41/f7dcf80b81ee8e71c1a2b59f14208bc723edbd89ed027a73b175abf6348e/opentelemetry_api-1.45.1-py3-none-any.whl b31553efa588ae44bc306f863c785c5333a9ecc091248c6ee68b4b6c87fdedfb
+pyjwt         https://files.pythonhosted.org/packages/50/ca/44de4e75f8aadc457f0634be3b542815078ded46dca30efb960edeecad6e/pyjwt-2.15.1-py3-none-any.whl  42d59d631f7768a1028a64c7ff581a9bf7519804daf91fc5b6c56e30eec5e193
+python-multipart https://files.pythonhosted.org/packages/e1/04/e8135ebd1ad02c56ec633277529b2602ff99ff634be76cdba5744cf554fd/python_multipart-0.0.32-py3-none-any.whl ff6d3f776f16878c894e52e107296ffc890e913c611b1a4ec6c44e2821fe2e23
+sse-starlette https://files.pythonhosted.org/packages/be/e4/cdda14023c316d71493bc54fdffc3dd006631b88866145c9d3cc33e0f1df/sse_starlette-3.5.0-py3-none-any.whl 3e6e1070df3f0f5d9cea81496de92dbb72f6721871d99748ece67441dd8b7997
+starlette     https://files.pythonhosted.org/packages/f3/93/181df62699d9b5aca1d87e5cfda131dac87e3cdaebf668662f7206ca3470/starlette-1.9.0-py3-none-any.whl fd3f159936e882d06c1108f84688f7cda2cf85fc6a592a50edbd175e882c2ddc
+uvicorn       https://files.pythonhosted.org/packages/38/0c/b54a4fdd7f90a3af8b02ebc9ce6712c2c208b7926a2f7bad95c33ebbe943/uvicorn-0.54.0-py3-none-any.whl 505bdb0f318731d45f1f712071fc781a8981f6847a31c902c9f5e652d4f67faf
+click         https://files.pythonhosted.org/packages/58/50/6c0d534c5f134586a8e1ba4e330569e32f057e33372ae556463212fb4cd3/click-8.5.0-py3-none-any.whl 255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# The add-on's C++ compiler for the guest: see wasm-pyext-cc. (A script, not a link: the name is
+# what build systems tell C++ by.)
+exec "$(dirname "${BASH_SOURCE[0]}")/wasm-pyext-cc" --c++ "$@"

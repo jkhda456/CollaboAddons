@@ -1,0 +1,25 @@
+__arrow_c_schema__ and __arrow_c_array__ with the parameters CPython calls a METH_VARARGS method
+with (self, args): written with self alone, the call traps in WebAssembly, which checks the
+type of every indirect call (an image's Arrow export, which Image.fromarrow and Arrow libraries call,
+ended the interpreter). (Found by the add-on's tools/fpcast-scan.py.)
+
+--- a/src/_imaging.c
++++ b/src/_imaging.c
+@@ -264,7 +264,7 @@
+ }
+ 
+ PyObject *
+-ExportArrowSchemaPyCapsule(ImagingObject *self) {
++ExportArrowSchemaPyCapsule(ImagingObject *self, PyObject *Py_UNUSED(args)) {
+     struct ArrowSchema *schema =
+         (struct ArrowSchema *)calloc(1, sizeof(struct ArrowSchema));
+     if (!schema) {
+@@ -300,7 +300,7 @@
+ }
+ 
+ PyObject *
+-ExportArrowArrayPyCapsule(ImagingObject *self) {
++ExportArrowArrayPyCapsule(ImagingObject *self, PyObject *Py_UNUSED(args)) {
+     struct ArrowArray *array =
+         (struct ArrowArray *)calloc(1, sizeof(struct ArrowArray));
+     if (!array) {

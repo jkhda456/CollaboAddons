@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# The C and C++ compiler of the add-on's builds (CC/CXX of meson, CMake, setuptools and the
+# packages' own scripts): userspace/bin/wasm-cc, with libc++ for C++ (wasm-pyext-c++), built with
+# C++ exceptions (WebAssembly exception handling; build/libcxx-install, libunwind included).
+#
+# Everything is compiled position-independent (-fPIC): an extension module is a shared library
+# the guest's CPython loads with dlopen (a WebAssembly side module: `wasm-cc -shared`), and every
+# static library that goes into one must be PIC too. A link with -shared — how every build system
+# makes an extension module — is wasm-cc's, with libc++ when it is C++; what the module does not
+# define it imports from the interpreter (the Python API, the C library). Not the interpreter's
+# other libraries (python/deps: zlib, OpenSSL, ...): it does not export them, and they are not
+# PIC, so a module that needs one carries a PIC build of its own (packages/pillow: zlib, liblzma);
+# one on the line is an error.
+#
+# Compiles read the host CPython's headers as the guest's (below). C++ gets -fwasm-exceptions
+# first, so a -fno-exceptions later on the line still wins.
+A="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$A/../.." && pwd)"
+U="$ROOT/userspace"
+LIBCXX="$A/build/libcxx-install"
+DEPS="$ROOT/python/deps"
+# the newer wasm-ld python/build.sh links with (shared libraries need its --experimental-pic)
+export WASM_LD="${WASM_LD:-$ROOT/.tools/rust-wasm/bin/wasm-ld}"
+LINK_FLAGS=(-Wl,--import-memory -Wl,--max-memory=4294967296 -Wl,--shared-memory -Wl,--export-table
+            -Wl,-z,stack-size=8388608)
+cxx=0; [[ "${1:-}" == --c++ ]] && { cxx=1; shift; }
+
+# @file arguments (response files) as the arguments they hold
+args=()
+for a in "$@"; do
+  if [[ "$a" == @* && -f "${a#@}" ]]; then
+    eval "args+=($(python3 -I -c 'import shlex, sys; print(" ".join(shlex.quote(a) for a in shlex.split(open(sys.argv[1]).read())))' "${a#@}"))"
+  else
+    args+=("$a")
+  fi
+done
+set -- "${args[@]}"
+
+link=1 shared=0 partial=0
+for a in "$@"; do
+  case "$a" in
+    -c|-S|-E|-M|-MM|-fsyntax-only) link=0 ;;
+    -shared) shared=1 ;;
+    -r|-Wl,-r|-Wl,--relocatable) partial=1 ;;
+  esac
+done
+# Questions to the compiler go to wasm-cc as they are; -v only alone (CMake adds it to real compiles
+# and links, to read the output).
+for a in "$@"; do case "$a" in -print-*|--version|-dumpmachine|-###) exec "$U/bin/wasm-cc" "$@";; esac; done
+[[ $# == 1 && "$1" == -v ]] && exec "$U/bin/wasm-cc" -v
+
+if [[ $link == 0 ]]; then
+  # PYEXT_COMPDB=DIR: a record of the compile (JSON, compile_commands.json's form) in DIR, for
+  # tools/fpcast-scan.py (setuptools keeps no compile database); not the compiles that probe the
+  # compiler (configure's, CMake's and meson's checks)
+  if [[ -n "${PYEXT_COMPDB:-}" && "$PWD" != */CMakeScratch/* && "$PWD" != */CMakeTmp* && "$PWD" != */meson-private/* \
+        && "$PWD" != */conftest* ]]; then
+    for a in "$@"; do
+      case "$a" in *.c|*.cc|*.cpp|*.cxx|*.c++)
+        mkdir -p "$PYEXT_COMPDB"
+        python3 -I - "$PYEXT_COMPDB" "$a" "$0" $([[ $cxx == 1 ]] && echo --c++) "$@" <<'PY'
+import hashlib, json, os, sys
+d, src, args = sys.argv[1], sys.argv[2], sys.argv[3:]
+rec = {"directory": os.getcwd(), "file": src, "arguments": args}
+name = hashlib.sha256((os.getcwd() + "\n" + src).encode()).hexdigest()[:24]
+open(os.path.join(d, name + ".json"), "w").write(json.dumps(rec))
+PY
+        ;;
+      esac
+    done
+  fi
+  # The host CPython's headers, which build systems find through the host interpreter's sysconfig
+  # paths (build/host/bin/python3-guest answers with the guest's build variables, but the paths
+  # follow the interpreter's own prefix), are the guest's: python/stage/usr/include/python3.13.
+  HOST_INC="$ROOT/python/host/include/python3.13" GUEST_INC="$ROOT/python/stage/usr/include/python3.13"
+  keep=()
+  for a in "$@"; do
+    case "$a" in
+      -fPIE|-fpie|-fno-PIC|-fno-pic) ;;
+      *"$HOST_INC"*) keep+=("${a//"$HOST_INC"/"$GUEST_INC"}") ;;
+      *) keep+=("$a") ;;
+    esac
+  done
+  if [[ $cxx == 1 ]]; then
+    # wasm-cc's compile, with libc++'s headers ahead of the C library's (libc++'s <cstddef> must
+    # find its own <stddef.h>); default visibility, as wasm-cc gives -fPIC objects
+    exec clang-19 --target=wasm32 -matomics -mbulk-memory -mllvm -wasm-enable-sjlj \
+      -D__linux__=1 -D__linux=1 -D__unix__=1 -D__unix=1 -D__gnu_linux__=1 \
+      -Wno-unused-command-line-argument -Wno-override-module -fPIC -fvisibility=default -fwasm-exceptions \
+      -nostdinc++ -isystem "$LIBCXX/include/c++/v1" -isystem "$LIBCXX/include" \
+      -isystem "$U/sysroot/include" "${keep[@]}"
+  fi
+  exec "$U/bin/wasm-cc" -fPIC "${keep[@]}"
+fi
+
+# A link that names sources: compile them first, with the flags above (the link alone would put the
+# C library's headers ahead of libc++'s).
+srcs=0
+for a in "$@"; do case "$a" in *.c|*.cc|*.cpp|*.cxx|*.C|*.c++) [[ -f "$a" ]] && srcs=1 ;; esac; done
+if [[ $srcs == 1 ]]; then
+  self=("$0"); [[ $cxx == 1 ]] && self+=(--c++)
+  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+  flags=() inputs=() n=0
+  for ((i = 1; i <= $#; i++)); do
+    a="${!i}"
+    case "$a" in
+      -o) i=$((i + 1)) ;;
+      *.c|*.cc|*.cpp|*.cxx|*.C|*.c++|-l*|-L*|*.o|*.a|*.so) ;;
+      *) flags+=("$a") ;;
+    esac
+  done
+  for ((i = 1; i <= $#; i++)); do
+    a="${!i}"
+    case "$a" in
+      -o) i=$((i + 1)); inputs+=(-o "${!i}") ;;
+      *.c|*.cc|*.cpp|*.cxx|*.C|*.c++)
+        n=$((n + 1)); "${self[@]}" "${flags[@]}" -c "$a" -o "$tmp/$n.o" || exit; inputs+=("$tmp/$n.o") ;;
+      *) inputs+=("$a") ;;
+    esac
+  done
+  "${self[@]}" "${inputs[@]}"; exit
+fi
+
+# Flags for a native shared library that mean nothing here (or something else)
+drop() { case "$1" in -Wl,--version-script=*|-Wl,-soname,*|-Wl,-z,*|-Wl,--no-undefined|-Wl,--as-needed|-Wl,--no-as-needed|-Wl,--allow-shlib-undefined|-Wl,--exclude-libs,*|-Wl,-rpath,*|-Wl,--gc-sections|-Wl,-s|-Wl,-O*|-Wl,--start-group|-Wl,--end-group|-Wl,-Bsymbolic*|-pthread|-v|-Wl,-v) return 0 ;; esac; return 1; }
+
+if [[ $shared == 1 ]]; then
+  keep=() libdirs=()
+  for ((i = 1; i <= $#; i++)); do
+    a="${!i}"
+    case "$a" in
+      -L) j=$((i + 1)); libdirs+=("${!j}"); keep+=("$a" "${!j}"); i=$j ;;
+      -L*) libdirs+=("${a#-L}"); keep+=("$a") ;;
+      -l*) lib="${a#-l}"
+           case "$lib" in c|m|pthread|dl|rt|util|stdc++|c++|c++abi|unwind|gcc|gcc_s|atomic) continue ;; esac
+           for d in "${libdirs[@]}"; do
+             if [[ -f "$d/lib$lib.a" && "$(realpath "$d/lib$lib.a")" == "$DEPS"/* ]]; then
+               echo "wasm-pyext-cc: -l$lib would be the interpreter's own (python/deps), which it does not export and which is not PIC: link a PIC build of it" >&2
+               exit 1
+             fi
+           done
+           keep+=("$a") ;;
+      *.a) [[ "$(realpath "$a")" == "$DEPS"/* ]] && { echo "wasm-pyext-cc: $a is the interpreter's own (python/deps): link a PIC build of it" >&2; exit 1; }
+           keep+=("$a") ;;
+      -Xlinker) i=$((i + 1)) ;;
+      *) drop "$a" || keep+=("$a") ;;
+    esac
+  done
+  post=()
+  [[ $cxx == 1 ]] && post+=("$LIBCXX/lib/libc++.a" "$LIBCXX/lib/libc++abi.a")
+  exec "$U/bin/wasm-cc" "${keep[@]}" "${post[@]}"
+fi
+
+if [[ $partial == 1 ]]; then exec "$U/bin/wasm-cc" "$@"; fi
+
+# a program (configure checks, build-time tools): the guest's link flags; C++ with libc++. (Without
+# -v: wasm-cc would take the link for a question.)
+args=(); for a in "$@"; do case "$a" in -v|-Wl,-v) ;; *) args+=("$a") ;; esac; done; set -- "${args[@]}"
+post=()
+[[ $cxx == 1 ]] && post+=("$LIBCXX/lib/libc++.a" "$LIBCXX/lib/libc++abi.a")
+exec "$U/bin/wasm-cc" "$@" "${post[@]}" "${LINK_FLAGS[@]}"

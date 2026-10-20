@@ -1,0 +1,97 @@
+Methods and getset functions with the parameters CPython calls them with: a getter takes a
+closure, a setter a value and a closure, a METH_NOARGS method an (unused) second argument, a
+METH_VARARGS|METH_KEYWORDS one its (unused) keywords.
+Natively a call with more arguments than the function takes goes unnoticed; WebAssembly checks
+the type of every indirect call, and the guest's CPython (no Emscripten trampoline) traps:
+copy.copy(np.float64(1)), arr.dtype = ... and the others ended the interpreter (and a
+METH_VARARGS function of the test module took keywords it never had).
+(Found by the add-on's tools/fpcast-scan.py.)
+
+--- a/numpy/_core/src/multiarray/array_converter.c
++++ b/numpy/_core/src/multiarray/array_converter.c
+@@ -129,7 +129,7 @@
+ 
+ 
+ static PyObject *
+-array_converter_get_scalar_input(PyArrayArrayConverterObject *self)
++array_converter_get_scalar_input(PyArrayArrayConverterObject *self, void *NPY_UNUSED(closure))
+ {
+     PyObject *ret = PyTuple_New(self->narrs);
+     if (ret == NULL) {
+--- a/numpy/_core/src/multiarray/array_method.c
++++ b/numpy/_core/src/multiarray/array_method.c
+@@ -971,7 +971,7 @@
+ 
+ 
+ static PyObject *
+-boundarraymethod__supports_unaligned(PyBoundArrayMethodObject *self)
++boundarraymethod__supports_unaligned(PyBoundArrayMethodObject *self, void *NPY_UNUSED(closure))
+ {
+     return PyBool_FromLong(self->method->flags & NPY_METH_SUPPORTS_UNALIGNED);
+ }
+--- a/numpy/_core/src/multiarray/getset.c
++++ b/numpy/_core/src/multiarray/getset.c
+@@ -385,7 +385,7 @@
+ }
+ 
+ static int
+-array_descr_set(PyArrayObject *self, PyObject *arg)
++array_descr_set(PyArrayObject *self, PyObject *arg, void *NPY_UNUSED(closure))
+ {
+     if (arg == NULL) {
+         PyErr_SetString(PyExc_AttributeError,
+--- a/numpy/_core/src/multiarray/scalartypes.c.src
++++ b/numpy/_core/src/multiarray/scalartypes.c.src
+@@ -2125,7 +2125,7 @@
+ /**end repeat**/
+ 
+ static PyObject *
+-gentype___copy__(PyObject *self)
++gentype___copy__(PyObject *self, PyObject *NPY_UNUSED(ignored))
+ {
+     // scalars are immutable, so we can return a new reference
+     // the only exceptions are scalars with void dtype
+--- a/numpy/_core/src/umath/_scaled_float_dtype.c
++++ b/numpy/_core/src/umath/_scaled_float_dtype.c
+@@ -189,7 +189,7 @@
+ 
+ 
+ static PyObject *
+-sfloat___reduce__(PyArray_SFloatDescr *self)
++sfloat___reduce__(PyArray_SFloatDescr *self, PyObject *NPY_UNUSED(args))
+ {
+     return Py_BuildValue("(O(d))", Py_TYPE(self), self->scaling);
+ }
+--- a/numpy/_core/src/multiarray/_multiarray_tests.c.src
++++ b/numpy/_core/src/multiarray/_multiarray_tests.c.src
+@@ -2072,7 +2072,7 @@
+  *  format_float_positional
+  */
+ static PyObject *
+-printf_float_g(PyObject *NPY_UNUSED(dummy), PyObject *args, PyObject *kwds)
++printf_float_g(PyObject *NPY_UNUSED(dummy), PyObject *args)
+ {
+     PyObject *obj;
+     int precision;
+--- a/numpy/_core/src/multiarray/convert_datatype.c
++++ b/numpy/_core/src/multiarray/convert_datatype.c
+@@ -245,7 +245,7 @@
+ 
+ 
+ NPY_NO_EXPORT PyObject *
+-_get_castingimpl(PyObject *NPY_UNUSED(module), PyObject *args)
++_get_castingimpl(PyObject *NPY_UNUSED(module), PyObject *args, PyObject *NPY_UNUSED(kwargs))
+ {
+     PyArray_DTypeMeta *from, *to;
+     if (!PyArg_ParseTuple(args, "O!O!:_get_castingimpl",
+--- a/numpy/_core/src/multiarray/convert_datatype.h
++++ b/numpy/_core/src/multiarray/convert_datatype.h
+@@ -13,7 +13,7 @@
+ PyArray_GetCastingImpl(PyArray_DTypeMeta *from, PyArray_DTypeMeta *to);
+ 
+ NPY_NO_EXPORT PyObject *
+-_get_castingimpl(PyObject *NPY_UNUSED(module), PyObject *args);
++_get_castingimpl(PyObject *NPY_UNUSED(module), PyObject *args, PyObject *NPY_UNUSED(kwargs));
+ 
+ NPY_NO_EXPORT PyObject *
+ _is_view_safe_cast(PyObject *NPY_UNUSED(module), PyObject *const *args,

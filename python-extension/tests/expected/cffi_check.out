@@ -1,0 +1,76 @@
+version 2.1.1 (2, 1, 1)
+type mix_t 24 8 struct mix_t
+type pun_t 4 4 union pun_t
+type bits_t 4 4 struct bits_t
+type enum color 4 4 enum enum color
+type cplx_t 16 8 struct cplx_t
+type onefloat_t 4 4 struct onefloat_t
+type tagged_t 16 8 struct tagged_t
+type named_t 16 4 struct named_t
+type int8_t 1 1 primitive int8_t
+type int16_t 2 2 primitive int16_t
+type int32_t 4 4 primitive int32_t
+type int64_t 8 8 primitive int64_t
+type float 4 4 primitive float
+type double 8 8 primitive double
+type long double 16 16 primitive long double
+type _Bool 1 1 primitive _Bool
+type char 1 1 primitive char
+offsets [0, 4, 8, 16] 12 8
+fields [('x', 'uint32_t', 0, 0, 3), ('y', 'uint32_t', 0, 3, 9), ('z', 'uint32_t', 0, 12, 20)]
+enum {6: 'BLUE', 5: 'GREEN', 0: 'RED'} {'BLUE': 6, 'GREEN': 5, 'RED': 0}
+list_types (['bits_t', 'cplx_t', 'div_t', 'lldiv_t', 'mix_t', 'named_t', 'node_t', 'onefloat_t', 'pun_t', 'tagged_t'], ['node'], [])
+union 0x3fc00000 [0, 0, 192, 63]
+bits 5 300 999999 65f923f4
+mix -3 70000 -2 2.5 fd00000070110100feff0000000000000000000000000440
+list 1 2 True
+cast -56 65535 -9223372036854775803 0.10000000149011612 1 <cdata 'char' b'A'> 6
+conv int8_t * OverflowError integer 128 does not fit 'int8_t'
+conv uint32_t * OverflowError can't convert negative number to unsigned
+conv int64_t * OverflowError int too big to convert
+conv _Bool * OverflowError integer 2 does not fit '_Bool'
+conv char * TypeError initializer for ctype 'char' must be a bytes of length 1, not bytes
+conv float * TypeError must be real number, not str
+array 3 [10, 20, 30] 30 [10, 20, 30] int32_t[]
+index index too large for cdata 'int32_t[]' (expected 3 < 3)
+string b'hello' b'hel' 12 b'hello\x00world\x00'
+char16/32 가나다 😀 ok
+named b'cffi' 7
+from_buffer bytearray(b'XYZdef') 6
+with [0, 0, 0, 9]
+strlen 12 True -1234 81
+pointers 2 7 True
+strtod 6.02214076e+23 b' rest' 0.10000000149011612
+strtoll -9223372036854775807 18446744073709551615
+errno 9223372036854775807 34
+strtold 1.0 long double
+math 7 1152921504606846976 3072.0 1.4142135381698608 5.0
+out params 0.75 6 -0.25 -3.0
+struct results -3 -2 1000000000000 7
+snprintf 62 b'-42|str|3.1416|-1099511627776|A|4000000000|1.2e+04|2.500000|ff'
+sscanf 3 12 3.5 b'word'
+qsort [-500, -7, 0, 3, 19, 42, 77, 1000] True
+bsearch 4 19
+qsort strings [b'a', b'bb', b'ccc', b'dddd', b'eeeee']
+callback int8_t(int8_t, uint8_t) -120
+callback uint16_t(int16_t, uint16_t) 65534
+callback int64_t(int64_t, int32_t) -3298534883328
+callback float(float, double) 0.375
+callback double(double, int, float, long long) 1000000000002.75
+callback long double(long double, long double) 0.333333333333
+callback cplx_t(cplx_t, cplx_t) {'re': 5.0, 'im': 5.0}
+callback onefloat_t(onefloat_t, int) {'f': 5.0}
+callback tagged_t(tagged_t) {'big': -1125899906842624, 'tag': 8}
+callback void(int32_t *, int32_t) 42
+callback _Bool(_Bool) False
+callback int(int, ...) NotImplementedError
+many 7245 138
+mixed [0.5, 1.5, 3.5, 6.5, 10.5, 15.5, 21.5, 28.5, 36.5, 45.5, 55.5, 66.5]
+wide 51539607550.5
+onerror -1 0 ['ZeroDivisionError']
+handle True [1, 2, 3]
+gc [5]
+allocator [0, 0, 0]
+threads [(0, (2450, 1, 100, 0)), (1, (2500, 1, 100, 1)), (2, (2550, 1, 100, 2)), (3, (2600, 1, 100, 3)), (4, (2650, 1, 100, 4)), (5, (2700, 1, 100, 5))]
+out-of-line ['_cffi_check_abi.py'] 5 4 8
+done

@@ -1,0 +1,1148 @@
+diff -ruN a/src/closures.c b/src/closures.c
+--- a/src/closures.c
++++ b/src/closures.c
+@@ -31,7 +31,7 @@
+ #define _GNU_SOURCE 1
+ #endif
+ 
+-#ifndef __EMSCRIPTEN__
++#ifndef __wasm__ /* src/wasm/ffi.c has them */
+ 
+ #include <fficonfig.h>
+ #include <ffi.h>
+@@ -1102,4 +1102,4 @@
+ #endif /* FFI_CLOSURES */
+ 
+ #endif /* NetBSD with PROT_MPROTECT */
+-#endif /* __EMSCRIPTEN__ */
++#endif /* __wasm__ */
+diff -ruN a/src/wasm/ffi.c b/src/wasm/ffi.c
+--- a/src/wasm/ffi.c
++++ b/src/wasm/ffi.c
+@@ -25,6 +25,15 @@
+    DEALINGS IN THE SOFTWARE.
+    ----------------------------------------------------------------------- */
+ 
++#ifndef __EMSCRIPTEN__
++/* a Linux guest whose C library loads side modules (collaboCore's) */
++#if __SIZEOF_POINTER__ == 4
++#include "ffi_dlopen.c"
++#else
++#error "wasm64 without Emscripten is not supported"
++#endif
++#else
++
+ #include <ffi.h>
+ #include <ffi_common.h>
+ 
+@@ -859,3 +868,5 @@
+   return ffi_prep_closure_loc_js(closure, cif, (void *)fun, user_data,
+                                      codeloc);
+ }
++
++#endif /* __EMSCRIPTEN__ */
+diff -ruN a/src/wasm/ffi_dlopen.c b/src/wasm/ffi_dlopen.c
+--- a/src/wasm/ffi_dlopen.c
++++ b/src/wasm/ffi_dlopen.c
+@@ -0,0 +1,1075 @@
++/* -----------------------------------------------------------------------
++   ffi_dlopen.c - wasm32 Foreign Function Interface for a Linux guest whose
++                  C library loads WebAssembly side modules with dlopen
++                  (collaboCore's)
++
++   Permission is hereby granted, free of charge, to any person obtaining
++   a copy of this software and associated documentation files (the
++   ``Software''), to deal in the Software without restriction, including
++   without limitation the rights to use, copy, modify, merge, publish,
++   distribute, sublicense, and/or sell copies of the Software, and to
++   permit persons to whom the Software is furnished to do so, subject to
++   the following conditions:
++
++   The above copyright notice and this permission notice shall be included
++   in all copies or substantial portions of the Software.
++
++   THE SOFTWARE IS PROVIDED ``AS IS'', WITHOUT WARRANTY OF ANY KIND,
++   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++   NONINFRINGEMENT.  IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT
++   HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY,
++   WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++   OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
++   DEALINGS IN THE SOFTWARE.
++
++   WebAssembly checks the type of every indirect call, so ffi_call needs a
++   call of the function's own type, and a closure a function of its type:
++   code C cannot have ready for every type, and that WebAssembly cannot make
++   at run time but by instantiating a module, which here only the C
++   library's dlopen does — and the engine then instantiates it in every
++   thread of the process, its function table growing alike in each. So
++   these are small side modules, written for what they are needed for and
++   loaded with dlopen (from a file in $TMPDIR, /tmp, /var/tmp or /dev/shm,
++   removed once loaded; dlopen keeps libraries for good):
++
++     a call module      one per type, made at the first call of it:
++                        call(fn, args, ret) loads the arguments from args
++                        (8 bytes each), calls fn through the function table
++                        as that type and stores the result at ret
++     a reserve module   function table slots for closures (RESERVE of them,
++                        empty), and their first index exported as a global;
++                        ffi_closure_alloc hands one out as the closure's
++                        code, callable once the closure is prepared
++     a closure module   functions of a closure's type, made when it is
++                        prepared (unless its slot had a function of that
++                        type already): one for its slot and one for each
++                        free slot of its reserve module that has another
++                        type (so that closures of one type rarely need a
++                        module of their own: a store holds at most 10000
++                        instances), which element segments put in the
++                        slots, as each thread instantiates it; each puts its
++                        arguments in a frame on the C stack and calls the
++                        dispatcher here with the closure its slot is for
++
++   The C ABI (clang's for WebAssembly): an argument is one WebAssembly value
++   (i32 for integers of up to 32 bits and pointers; i64; f32; f64), a long
++   double two i64; a struct is passed as a pointer to a copy, but one with a
++   single element (recursively, of the struct's own size) as that element,
++   and an empty one not at all; _Complex as a struct. A struct, complex or
++   long double result (but a single-element struct's) goes to memory the
++   caller passes a pointer to, first. A variadic function takes a pointer to
++   its variadic arguments after the fixed ones: each at its alignment (at
++   least 4) in a buffer, a struct as a pointer to a copy (as va_arg reads
++   them).
++   ----------------------------------------------------------------------- */
++
++#include <ffi.h>
++#include <ffi_common.h>
++
++#include <dlfcn.h>
++#include <limits.h>
++#include <pthread.h>
++#include <stdint.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#define VARARGS_FLAG 1
++#define MAX_PARAMS 1000		/* the most parameters a function can have */
++#define RESERVE 32		/* closure slots per reserve module */
++
++/* ---- types ------------------------------------------------------------ */
++
++/* A WebAssembly function type, as a call's arguments and result lower to
++   ('i' i32, 'j' i64, 'f' f32, 'd' f64; 'v' no result); one per type, kept */
++struct sig {
++  struct sig *next;
++  void (*call) (void (*fn) (void), uint64_t *args, uint64_t *ret);
++  unsigned nparams;
++  char result;
++  char params[];
++};
++
++/* A reserve module's slots */
++struct reserve {
++  struct reserve *next;
++  unsigned serial;
++  uint32_t base;		/* the table index of the first */
++  uint32_t used;
++  ffi_closure *closure[RESERVE];	/* the closure each is for */
++  struct sig *type[RESERVE];	/* the type of the function it has */
++};
++
++/* What ffi_closure_alloc puts ahead of a closure: its slot */
++struct head {
++  uint32_t magic;
++  struct reserve *reserve;
++  unsigned slot;
++  uint32_t pad;
++};
++#define HEAD_MAGIC 0x6366666cu
++
++static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
++/* held while a closure gets its function: what slots have changes only so */
++static pthread_mutex_t bind_lock = PTHREAD_MUTEX_INITIALIZER;
++static struct sig *sigs[256];
++static struct reserve *reserves;
++static unsigned serial;		/* modules made */
++
++/* What a type is passed as: itself, or the single element a struct is
++   passed as (clang's isSingleElementStruct); NULL for an empty struct,
++   which is not passed at all. */
++static ffi_type *
++unbox (ffi_type *t)
++{
++  while (t->type == FFI_TYPE_STRUCT)
++    {
++      ffi_type *single = NULL, **e;
++      if (t->size == 0)
++	return NULL;
++      for (e = t->elements; e && *e; e++)
++	{
++	  if ((*e)->type == FFI_TYPE_STRUCT && (*e)->size == 0)
++	    continue;		/* empty fields do not count */
++	  if (single)
++	    return t;
++	  single = *e;
++	}
++      if (!single || single->size != t->size
++	  || single->type == FFI_TYPE_COMPLEX)
++	return t;
++      t = single;
++    }
++  return t;
++}
++
++static int
++is_memory (const ffi_type *t)
++{
++  return t->type == FFI_TYPE_STRUCT || t->type == FFI_TYPE_COMPLEX;
++}
++
++/* Whether a result of type t goes to memory the caller passes first */
++static int
++by_reference (ffi_type *rtype)
++{
++  ffi_type *t = unbox (rtype);
++  return t && (is_memory (t)
++#if FFI_TYPE_LONGDOUBLE != FFI_TYPE_DOUBLE
++	       || t->type == FFI_TYPE_LONGDOUBLE
++#endif
++	       );
++}
++
++/* The WebAssembly values an argument of type t (unboxed) is: their count,
++   their types to out; -1 for a type no argument has */
++static int
++values (const ffi_type *t, char *out)
++{
++  if (!t)
++    return 0;
++  switch (t->type)
++    {
++    case FFI_TYPE_INT:
++    case FFI_TYPE_UINT8:
++    case FFI_TYPE_SINT8:
++    case FFI_TYPE_UINT16:
++    case FFI_TYPE_SINT16:
++    case FFI_TYPE_UINT32:
++    case FFI_TYPE_SINT32:
++    case FFI_TYPE_POINTER:
++    case FFI_TYPE_STRUCT:
++    case FFI_TYPE_COMPLEX:
++      out[0] = 'i';
++      return 1;
++    case FFI_TYPE_UINT64:
++    case FFI_TYPE_SINT64:
++      out[0] = 'j';
++      return 1;
++    case FFI_TYPE_FLOAT:
++      out[0] = 'f';
++      return 1;
++    case FFI_TYPE_DOUBLE:
++      out[0] = 'd';
++      return 1;
++#if FFI_TYPE_LONGDOUBLE != FFI_TYPE_DOUBLE
++    case FFI_TYPE_LONGDOUBLE:
++      out[0] = out[1] = 'j';
++      return 2;
++#endif
++    default:
++      return -1;
++    }
++}
++
++/* The interned type of a cif's calls, NULL if it has none */
++static struct sig *
++sig_of (ffi_cif *cif)
++{
++  char params[MAX_PARAMS + 2], result;
++  unsigned n = 0, i, h = 5381;
++  ffi_type *rt = unbox (cif->rtype);
++  struct sig *s;
++
++  if (by_reference (cif->rtype))
++    {
++      params[n++] = 'i';
++      result = 'v';
++    }
++  else if (!rt || rt->type == FFI_TYPE_VOID)
++    result = 'v';
++  else if (values (rt, &result) != 1)
++    return NULL;
++  for (i = 0; i < cif->nfixedargs; i++)
++    {
++      int k = values (unbox (cif->arg_types[i]), params + n);
++      if (k < 0 || n + k > MAX_PARAMS)
++	return NULL;
++      n += k;
++    }
++  if (cif->flags & VARARGS_FLAG)
++    {
++      if (n + 1 > MAX_PARAMS)
++	return NULL;
++      params[n++] = 'i';
++    }
++  params[n] = 0;
++
++  for (i = 0; i < n; i++)
++    h = h * 33 + (unsigned char) params[i];
++  h = (h * 33 + (unsigned char) result) % 256;
++  pthread_mutex_lock (&lock);
++  for (s = sigs[h]; s; s = s->next)
++    if (s->result == result && s->nparams == n && !memcmp (s->params, params, n))
++      break;
++  if (!s && (s = calloc (1, sizeof *s + n + 1)))
++    {
++      s->nparams = n;
++      s->result = result;
++      memcpy (s->params, params, n + 1);
++      s->next = sigs[h];
++      sigs[h] = s;
++    }
++  pthread_mutex_unlock (&lock);
++  return s;
++}
++
++ffi_status FFI_HIDDEN
++ffi_prep_cif_machdep (ffi_cif *cif)
++{
++  if (cif->abi != FFI_WASM32)
++    return FFI_BAD_ABI;
++  if (!(cif->flags & VARARGS_FLAG))
++    cif->nfixedargs = cif->nargs;
++  cif->wasm_sig = sig_of (cif);
++  return cif->wasm_sig ? FFI_OK : FFI_BAD_TYPEDEF;
++}
++
++ffi_status FFI_HIDDEN
++ffi_prep_cif_machdep_var (ffi_cif *cif, unsigned nfixedargs, unsigned ntotalargs)
++{
++  cif->flags |= VARARGS_FLAG;
++  cif->nfixedargs = nfixedargs;
++  return ffi_prep_cif_machdep (cif);
++}
++
++/* ---- modules ---------------------------------------------------------- */
++
++struct buf {
++  unsigned char *p;
++  size_t n, cap;
++  int failed;
++};
++
++static void
++put (struct buf *b, const void *s, size_t n)
++{
++  if (b->failed)
++    return;
++  if (b->n + n > b->cap)
++    {
++      size_t cap = b->cap ? b->cap * 2 : 256;
++      unsigned char *p;
++      while (cap < b->n + n)
++	cap *= 2;
++      if (!(p = realloc (b->p, cap)))
++	{
++	  b->failed = 1;
++	  return;
++	}
++      b->p = p;
++      b->cap = cap;
++    }
++  memcpy (b->p + b->n, s, n);
++  b->n += n;
++}
++
++static void
++byte (struct buf *b, unsigned c)
++{
++  unsigned char x = c;
++  put (b, &x, 1);
++}
++
++static void
++uleb (struct buf *b, uint32_t v)
++{
++  do
++    {
++      unsigned c = v & 0x7f;
++      v >>= 7;
++      byte (b, c | (v ? 0x80 : 0));
++    }
++  while (v);
++}
++
++static void
++sleb (struct buf *b, int32_t v)
++{
++  int more;
++  do
++    {
++      unsigned c = v & 0x7f;
++      v >>= 7;
++      more = !((v == 0 && !(c & 0x40)) || (v == -1 && (c & 0x40)));
++      byte (b, c | (more ? 0x80 : 0));
++    }
++  while (more);
++}
++
++static void
++name (struct buf *b, const char *s)
++{
++  uleb (b, strlen (s));
++  put (b, s, strlen (s));
++}
++
++/* Section id with c's contents onto m (c emptied for the next) */
++static void
++section (struct buf *m, unsigned id, struct buf *c)
++{
++  if (c->failed)
++    m->failed = 1;
++  byte (m, id);
++  uleb (m, c->n);
++  put (m, c->p, c->n);
++  c->n = 0;
++}
++
++static unsigned
++valtype (char v)
++{
++  switch (v)
++    {
++    case 'j': return 0x7e;
++    case 'f': return 0x7d;
++    case 'd': return 0x7c;
++    default: return 0x7f;
++    }
++}
++
++static void
++functype (struct buf *b, unsigned n, const char *params, char result)
++{
++  unsigned i;
++  byte (b, 0x60);
++  uleb (b, n);
++  for (i = 0; i < n; i++)
++    byte (b, valtype (params[i]));
++  if (result == 'v')
++    byte (b, 0);
++  else
++    {
++      byte (b, 1);
++      byte (b, valtype (result));
++    }
++}
++
++/* A load (store) of a value of type v at offset from the address on the stack */
++static void
++memop (struct buf *b, char v, int store, uint32_t offset)
++{
++  static const unsigned char load_op[] = { 0x28, 0x29, 0x2a, 0x2b };
++  static const unsigned char store_op[] = { 0x36, 0x37, 0x38, 0x39 };
++  int k = v == 'j' ? 1 : v == 'f' ? 2 : v == 'd' ? 3 : 0;
++  byte (b, store ? store_op[k] : load_op[k]);
++  uleb (b, k == 1 || k == 3 ? 3 : 2);	/* natural alignment */
++  uleb (b, offset);
++}
++
++/* A function body onto c */
++static void
++body (struct buf *c, struct buf *f)
++{
++  if (f->failed)
++    c->failed = 1;
++  uleb (c, f->n);
++  put (c, f->p, f->n);
++}
++
++/* The module's header and dylink.0: the memory and table slots it needs */
++static void
++begin (struct buf *m, struct buf *c, uint32_t table_size)
++{
++  struct buf sub = { 0 };
++  put (m, "\0asm\1\0\0\0", 8);
++  name (c, "dylink.0");
++  uleb (&sub, 0);			/* no memory of its own */
++  uleb (&sub, 0);
++  uleb (&sub, table_size);
++  uleb (&sub, 0);
++  byte (c, 1);				/* WASM_DYLINK_MEM_INFO */
++  uleb (c, sub.n);
++  put (c, sub.p, sub.n);
++  if (sub.failed)
++    c->failed = 1;
++  free (sub.p);
++  section (m, 0, c);
++}
++
++static void
++import_memory_and_table (struct buf *c)
++{
++  name (c, "env");
++  name (c, "memory");
++  byte (c, 0x02);			/* memory: shared, at most 4 GiB */
++  byte (c, 0x03);
++  uleb (c, 0);
++  uleb (c, 65536);
++  name (c, "env");
++  name (c, "__indirect_function_table");
++  byte (c, 0x01);			/* table of funcref */
++  byte (c, 0x70);
++  byte (c, 0x00);
++  uleb (c, 0);
++}
++
++/* The name of export what of module n. Each module's exports have names of
++   their own: dlopen returns a library it has already when a file has the
++   inode of one it loaded (which an inode removed can be again), and a name
++   that library lacks tells them apart. */
++static void
++export_name (char *out, size_t cap, unsigned n, const char *what)
++{
++  static char me;
++  snprintf (out, cap, "ffi_%lx_%u_%s", (unsigned long) (uintptr_t) &me, n, what);
++}
++
++static unsigned
++next_serial (void)
++{
++  unsigned n;
++  pthread_mutex_lock (&lock);
++  n = ++serial;
++  pthread_mutex_unlock (&lock);
++  return n;
++}
++
++/* The module in m loaded with dlopen (mode); NULL (and why to *error) if
++   not. first: an export it has. */
++static void *
++load (struct buf *m, int mode, const char *first, const char **error)
++{
++  const char *dirs[] = { getenv ("TMPDIR"), "/tmp", "/var/tmp", "/dev/shm" };
++  char path[PATH_MAX];
++  unsigned i, again = 0;
++  *error = m->failed ? "out of memory" : "no folder to write it to ($TMPDIR, /tmp)";
++  if (m->failed)
++    return NULL;
++  for (i = 0; i < sizeof dirs / sizeof *dirs; i++)
++    {
++      size_t done = 0;
++      void *h;
++      int fd;
++      if (!dirs[i] || !*dirs[i]
++	  || (size_t) snprintf (path, sizeof path, "%s/.libffi-XXXXXX", dirs[i]) >= sizeof path
++	  || (fd = mkstemp (path)) < 0)
++	continue;
++      while (done < m->n)
++	{
++	  ssize_t w = write (fd, m->p + done, m->n - done);
++	  if (w <= 0)
++	    break;
++	  done += w;
++	}
++      close (fd);
++      h = done == m->n ? dlopen (path, RTLD_NOW | mode) : NULL;
++      if (!h && done == m->n)
++	*error = dlerror ();
++      unlink (path);
++      if (h && dlsym (h, first))
++	return h;
++      if (h)
++	{
++	  /* an older library of the same inode: again, in another file */
++	  dlclose (h);
++	  *error = "dlopen gave another library";
++	  if (++again < 8)
++	    i--;
++	}
++    }
++  return NULL;
++}
++
++static void
++fail (const char *what, const struct sig *s, const char *error)
++{
++  if (s)
++    fprintf (stderr, "libffi: no %s for (%s) -> %c: %s\n", what, s->params, s->result, error);
++  else
++    fprintf (stderr, "libffi: no %s: %s\n", what, error);
++}
++
++/* The call module of s, to s->call */
++static void
++make_call (struct sig *s)
++{
++  struct buf m = { 0 }, c = { 0 }, f = { 0 };
++  char export[64];
++  const char *error;
++  unsigned i, me = next_serial ();
++  void *h;
++
++  export_name (export, sizeof export, me, "call");
++  begin (&m, &c, 0);
++  uleb (&c, 2);				/* type 0: the call's; type 1: call()'s */
++  functype (&c, s->nparams, s->params, s->result);
++  functype (&c, 3, "iii", 'v');
++  section (&m, 1, &c);
++  uleb (&c, 2);
++  import_memory_and_table (&c);
++  section (&m, 2, &c);
++  uleb (&c, 1);				/* function 0: call() */
++  uleb (&c, 1);
++  section (&m, 3, &c);
++  uleb (&c, 1);
++  name (&c, export);
++  byte (&c, 0x00);
++  uleb (&c, 0);
++  section (&m, 7, &c);
++
++  uleb (&f, 0);				/* no locals */
++  if (s->result != 'v')
++    {
++      byte (&f, 0x20);			/* local.get ret */
++      uleb (&f, 2);
++    }
++  for (i = 0; i < s->nparams; i++)
++    {
++      byte (&f, 0x20);			/* local.get args; load */
++      uleb (&f, 1);
++      memop (&f, s->params[i], 0, 8 * i);
++    }
++  byte (&f, 0x20);			/* local.get fn */
++  uleb (&f, 0);
++  byte (&f, 0x11);			/* call_indirect (type 0) (table 0) */
++  uleb (&f, 0);
++  uleb (&f, 0);
++  if (s->result != 'v')
++    memop (&f, s->result, 1, 0);
++  byte (&f, 0x0b);
++  uleb (&c, 1);
++  body (&c, &f);
++  section (&m, 10, &c);
++
++  if ((h = load (&m, RTLD_LOCAL, export, &error)))
++    {
++      void *call = dlsym (h, export);
++      pthread_mutex_lock (&lock);
++      if (!s->call)
++	s->call = (void (*) (void (*) (void), uint64_t *, uint64_t *)) call;
++      pthread_mutex_unlock (&lock);
++    }
++  else
++    fail ("call", s, error);
++  free (m.p);
++  free (c.p);
++  free (f.p);
++}
++
++/* A reserve module: RESERVE empty slots; NULL if it cannot be made */
++static struct reserve *
++make_reserve (void)
++{
++  struct buf m = { 0 }, c = { 0 };
++  char export[64];
++  const char *error;
++  struct reserve *r = calloc (1, sizeof *r);
++  uint32_t *base;
++  void *h = NULL;
++
++  if (!r)
++    return NULL;
++  r->serial = next_serial ();
++  export_name (export, sizeof export, r->serial, "base");
++  begin (&m, &c, RESERVE);
++  uleb (&c, 1);				/* global 0: __table_base */
++  name (&c, "env");
++  name (&c, "__table_base");
++  byte (&c, 0x03);
++  byte (&c, 0x7f);
++  byte (&c, 0x00);
++  section (&m, 2, &c);
++  uleb (&c, 1);				/* global 1 = __table_base, exported */
++  byte (&c, 0x7f);
++  byte (&c, 0x00);
++  byte (&c, 0x23);
++  uleb (&c, 0);
++  byte (&c, 0x0b);
++  section (&m, 6, &c);
++  uleb (&c, 1);
++  name (&c, export);
++  byte (&c, 0x03);
++  uleb (&c, 1);
++  section (&m, 7, &c);
++
++  /* global: the closure modules import that global by name. It has no memory
++     of its own, so its base (0) adds nothing to the "address" dlsym says. */
++  if ((h = load (&m, RTLD_GLOBAL, export, &error)) && (base = dlsym (h, export)))
++    r->base = (uint32_t) (uintptr_t) base;
++  else
++    {
++      fail ("closure slots", NULL, h ? dlerror () : error);
++      free (r);
++      r = NULL;
++    }
++  free (m.p);
++  free (c.p);
++  return r;
++}
++
++static void dispatch (ffi_closure *closure, uint64_t *raw);
++
++/* A closure module: functions of type s in slots[0 ... n-1] of r; 0 once
++   they are in */
++static int
++make_closure (struct sig *s, struct reserve *r, const unsigned *slots, unsigned n)
++{
++  struct buf m = { 0 }, c = { 0 }, f = { 0 };
++  char export[64], base[64];
++  const char *error;
++  unsigned i, j, me = next_serial ();
++  uint32_t frame = (8 * (s->nparams + 1) + 15) & ~15u;
++  void *h;
++  int ok;
++
++  export_name (export, sizeof export, me, "f");
++  export_name (base, sizeof base, r->serial, "base");
++  begin (&m, &c, 0);
++  uleb (&c, 2);				/* type 0: the closure's; type 1: dispatch's */
++  functype (&c, s->nparams, s->params, s->result);
++  functype (&c, 2, "ii", 'v');
++  section (&m, 1, &c);
++  uleb (&c, 4);
++  import_memory_and_table (&c);
++  name (&c, "env");			/* global 0: the stack pointer */
++  name (&c, "__stack_pointer");
++  byte (&c, 0x03);
++  byte (&c, 0x7f);
++  byte (&c, 0x01);
++  name (&c, "env");			/* global 1: the reserve's first slot */
++  name (&c, base);
++  byte (&c, 0x03);
++  byte (&c, 0x7f);
++  byte (&c, 0x00);
++  section (&m, 2, &c);
++  uleb (&c, n);				/* function j: slots[j]'s */
++  for (j = 0; j < n; j++)
++    uleb (&c, 0);
++  section (&m, 3, &c);
++  uleb (&c, 1);
++  name (&c, export);
++  byte (&c, 0x00);
++  uleb (&c, 0);
++  section (&m, 7, &c);
++  /* (elem (i32.add (global.get 1) (i32.const slots[j])) func j): into the slots */
++  uleb (&c, n);
++  for (j = 0; j < n; j++)
++    {
++      byte (&c, 0x00);
++      byte (&c, 0x23);
++      uleb (&c, 1);
++      byte (&c, 0x41);
++      sleb (&c, slots[j]);
++      byte (&c, 0x6a);
++      byte (&c, 0x0b);
++      uleb (&c, 1);
++      uleb (&c, j);
++    }
++  section (&m, 9, &c);
++
++  uleb (&c, n);
++  for (j = 0; j < n; j++)
++    {
++      f.n = 0;
++      uleb (&f, 1);			/* one local: the frame */
++      uleb (&f, 1);
++      byte (&f, 0x7f);
++      /* frame = __stack_pointer -= FRAME */
++      byte (&f, 0x23); uleb (&f, 0);
++      byte (&f, 0x41); sleb (&f, frame);
++      byte (&f, 0x6b);
++      byte (&f, 0x22); uleb (&f, s->nparams);
++      byte (&f, 0x24); uleb (&f, 0);
++      /* the arguments to frame[i] */
++      for (i = 0; i < s->nparams; i++)
++	{
++	  byte (&f, 0x20); uleb (&f, s->nparams);
++	  byte (&f, 0x20); uleb (&f, i);
++	  memop (&f, s->params[i], 1, 8 * i);
++	}
++      /* dispatch (r->closure[slots[j]], frame) */
++      byte (&f, 0x41); sleb (&f, (int32_t) (uintptr_t) &r->closure[slots[j]]);
++      memop (&f, 'i', 0, 0);
++      byte (&f, 0x20); uleb (&f, s->nparams);
++      byte (&f, 0x41); sleb (&f, (int32_t) (uintptr_t) dispatch);
++      byte (&f, 0x11); uleb (&f, 1); uleb (&f, 0);
++      /* the result from frame[nparams] */
++      if (s->result != 'v')
++	{
++	  byte (&f, 0x20); uleb (&f, s->nparams);
++	  memop (&f, s->result, 0, 8 * s->nparams);
++	}
++      /* __stack_pointer = frame + FRAME */
++      byte (&f, 0x20); uleb (&f, s->nparams);
++      byte (&f, 0x41); sleb (&f, frame);
++      byte (&f, 0x6a);
++      byte (&f, 0x24); uleb (&f, 0);
++      byte (&f, 0x0b);
++      body (&c, &f);
++    }
++  section (&m, 10, &c);
++
++  ok = (h = load (&m, RTLD_LOCAL, export, &error)) != NULL;
++  if (!ok)
++    fail ("closure", s, error);
++  free (m.p);
++  free (c.p);
++  free (f.p);
++  return ok ? 0 : -1;
++}
++
++/* ---- calls ------------------------------------------------------------ */
++
++static size_t
++align_up (size_t n, size_t a)
++{
++  return (n + a - 1) & ~(a - 1);
++}
++
++/* Where a variadic argument of type t (unboxed, not NULL) goes: its
++   alignment and size in the buffer */
++static void
++va_slot (const ffi_type *t, size_t *align, size_t *size)
++{
++  if (is_memory (t))
++    *align = *size = 4;		/* a pointer to a copy */
++  else
++    {
++      *align = t->alignment > 4 ? t->alignment : 4;
++      *size = align_up (t->size, 4);
++    }
++}
++
++/* Where a copy of a struct of type t goes: the next room in *copies */
++static char *
++copy (char **copies, const ffi_type *t, const void *p)
++{
++  char *at = (char *) align_up ((uintptr_t) *copies, t->alignment ? t->alignment : 1);
++  memcpy (at, p, t->size);
++  *copies = at + t->size;
++  return at;
++}
++
++/* One argument as the WebAssembly value(s) raw[k], from p; struct copies
++   to *copies. The next k. */
++static unsigned
++put_arg (uint64_t *raw, unsigned k, ffi_type *type, void *p, char **copies)
++{
++  ffi_type *t = unbox (type);
++  if (!t)
++    return k;
++  raw[k] = 0;
++  switch (t->type)
++    {
++    case FFI_TYPE_SINT8:
++      raw[k] = (uint32_t) (int32_t) *(int8_t *) p;
++      break;
++    case FFI_TYPE_UINT8:
++      raw[k] = *(uint8_t *) p;
++      break;
++    case FFI_TYPE_SINT16:
++      raw[k] = (uint32_t) (int32_t) *(int16_t *) p;
++      break;
++    case FFI_TYPE_UINT16:
++      raw[k] = *(uint16_t *) p;
++      break;
++    case FFI_TYPE_STRUCT:
++    case FFI_TYPE_COMPLEX:
++      raw[k] = (uintptr_t) copy (copies, t, p);
++      break;
++#if FFI_TYPE_LONGDOUBLE != FFI_TYPE_DOUBLE
++    case FFI_TYPE_LONGDOUBLE:
++      memcpy (&raw[k], p, 16);
++      return k + 2;
++#endif
++    default:
++      memcpy (&raw[k], p, t->size);
++      break;
++    }
++  return k + 1;
++}
++
++void
++ffi_call (ffi_cif *cif, void (*fn) (void), void *rvalue, void **avalue)
++{
++  struct sig *s = cif->wasm_sig;
++  unsigned k = 0, i;
++  size_t need = 16, va_size = 0;
++  char *copies, *va = NULL;
++  uint64_t *raw;
++
++  if (!s->call)
++    make_call (s);
++  if (!s->call)
++    abort ();
++  raw = alloca (8 * (s->nparams + 1));
++
++  /* room for the copies: the variadic buffer, the structs, the result */
++  for (i = 0; i < cif->nargs; i++)
++    {
++      ffi_type *t = unbox (cif->arg_types[i]);
++      if (t && is_memory (t))
++	need += t->size + t->alignment;
++      if (t && i >= cif->nfixedargs)
++	{
++	  size_t align, size;
++	  va_slot (t, &align, &size);
++	  va_size = align_up (va_size, align) + size;
++	}
++    }
++  if (by_reference (cif->rtype) && !rvalue)
++    need += cif->rtype->size + 16;
++  copies = alloca (need + va_size);
++  if (cif->flags & VARARGS_FLAG)
++    {
++      va = (char *) align_up ((uintptr_t) copies, 16);
++      copies = va + va_size;
++    }
++
++  if (by_reference (cif->rtype))
++    {
++      if (!rvalue)
++	{
++	  rvalue = (void *) align_up ((uintptr_t) copies, 16);
++	  copies = (char *) rvalue + cif->rtype->size;
++	}
++      raw[k++] = (uintptr_t) rvalue;
++    }
++  for (i = 0; i < cif->nfixedargs; i++)
++    k = put_arg (raw, k, cif->arg_types[i], avalue[i], &copies);
++  if (cif->flags & VARARGS_FLAG)
++    {
++      size_t at = 0;
++      for (; i < cif->nargs; i++)
++	{
++	  ffi_type *t = unbox (cif->arg_types[i]);
++	  size_t align, size;
++	  if (!t)
++	    continue;
++	  va_slot (t, &align, &size);
++	  at = align_up (at, align);
++	  if (is_memory (t))
++	    *(void **) (va + at) = copy (&copies, t, avalue[i]);
++	  else
++	    memcpy (va + at, avalue[i], t->size);
++	  at += size;
++	}
++      raw[k++] = (uintptr_t) va;
++    }
++
++  raw[s->nparams] = 0;
++  s->call (fn, raw, &raw[s->nparams]);
++
++  if (by_reference (cif->rtype) || !rvalue)
++    return;
++  /* integers narrower than a register widened to ffi_arg, as everywhere */
++  switch (cif->rtype->type)
++    {
++    case FFI_TYPE_VOID:
++      break;
++    case FFI_TYPE_SINT8:
++      *(ffi_sarg *) rvalue = (int8_t) raw[s->nparams];
++      break;
++    case FFI_TYPE_UINT8:
++      *(ffi_arg *) rvalue = (uint8_t) raw[s->nparams];
++      break;
++    case FFI_TYPE_SINT16:
++      *(ffi_sarg *) rvalue = (int16_t) raw[s->nparams];
++      break;
++    case FFI_TYPE_UINT16:
++      *(ffi_arg *) rvalue = (uint16_t) raw[s->nparams];
++      break;
++    case FFI_TYPE_INT:
++    case FFI_TYPE_SINT32:
++      *(ffi_sarg *) rvalue = (int32_t) raw[s->nparams];
++      break;
++    case FFI_TYPE_UINT32:
++      *(ffi_arg *) rvalue = (uint32_t) raw[s->nparams];
++      break;
++    default:			/* the rest, a single-element struct too, as it is */
++      memcpy (rvalue, &raw[s->nparams], cif->rtype->size);
++      break;
++    }
++}
++
++/* ---- closures --------------------------------------------------------- */
++
++/* What a closure module's function calls: its closure, its arguments as
++   WebAssembly values in raw[0 ...] (the result goes to raw[nparams]) */
++static void
++dispatch (ffi_closure *closure, uint64_t *raw)
++{
++  ffi_cif *cif = closure->cif;
++  struct sig *s = cif->wasm_sig;
++  void **avalue = alloca (sizeof (void *) * (cif->nargs + 1));
++  void *rvalue = &raw[s->nparams];
++  unsigned k = 0, i;
++
++  raw[s->nparams] = 0;
++  if (by_reference (cif->rtype))
++    rvalue = (void *) (uintptr_t) raw[k++];
++  for (i = 0; i < cif->nfixedargs; i++)
++    {
++      ffi_type *t = unbox (cif->arg_types[i]);
++      if (!t)
++	avalue[i] = raw;	/* nothing to read */
++      else if (is_memory (t))
++	avalue[i] = (void *) (uintptr_t) raw[k++];
++#if FFI_TYPE_LONGDOUBLE != FFI_TYPE_DOUBLE
++      else if (t->type == FFI_TYPE_LONGDOUBLE)
++	avalue[i] = &raw[k], k += 2;
++#endif
++      else
++	avalue[i] = &raw[k++];	/* little-endian: a narrower type is at the start */
++    }
++  if (cif->flags & VARARGS_FLAG)
++    {
++      char *va = (char *) (uintptr_t) raw[k++];
++      for (; i < cif->nargs; i++)
++	{
++	  ffi_type *t = unbox (cif->arg_types[i]);
++	  size_t align, size;
++	  if (!t)
++	    {
++	      avalue[i] = va;
++	      continue;
++	    }
++	  va_slot (t, &align, &size);
++	  va = (char *) align_up ((uintptr_t) va, align);
++	  avalue[i] = is_memory (t) ? *(void **) va : va;
++	  va += size;
++	}
++    }
++  closure->fun (cif, rvalue, avalue, closure->user_data);
++}
++
++void *
++ffi_closure_alloc (size_t size, void **code)
++{
++  struct reserve *r;
++  struct head *h;
++  unsigned slot;
++
++  if (!code || !(h = calloc (1, sizeof *h + (size > sizeof (ffi_closure) ? size : sizeof (ffi_closure)))))
++    return NULL;
++  for (;;)
++    {
++      struct reserve *made;
++      pthread_mutex_lock (&lock);
++      for (r = reserves; r && r->used == 0xffffffffu; r = r->next)
++	;
++      if (r)
++	break;			/* (with the lock) */
++      pthread_mutex_unlock (&lock);
++      if (!(made = make_reserve ()))
++	{
++	  free (h);
++	  return NULL;
++	}
++      pthread_mutex_lock (&lock);
++      made->next = reserves;
++      reserves = made;
++      pthread_mutex_unlock (&lock);
++    }
++  for (slot = 0; r->used & (1u << slot); slot++)
++    ;
++  r->used |= 1u << slot;
++  pthread_mutex_unlock (&lock);
++
++  h->magic = HEAD_MAGIC;
++  h->reserve = r;
++  h->slot = slot;
++  ((ffi_closure *) (h + 1))->ftramp = (void *) (uintptr_t) (r->base + slot);
++  *code = ((ffi_closure *) (h + 1))->ftramp;
++  return h + 1;
++}
++
++void
++ffi_closure_free (void *closure)
++{
++  struct head *h = (struct head *) closure - 1;
++  if (!closure)
++    return;
++  pthread_mutex_lock (&lock);
++  h->reserve->closure[h->slot] = NULL;
++  h->reserve->used &= ~(1u << h->slot);
++  pthread_mutex_unlock (&lock);
++  h->magic = 0;
++  free (h);
++}
++
++ffi_status
++ffi_prep_closure_loc (ffi_closure *closure, ffi_cif *cif,
++		      void (*fun) (ffi_cif *, void *, void **, void *),
++		      void *user_data, void *codeloc)
++{
++  struct head *h = (struct head *) closure - 1;
++  struct sig *s = cif->wasm_sig;
++  struct reserve *r;
++  unsigned slots[RESERVE], n = 0, j;
++
++  if (cif->abi != FFI_WASM32 || !s)
++    return FFI_BAD_ABI;
++  /* only a closure from ffi_closure_alloc has a function: its slot's */
++  if (h->magic != HEAD_MAGIC || codeloc != closure->ftramp)
++    return FFI_BAD_ABI;
++  r = h->reserve;
++  closure->cif = cif;
++  closure->fun = fun;
++  closure->user_data = user_data;
++  __atomic_store_n (&r->closure[h->slot], closure, __ATOMIC_RELEASE);
++  pthread_mutex_lock (&bind_lock);
++  if (r->type[h->slot] != s)
++    {
++      /* its slot, and the free ones of another type: they may be handed out
++	 meanwhile, but get no function of another type before this is in */
++      slots[n++] = h->slot;
++      pthread_mutex_lock (&lock);
++      for (j = 0; j < RESERVE; j++)
++	if (j != h->slot && !(r->used & (1u << j)) && r->type[j] != s)
++	  slots[n++] = j;
++      pthread_mutex_unlock (&lock);
++      if (make_closure (s, r, slots, n) < 0)
++	{
++	  pthread_mutex_unlock (&bind_lock);
++	  return FFI_BAD_TYPEDEF;
++	}
++      for (j = 0; j < n; j++)
++	r->type[slots[j]] = s;
++    }
++  pthread_mutex_unlock (&bind_lock);
++  return FFI_OK;
++}
+diff -ruN a/src/wasm/ffitarget.h b/src/wasm/ffitarget.h
+--- a/src/wasm/ffitarget.h
++++ b/src/wasm/ffitarget.h
+@@ -43,7 +43,8 @@
+ typedef enum ffi_abi {
+   FFI_FIRST_ABI = 0,
+ #if __SIZEOF_POINTER__ == 4
+-  FFI_WASM32, // "raw", no structures, varargs, or closures (not implemented!)
++  FFI_WASM32, // clang's C ABI: on Emscripten "raw", no structures, varargs, or closures
++              // (not implemented!); on Linux guests that dlopen side modules, all (ffi_dlopen.c)
+   FFI_WASM32_EMSCRIPTEN, // structures, varargs, and split 64-bit params
+ #elif __SIZEOF_POINTER__ == 8
+   FFI_WASM64,
+@@ -74,6 +75,12 @@
+ #define FFI_TRAMPOLINE_SIZE 4
+ // #define FFI_NATIVE_RAW_API 0
+ #define FFI_TARGET_SPECIFIC_VARIADIC 1
++#if defined(__EMSCRIPTEN__) || __SIZEOF_POINTER__ != 4
+ #define FFI_EXTRA_CIF_FIELDS  unsigned int nfixedargs
++#else
++/* ffi_dlopen.c: the WebAssembly type of the cif's calls */
++#define FFI_EXTRA_CIF_FIELDS  unsigned int nfixedargs; void *wasm_sig
++#define FFI_TARGET_HAS_COMPLEX_TYPE
++#endif
+ 
+ #endif

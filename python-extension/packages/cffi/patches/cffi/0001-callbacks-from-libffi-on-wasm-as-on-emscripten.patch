@@ -1,0 +1,29 @@
+diff -ruN cffi-a/src/c/_cffi_backend.c cffi-b/src/c/_cffi_backend.c
+--- a/src/c/_cffi_backend.c
++++ b/src/c/_cffi_backend.c
+@@ -117,7 +117,10 @@
+ # define CFFI_CHECK_FFI_PREP_CIF_VAR __builtin_available(macos 10.15, ios 13, watchos 6, tvos 13, *)
+ # define CFFI_CHECK_FFI_PREP_CIF_VAR_MAYBE 1
+ 
+-#elif defined(__EMSCRIPTEN__)
++#elif defined(__EMSCRIPTEN__) || defined(__wasm__)
++/* WebAssembly: no memory is executable, libffi makes each callback a function
++   of its own (on Emscripten in JavaScript; on a Linux guest that loads side
++   modules, as one: libffi's src/wasm/ffi_dlopen.c) */
+ 
+ # define CFFI_CHECK_FFI_CLOSURE_ALLOC 1
+ # define CFFI_CHECK_FFI_CLOSURE_ALLOC_MAYBE 1
+@@ -139,7 +142,13 @@
+ 
+ /* always includes this, even if it turns out not to be used on NetBSD
+    because calls are behind "if (0)" */
++#if defined(__wasm__) && !defined(__EMSCRIPTEN__)
++/* (which maps memory executable: none is, nor can a guest map memory) */
++static void cffi_closure_free(ffi_closure *p) { }
++static ffi_closure *cffi_closure_alloc(void) { return NULL; }
++#else
+ #include "malloc_closure.h"
++#endif
+ 
+ 
+ #if PY_VERSION_HEX < 0x030900a4

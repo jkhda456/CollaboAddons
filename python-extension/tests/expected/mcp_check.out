@@ -1,0 +1,125 @@
+versions 2.3.0 2.3.0 2026-07-28 jsonschema 4.26.0 0.37.0 2026.9.1 26.1.0 2.15.1 0.0.32 1.9.0 0.54.0 3.5.0 click 1.45.1 mcp referencing sse_starlette rpds
+metaschema Draft3Validator http://json-schema.org/draft-03/schema# True
+metaschema Draft4Validator http://json-schema.org/draft-04/schema# True
+metaschema Draft6Validator http://json-schema.org/draft-06/schema# True
+metaschema Draft7Validator http://json-schema.org/draft-07/schema# True
+metaschema Draft201909Validator https://json-schema.org/draft/2019-09/schema True
+metaschema Draft202012Validator https://json-schema.org/draft/2020-12/schema True
+specifications 20
+valid True []
+error [] unevaluatedProperties Unevaluated properties are not allowed ('extra' was unexpected)
+error ['age'] minimum -1 is less than the minimum of 0
+error ['email'] format 'no-at' is not a 'email'
+error ['ip'] format '300.1.1.1' is not a 'ipv4'
+error ['name'] minLength 'A' is too short
+error ['point'] additionalProperties Additional properties are not allowed ('z' was unexpected)
+error ['point'] required 'y' is a required property
+error ['tags'] uniqueItems ['a', 'a', 'z'] has non-unique elements
+error ['tags', 2] enum 'z' is not one of ['a', 'b', 'c']
+error ['tree'] required 'value' is a required property
+error ['tree', 'children', 0, 'value'] type 'x' is not of type 'number'
+error ['when'] format '1843-13-40' is not a 'date'
+best match Unevaluated properties are not allowed ('extra' was unexpected)
+validate ValidationError 5 is not of type 'string' ['properties', 'name', 'type']
+schema error 'nothing' is not valid under any of the given schemas
+dynamicRef True False
+lookup {'type': 'number'} ['urn:check:list', 'urn:check:point']
+anchor {'$anchor': 'num', 'type': 'number'} referencing
+hs256 eyJhbGciOiJIUzI1NiIsImtpZCI6ImsxIiwidHlwIjoiSldUIn0.eyJzdWIiOiJhZGEiLCJhdWQiOiJjaGVjayIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAwLCJzY29wZSI6WyJyZWFkIiwid3JpdGUiXX0.dPFEYdJ5zH80epWCVSB7iLJ4g37JVtnJagMYWogg7F4
+hs256 decoded {'sub': 'ada', 'aud': 'check', 'iat': 1700000000, 'exp': 4102444800, 'scope': ['read', 'write']}
+header {'alg': 'HS256', 'kid': 'k1', 'typ': 'JWT'}
+eddsa eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhZGEiLCJhdWQiOiJjaGVjayIsImlhdCI6MTcwMDAwMDAwMCwiZXhwIjo0MTAyNDQ0ODAwLCJzY29wZSI6WyJyZWFkIiwid3JpdGUiXX0.kcp3gBG32dOKI9G0u6RLQ0osEMFAxMRfr4K93bosc1iE6ZAOr-5fuC5wS9S2hB0YLdjE6gesPQDzJ0i84dQtCQ
+eddsa decoded ['read', 'write']
+jwk OKP EdDSA ada
+jwt expired ExpiredSignatureError Signature has expired
+jwt audience InvalidAudienceError Audience doesn't match
+jwt wrong algorithm InvalidAlgorithmError
+part [(b'Content-Disposition', b'form-data; name="title"')] b'Hello'
+part [(b'Content-Disposition', b'form-data; name="file"; filename="a.txt"'), (b'Content-Type', b'text/plain')] b'line one\r\nline two'
+options (b'form-data', {b'name': b'file', b'filename': b'a.txt'})
+[in-process auto] server check instructions a server for the check
+[in-process auto] tool add 'Add two numbers.' {"properties": {"a": {"title": "A", "type": "integer"}, "b": {"title": "B", "type": "integer"}}, "required": ["a", "b"], "title": "addArguments", "type": "object"}
+[in-process auto] tool fail 'Always fails.' {"properties": {"why": {"title": "Why", "type": "string"}}, "required": ["why"], "title": "failArguments", "type": "object"}
+[in-process auto] tool stats 'Count, sum and mean.' {"properties": {"values": {"items": {"type": "number"}, "title": "Values", "type": "array"}}, "required": ["values"], "title": "statsArguments", "type": "object"}
+[in-process auto] tool steps 'Reports its progress, and logs.' {"properties": {"n": {"title": "N", "type": "integer"}}, "required": ["n"], "title": "stepsArguments", "type": "object"}
+[in-process auto] add False {'result': 42} ['42']
+[in-process auto] stats False {"count": 3.0, "mean": 3.0, "sum": 9.0}
+[in-process auto] fail True ['Error executing tool fail']
+[in-process auto] add (invalid) True True
+[in-process auto] steps ['3 steps'] [(1, 3, 'step 1'), (2, 3, 'step 2'), (3, 3, 'step 3')]
+[in-process auto] resources [('config://app', 'config', 'text/plain')]
+[in-process auto] templates [('greeting://{name}', 'greeting')]
+[in-process auto] read config://app [('config://app', '{"debug": false, "level": 3}')]
+[in-process auto] read greeting://Ada [('greeting://Ada', 'Hello, Ada!')]
+[in-process auto] prompts [('review', [('code', True), ('language', False)])]
+[in-process auto] prompt [('user', 'Review this python code:\nprint(1)')]
+[in-process legacy] server check instructions a server for the check
+[in-process legacy] tool add 'Add two numbers.' {"properties": {"a": {"title": "A", "type": "integer"}, "b": {"title": "B", "type": "integer"}}, "required": ["a", "b"], "title": "addArguments", "type": "object"}
+[in-process legacy] tool fail 'Always fails.' {"properties": {"why": {"title": "Why", "type": "string"}}, "required": ["why"], "title": "failArguments", "type": "object"}
+[in-process legacy] tool stats 'Count, sum and mean.' {"properties": {"values": {"items": {"type": "number"}, "title": "Values", "type": "array"}}, "required": ["values"], "title": "statsArguments", "type": "object"}
+[in-process legacy] tool steps 'Reports its progress, and logs.' {"properties": {"n": {"title": "N", "type": "integer"}}, "required": ["n"], "title": "stepsArguments", "type": "object"}
+[in-process legacy] add False {'result': 42} ['42']
+[in-process legacy] stats False {"count": 3.0, "mean": 3.0, "sum": 9.0}
+[in-process legacy] fail True ['Error executing tool fail']
+[in-process legacy] add (invalid) True True
+[in-process legacy] steps ['3 steps'] [(1.0, 3.0, 'step 1'), (2.0, 3.0, 'step 2'), (3.0, 3.0, 'step 3')]
+[in-process legacy] resources [('config://app', 'config', 'text/plain')]
+[in-process legacy] templates [('greeting://{name}', 'greeting')]
+[in-process legacy] read config://app [('config://app', '{"debug": false, "level": 3}')]
+[in-process legacy] read greeting://Ada [('greeting://Ada', 'Hello, Ada!')]
+[in-process legacy] prompts [('review', [('code', True), ('language', False)])]
+[in-process legacy] prompt [('user', 'Review this python code:\nprint(1)')]
+[stdio] server check instructions a server for the check
+[stdio] tool add 'Add two numbers.' {"properties": {"a": {"title": "A", "type": "integer"}, "b": {"title": "B", "type": "integer"}}, "required": ["a", "b"], "title": "addArguments", "type": "object"}
+[stdio] tool fail 'Always fails.' {"properties": {"why": {"title": "Why", "type": "string"}}, "required": ["why"], "title": "failArguments", "type": "object"}
+[stdio] tool stats 'Count, sum and mean.' {"properties": {"values": {"items": {"type": "number"}, "title": "Values", "type": "array"}}, "required": ["values"], "title": "statsArguments", "type": "object"}
+[stdio] tool steps 'Reports its progress, and logs.' {"properties": {"n": {"title": "N", "type": "integer"}}, "required": ["n"], "title": "stepsArguments", "type": "object"}
+[stdio] add False {'result': 42} ['42']
+[stdio] stats False {"count": 3.0, "mean": 3.0, "sum": 9.0}
+[stdio] fail True ['Error executing tool fail']
+[stdio] add (invalid) True True
+[stdio] steps ['3 steps'] [(1.0, 3.0, 'step 1'), (2.0, 3.0, 'step 2'), (3.0, 3.0, 'step 3')]
+[stdio] resources [('config://app', 'config', 'text/plain')]
+[stdio] templates [('greeting://{name}', 'greeting')]
+[stdio] read config://app [('config://app', '{"debug": false, "level": 3}')]
+[stdio] read greeting://Ada [('greeting://Ada', 'Hello, Ada!')]
+[stdio] prompts [('review', [('code', True), ('language', False)])]
+[stdio] prompt [('user', 'Review this python code:\nprint(1)')]
+[stdio] logs [('info', '3 steps done')]
+[http] uvicorn started True
+[http] server check instructions a server for the check
+[http] tool add 'Add two numbers.' {"properties": {"a": {"title": "A", "type": "integer"}, "b": {"title": "B", "type": "integer"}}, "required": ["a", "b"], "title": "addArguments", "type": "object"}
+[http] tool fail 'Always fails.' {"properties": {"why": {"title": "Why", "type": "string"}}, "required": ["why"], "title": "failArguments", "type": "object"}
+[http] tool stats 'Count, sum and mean.' {"properties": {"values": {"items": {"type": "number"}, "title": "Values", "type": "array"}}, "required": ["values"], "title": "statsArguments", "type": "object"}
+[http] tool steps 'Reports its progress, and logs.' {"properties": {"n": {"title": "N", "type": "integer"}}, "required": ["n"], "title": "stepsArguments", "type": "object"}
+[http] add False {'result': 42} ['42']
+[http] stats False {"count": 3.0, "mean": 3.0, "sum": 9.0}
+[http] fail True ['Error executing tool fail']
+[http] add (invalid) True True
+[http] steps ['3 steps'] [(1.0, 3.0, 'step 1'), (2.0, 3.0, 'step 2'), (3.0, 3.0, 'step 3')]
+[http] resources [('config://app', 'config', 'text/plain')]
+[http] templates [('greeting://{name}', 'greeting')]
+[http] read config://app [('config://app', '{"debug": false, "level": 3}')]
+[http] read greeting://Ada [('greeting://Ada', 'Hello, Ada!')]
+[http] prompts [('review', [('code', True), ('language', False)])]
+[http] prompt [('user', 'Review this python code:\nprint(1)')]
+[http] uvicorn stopped True
+[sse] uvicorn started True
+[sse] server check instructions a server for the check
+[sse] tool add 'Add two numbers.' {"properties": {"a": {"title": "A", "type": "integer"}, "b": {"title": "B", "type": "integer"}}, "required": ["a", "b"], "title": "addArguments", "type": "object"}
+[sse] tool fail 'Always fails.' {"properties": {"why": {"title": "Why", "type": "string"}}, "required": ["why"], "title": "failArguments", "type": "object"}
+[sse] tool stats 'Count, sum and mean.' {"properties": {"values": {"items": {"type": "number"}, "title": "Values", "type": "array"}}, "required": ["values"], "title": "statsArguments", "type": "object"}
+[sse] tool steps 'Reports its progress, and logs.' {"properties": {"n": {"title": "N", "type": "integer"}}, "required": ["n"], "title": "stepsArguments", "type": "object"}
+[sse] add False {'result': 42} ['42']
+[sse] stats False {"count": 3.0, "mean": 3.0, "sum": 9.0}
+[sse] fail True ['Error executing tool fail']
+[sse] add (invalid) True True
+[sse] steps ['3 steps'] [(1.0, 3.0, 'step 1'), (2.0, 3.0, 'step 2'), (3.0, 3.0, 'step 3')]
+[sse] resources [('config://app', 'config', 'text/plain')]
+[sse] templates [('greeting://{name}', 'greeting')]
+[sse] read config://app [('config://app', '{"debug": false, "level": 3}')]
+[sse] read greeting://Ada [('greeting://Ada', 'Hello, Ada!')]
+[sse] prompts [('review', [('code', True), ('language', False)])]
+[sse] prompt [('user', 'Review this python code:\nprint(1)')]
+[sse] uvicorn stopped True
+done

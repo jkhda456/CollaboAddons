@@ -1,0 +1,41 @@
+version 1.0.0 False False
+parse coff-x86_64.obj lief._lief.COFF None None None None
+parse elf-aarch64.so lief._lief.ELF FORMATS.ELF ARCHITECTURES.ARM64 True 0x0
+parse elf-x86_64-static lief._lief.ELF FORMATS.ELF ARCHITECTURES.X86_64 True 0x201250
+parse macho-arm64.dylib lief._lief.MachO FORMATS.MACHO ARCHITECTURES.ARM64 True 0x0
+parse macho-arm64.o lief._lief.MachO FORMATS.MACHO ARCHITECTURES.ARM64 True 0x0
+parse pe-x86_64.exe lief._lief.PE FORMATS.PE ARCHITECTURES.X86_64 True 0x140001010
+is True True True False
+garbage None None
+elf header CLASS.ELF64 ARCH.X86_64 FILE_TYPE.EXEC 0x201250
+elf sections [('', TYPE.SHT_NULL_, 0, []), ('.rodata', TYPE.PROGBITS, 19, [FLAGS.ALLOC]), ('.eh_frame_hdr', TYPE.PROGBITS, 36, [FLAGS.ALLOC]), ('.eh_frame', TYPE.PROGBITS, 92, [FLAGS.ALLOC]), ('.text', TYPE.PROGBITS, 60, [FLAGS.ALLOC, FLAGS.EXECINSTR]), ('.data', TYPE.PROGBITS, 4, [FLAGS.WRITE, FLAGS.ALLOC]), ('.comment', TYPE.PROGBITS, 67, [FLAGS.MERGE, FLAGS.STRINGS]), ('.symtab', TYPE.SYMTAB, 192, []), ('.shstrtab', TYPE.STRTAB, 80, []), ('.strtab', TYPE.STRTAB, 51, [])]
+elf segments [(TYPE.PHDR, '0x200040', 336, FLAGS.R), (TYPE.LOAD, '0x200000', 548, FLAGS.R), (TYPE.LOAD, '0x201230', 60, FLAGS.X|R), (TYPE.LOAD, '0x20226c', 4, FLAGS.W|R), (TYPE.GNU_EH_FRAME, '0x2001a4', 36, FLAGS.R), (TYPE.GNU_STACK, '0x0', 0, FLAGS.W|R)]
+elf symbols [('_start', '0x201250', TYPE.FUNC, BINDING.GLOBAL), ('add', '0x201230', TYPE.FUNC, BINDING.GLOBAL), ('counter', '0x20226c', TYPE.OBJECT, BINDING.GLOBAL), ('hello.c', '0x0', TYPE.FILE, BINDING.LOCAL), ('message', '0x200190', TYPE.OBJECT, BINDING.GLOBAL), ('square', '0x201240', TYPE.FUNC, BINDING.GLOBAL), ('start.c', '0x0', TYPE.FILE, BINDING.LOCAL)]
+elf strings ['hello from collabo'] b'hello from collabo\x00'
+elf vaddr b'hello from collabo'
+so dynamic [(TAG.SONAME, 28), (TAG.RELA, 776), (TAG.RELASZ, 24), (TAG.RELAENT, 24), (TAG.SYMTAB, 568), (TAG.SYMENT, 24), (TAG.STRTAB, 732), (TAG.STRSZ, 44), (TAG.GNU_HASH, 688)]
+so soname libcollabo.so.1 ['add', 'add', 'square', 'square']
+so dynsym [('add', TYPE.FUNC, VISIBILITY.DEFAULT), ('counter', TYPE.OBJECT, VISIBILITY.DEFAULT), ('message', TYPE.OBJECT, VISIBILITY.DEFAULT), ('square', TYPE.FUNC, VISIBILITY.DEFAULT)]
+so relocations 1 [TYPE.AARCH64_GLOB_DAT]
+so gnu hash True 1
+elf written b'collabo core!' b'\x07\x00\x00\x00'
+so written ['libcollabo-extra.so'] True
+pe header MACHINE_TYPES.AMD64 [CHARACTERISTICS.EXECUTABLE_IMAGE, CHARACTERISTICS.LARGE_ADDRESS_AWARE] PE_TYPE.PE32_PLUS 0x140000000 0x1010 SUBSYSTEM.WINDOWS_CUI
+pe sections [('.text', 28, [CHARACTERISTICS.CNT_CODE, CHARACTERISTICS.MEM_EXECUTE, CHARACTERISTICS.MEM_READ]), ('.rdata', 195, [CHARACTERISTICS.CNT_INITIALIZED_DATA, CHARACTERISTICS.MEM_READ])]
+pe imports [('kernel32.dll', ['ExitProcess'])]
+pe exports pe-x86_64.exe ['add']
+pe dirs [(TYPES.EXPORT_TABLE, True), (TYPES.IMPORT_TABLE, True), (TYPES.RESOURCE_TABLE, False), (TYPES.EXCEPTION_TABLE, False), (TYPES.CERTIFICATE_TABLE, False), (TYPES.BASE_RELOCATION_TABLE, False)]
+pe hash 566bf8717e51d9af787c5cb1808edbea34517867ea7a7dde3db9af91d6e158a3 9c37e69352589eb60fb968ce5708defe 49404
+pe signed False VERIFICATION_FLAGS.NO_SIGNATURE
+pe written ['.text', '.rdata', '.collab', '.debug'] b'\xcc\xcc\xcc\xcc'
+coff MACHINE_TYPES.AMD64 ['.text', '.data', '.bss', '.drectve', '/37'] ['.bss', '.data', '.drectve', '.file', '.llvm_addrsig', '.text', '@feat.00', '__imp_ExitProcess']
+macho object CPU_TYPE.ARM64 FILE_TYPE.OBJECT [TYPE.SEGMENT_64, TYPE.BUILD_VERSION, TYPE.LINKER_OPTIMIZATION_HINT, TYPE.SYMTAB, TYPE.DYSYMTAB] ['__text', '__data', '__const', '__compact_unwind']
+macho symbols ['_add', '_counter', '_message', '_square', 'ltmp0', 'ltmp1', 'ltmp2', 'ltmp3']
+macho dylib FILE_TYPE.DYLIB ['_add', '_counter', '_message', '_square'] [TYPE.SEGMENT_64, TYPE.SEGMENT_64, TYPE.SEGMENT_64, TYPE.DYLD_INFO_ONLY, TYPE.SYMTAB, TYPE.DYSYMTAB, TYPE.ID_DYLIB, TYPE.UUID]
+json ['dynamic_entries', 'dynamic_relocations', 'dynamic_symbols', 'entrypoint', 'header', 'imagebase'] 11
+demangle None None
+IndexError IndexError
+iteration 11 6
+TypeError
+digest e7662b76f33e3379
+done

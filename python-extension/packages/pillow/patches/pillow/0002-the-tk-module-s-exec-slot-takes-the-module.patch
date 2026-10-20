@@ -1,0 +1,23 @@
+The module's Py_mod_exec slot with the parameter CPython calls it with (the module):
+load_tkinter_funcs, `int f(void)`, registered as it is, traps in WebAssembly, which checks the
+type of every indirect call (`import PIL._imagingtk`, and so PIL.ImageTk, ended the
+interpreter). (Found by the add-on's tools/fpcast-scan.py.)
+
+--- a/src/_imagingtk.c
++++ b/src/_imagingtk.c
+@@ -48,8 +48,14 @@
+     {NULL, NULL} /* sentinel */
+ };
+ 
++/* the module's exec slot, which CPython calls with the module */
++static int
++exec_module(PyObject *module) {
++    return load_tkinter_funcs();
++}
++
+ static PyModuleDef_Slot slots[] = {
+-    {Py_mod_exec, load_tkinter_funcs},
++    {Py_mod_exec, exec_module},
+ #ifdef Py_GIL_DISABLED
+     {Py_mod_gil, Py_MOD_GIL_NOT_USED},
+ #endif

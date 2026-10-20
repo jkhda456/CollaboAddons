@@ -1,0 +1,91 @@
+# The failures of the packages' own suites (tests/upstream.py) that are the guest's, not the
+# build's: SUITE PATTERN (fnmatch over pytest's node id), grouped by reason. Each group was checked
+# by its failures' messages when it was added.
+
+# ── numpy ──────────────────────────────────────────────────────────────────────────────────────
+# WebAssembly has no floating-point exception flags: what the hardware would flag (a float division
+# by zero, an overflow, an invalid operation, an underflow) raises no FloatingPointError and no
+# RuntimeWarning. numpy marks these tests @skipif(IS_WASM, "fp errors don't work in wasm"); its
+# IS_WASM looks for platform.machine() "wasm32", and the guest's kernel says "wasm". (What numpy
+# raises itself — linalg's errors, integer division by zero — works: the C library keeps <fenv.h>'s
+# flags in software, for every module.)
+numpy numpy/_core/tests/test_casting_floatingpoint_errors.py::test_floatingpoint_errors_casting*
+numpy numpy/_core/tests/test_errstate.py::TestErrstate::*
+numpy numpy/_core/tests/test_half.py::TestHalf::test_half_fpe
+numpy numpy/_core/tests/test_numeric.py::TestFloatExceptions::*
+numpy numpy/_core/tests/test_numeric.py::TestSeterr::test_divide_err
+numpy numpy/_core/tests/test_regression.py::TestRegression::test_nonarray_assignment*
+numpy numpy/_core/tests/test_multiarray.py::TestMethods::test_dot_errstate*
+numpy numpy/_core/tests/test_ufunc.py::test_ufunc_input_floatingpoint_error*
+numpy numpy/_core/tests/test_ufunc.py::test_ufunc_methods_floaterrors*
+numpy numpy/_core/tests/test_umath.py::TestDivision::test_floor_division_errors*
+numpy numpy/_core/tests/test_umath.py::TestLog2::test_log2_special
+numpy numpy/_core/tests/test_umath.py::TestPower::test_zero_power_nonzero
+numpy numpy/_core/tests/test_umath.py::TestRemainder::*_errors*
+numpy numpy/_core/tests/test_umath.py::TestRemainder::test_float_remainder_overflow
+numpy numpy/_core/tests/test_umath.py::TestSpecialFloats::*
+numpy numpy/_core/tests/test_umath_complex.py::TestClog::*
+numpy numpy/lib/tests/test_function_base.py::TestMedian::test_empty
+numpy numpy/ma/tests/test_core.py::TestFillingValues::test_fillvalue_reset_on_lossy_float_cast*
+numpy numpy/ma/tests/test_core.py::TestMaskedArrayFunctions::test_where
+
+# No ctypes in the guest's Python (no _ctypes); upstream.py's stand-in only lets the modules that
+# import it be collected, and fails (NotImplementedError, or types that are none) where it is used.
+numpy numpy/_core/tests/test_casting_unittests.py::TestCasting::*
+numpy numpy/_core/tests/test_deprecations.py
+numpy numpy/_core/tests/test_dtype.py::TestFromCTypes::*
+numpy numpy/_core/tests/test_multiarray.py::TestCTypes::*
+numpy numpy/_core/tests/test_multiarray.py::TestMethods::test__deepcopy__*
+numpy numpy/_core/tests/test_multiarray.py::TestArgmaxArgminCommon::test_object_with_NULLs*
+numpy numpy/_core/tests/test_multiarray.py::TestNewBufferProtocol::test_error_pointer_type
+numpy numpy/_core/tests/test_multiarray.py::TestNewBufferProtocol::test_error_message_unsupported
+numpy numpy/_core/tests/test_multiarray.py::TestNewBufferProtocol::test_ctypes_*
+numpy numpy/_core/tests/test_multiarray.py::TestWritebackIfCopy::test_view_*
+numpy numpy/_core/tests/test_ufunc.py::TestLowlevelAPIAccess::test_loop_access
+numpy numpy/ma/tests/test_core.py::TestMaskedArray::test_copy
+numpy numpy/ma/tests/test_core.py::TestMaskedArrayArithmetic::test_scalar_arithmetic
+numpy numpy/ma/tests/test_core.py::TestMaskedArrayInPlaceArithmetic::test_inplace_addition_scalar
+numpy numpy/random/tests/test_direct.py::*::test_ctypes
+numpy numpy/tests/test_ctypeslib.py
+numpy numpy/tests/test_public_api.py::test___qualname___and___module___attribute
+numpy numpy/tests/test_public_api.py::test_NPY_NO_EXPORT
+
+# No compiler, meson or Fortran in the guest: the tests that build an extension module first
+numpy numpy/f2py/tests/*
+numpy numpy/_core/tests/test_mem_policy.py::*
+numpy numpy/_core/tests/test_array_interface.py::test_cstruct
+
+# Not in the image: numpy's C headers and pkg-config files (numpy/_core/include, numpy/_core/lib),
+# which nothing in the guest could compile against
+numpy numpy/tests/test_configtool.py
+
+# No _posixshmem in the guest's Python (no shared memory): multiprocessing.shared_memory
+numpy numpy/_core/tests/test_multiprocessing.py::test_read_write_bool_array
+
+# ── cffi ───────────────────────────────────────────────────────────────────────────────────────
+# A C compiler, which the guest has not: cffi's verify() (here for bitfields, through setuptools).
+cffi testing/cffi0/test_ffi_backend.py::TestBitfield::*
+# A call through a pointer of another type ends the program here (WebAssembly checks the type of
+# every indirect call): these declare getenv() as returning void (natively harmless).
+cffi testing/cffi0/test_ffi_backend.py::TestFFI::test_getenv_no_return_value
+cffi testing/cffi0/test_ffi_backend.py::TestFFI::test_passing_large_list
+# The guest's C library is musl, whose dlopen has no RTLD_DEEPBIND; the test tells musl by the
+# interpreter's ELF header (packaging's musllinux tags), and a WebAssembly interpreter has none.
+cffi src/c/test_c.py::test_all_rtld_symbols
+
+# ── libffi ─────────────────────────────────────────────────────────────────────────────────────
+# WebAssembly checks the type of every indirect call: these tests call a function as a type it has
+# not (natively harmless: the result is ignored), which traps here. longjmp.c calls void lev1() as
+# returning int; cls_complex_struct_*.c call a closure returning void as returning void *. With
+# the types corrected they pass (checked when they were added).
+libffi libffi.call/longjmp
+libffi libffi.complex/cls_complex_struct_*
+# The code pointer of a closure is not its memory here but a function table slot (as on
+# Emscripten, for which the test leaves this check out).
+libffi libffi.closures/closure_loc_fn0
+
+# ── jsonschema ─────────────────────────────────────────────────────────────────────────────────
+# The warning's file is the code's own name (/usr/lib/python3.13/importlib/__init__.py), and the test
+# compares it with importlib.__file__, which in the guest is the standard library's zip of .pyc files
+# (/usr/lib/python313.zip/importlib/__init__.pyc): the same module, named two ways.
+jsonschema test_deprecations.py::TestDeprecations::test_import_cli

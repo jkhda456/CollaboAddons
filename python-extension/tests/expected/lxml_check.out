@@ -1,0 +1,168 @@
+versions (6, 1, 3, 0) (2, 14, 6) (2, 14, 6) (1, 1, 43) (1, 1, 43)
+features ['catalog', 'html', 'iconv', 'regexp', 'schematron', 'xmlschema', 'xpath', 'zlib']
+tree {urn:a}root {None: 'urn:a', 'b': 'urn:b'} ['_Comment', '{urn:a}item', '{urn:a}item', '{urn:b}item', '{urn:a}empty']
+text [('1', 'plain', 'hello & welcome'), ('2', 'special', '<raw> & text')]
+sourceline [('{urn:a}root', 7), ('{urn:a}item', 9), ('{urn:a}item', 10), ('{urn:b}item', 11), ('{urn:a}sub', 11), ('{urn:a}empty', 12)]
+serialize b'<root xmlns="urn:a" xmlns:b="urn:b" b:attr="1">\n  <!-- a comment -->\n  <item id="1">hello &amp; welcome</item>\n  <item id="2" kind="special">&lt;raw&gt; &amp; text</item>\n  <b:item id="3">tail<sub/>more</b:item>\n  <empty/>\n</root>'
+pretty <root xmlns="urn:a" xmlns:b="urn:b" b:attr="1">
+  <!-- a comment -->
+  <item id="1">hello &amp; welcome</item>
+  <item id="2" kind="special">&lt;raw&gt; &amp; text</item>
+  <b:item id="3">tail<sub/>more</b:item>
+  <empty/>
+</root>
+
+docinfo 1.0 UTF-8 root <!DOCTYPE root> True
+full instruction
+encode utf-8 269 bf63de54d13450325e6ace497139be3f
+encode iso-8859-1 274 e934dc67d17b346b57c191d41249b882
+encode ascii 269 0f2600f3c56e9b9b1a76d73450a28926
+encode utf-16 542 44a913f6b05a8fa2a716f2be569077b4
+encode utf-32 1084 3d663440bdd93f4b2c79fb87282ef20b
+encode cp1252 270 26b8d346e2816a6add46cfbffbe12609
+method b'\n  \n  hello & welcome\n  <raw> & text\n  tailmore\n  \n' b'<root xmlns="urn:a" xmlns:b="urn:b" b:attr="1">\n  <!-- a com'
+unicode <root xmlns="urn:a" xmlns:b="urn:b" b:at
+charset ISO-8859-1 True fc464039114d695df1ff75fc7bca605f
+charset ISO-8859-15 True d5e2452cee6c08087f956637fb5b2ec7
+charset windows-1252 True 55aa9fb0c1018f60a254b6056f562cbb
+charset KOI8-R True 7e3556c3dfa551f59cabec19c751165c
+charset windows-1251 True 50c088f11802b22d03aa0579ce47c1e9
+charset ISO-8859-7 True 4e4f38d0ed545a610e901885f9d20a23
+charset Shift_JIS True ffffa6e1100ee6061009adccb101bb19
+charset EUC-JP True 5cd27961a2ab09098ee8b2ec569ce8d9
+charset ISO-2022-JP True ce145616855c78839b99fa55e76afbd5
+charset EUC-KR True e2cb60abd893de6a9824f9eac0b610cc
+charset GB2312 True f1bbcc1969ba13aa8aa7e3d94078da63
+charset GB18030 True 25b77168dfe46c1effbf5e0bb7a95128
+charset Big5 True 1e5fd5deb744607538bec6c19d5f9bd2
+charset UTF-16LE True ff9570c2c83ceeabbcad02ec5bf39b9d
+charset UTF-16BE True 14725a61f43956742741702d12763661
+charset UTF-32 True 1c530232f268e328a98a0636882f2233
+charset UTF-7 True 64a736b8f25858753ca44591b548bcf1
+charset TIS-620 True 278352f898bf8a04c24bcd7bdbf60992
+charset CP437 XMLSyntaxError Unsupported encoding: CP437, line 1, column 37 (<string>, line 1)
+charset MacRoman True 4a981180a22b2e075eb9483d973a0bca
+bom é
+bad encoding XMLSyntaxError Unsupported encoding: no-such-encoding, line 1, column 48 (<string>, line 1)
+syntax b'<a><b></a>' Opening and ending tag mismatch: b line 1 and a, line 1, column 11 (1, 11) 76
+syntax b'<a>&undefined;</a>' Entity 'undefined' not defined, line 1, column 15 (1, 15) 26
+syntax b'<a attr=1/>' AttValue: " or ' expected, line 1, column 9 (1, 9) 39
+syntax b'' Document is empty, line 1, column 1 (1, 1) 4
+syntax b'<a>\x00</a>' Invalid character: Char 0x0 out of allowed range
+, line 1, column 4 (1, 4) 9
+syntax b'<?xml?><a/>' XML declaration allowed only at the start of the document, line 1, column 6 (1, 6) 64
+recover b'<a><b>text</b></a>'
+options b'<root xmlns="urn:a" xmlns:b="urn:b" b:attr="1"><item id="1">&greeting;</item><item id="2" kind="special"><![CDATA[<raw> & text]]></item><b:item id="3">tail<sub/>more</b:item><empty/></root>'
+huge 20000
+deep Excessive depth in document: 256, use XML_PARSE_HUGE option, line 1, column 771
+built b'<doc xmlns:x="urn:x" version="2" x:flag="yes"><?pi data?><x:part name="one">text</x:part>tail<part><!-- note --></part></doc>'
+find ['one'] text None
+elementpath ['{urn:a}item'] 1 ['1', '2']
+itertext ['\n  ', '\n  ', 'hello & welcome', '\n  ', '<raw> & text', '\n  ', 'tail', 'more', '\n  ', '\n']
+qname part urn:x {urn:q}n
+strip b'<root xmlns="urn:a" xmlns:b="urn:b" b:attr="1">\n  <!-- a comment -->\n  <item id="1">hello &amp; welcome</item>\n  <item i'
+strip elements b'<root xmlns="urn:a" xmlns:b="urn:b" b:attr="1">\n  <!-- a comment -->\n  \n  \n  tail<sub/>more\n  <empty/>\n</root>'
+index 2 5 {urn:a}root 2
+xpath count(//a:item) 2.0
+xpath //a:item/@id ['1', '2']
+xpath string(//a:item[2]) <raw> & text
+xpath sum(//@id) 6.0
+xpath //b:item/text() ['tail', 'more']
+xpath name(/*) root
+xpath boolean(//a:empty) True
+xpath //a:item[last()]/@kind ['special']
+xpath concat('x', 1 div 3) x0.333333333333333
+xpath local-name(//*[@b:attr]) root
+xpath translate('abc', 'abc', 'ABC') ABC
+xpath //a:item[contains(., 'welcome')]/@id ['1']
+xpath 1 div 0 inf
+xpath -1 div 0 -inf
+xpath 0 div 0 nan
+xpath number('x') nan
+xpath round(2.5) 3.0
+xpath floor(-1.5) -2.0
+xpath string(0.1 + 0.2) 0.3
+xpath string(1e21) 1e+21
+smart 1 True
+evaluator 2.0 42.0
+exslt True a+b+c ['special']
+extension HELLO & WELCOME 6.0
+xpath error //[ XPathEvalError Invalid expression
+xpath error unknown:f() XPathEvalError Undefined namespace prefix
+xpath error count( XPathEvalError Invalid number of arguments
+xpath error $undefined XPathEvalError Undefined variable
+xslt <?xml version="1.0"?>
+<out xmlns:a="urn:a" title="Report's" max="3" n="0">
+  <row pos="1">&lt;RAW&gt; &amp; TEXT</row>
+  <row pos="2">HELLO &amp; WELCOME</row>
+  <tok>a</tok>
+  <tok>b</tok>
+  <tok>c</tok>
+  <total>3</total>
+  <dyn>3</dyn>
+  <num>1,234,567.89</num>
+  <pad>---|---ab</pad>
+  <!--generated-->
+</out>
+
+xslt log [("transforming Report's", 'ERROR')]
+xslt text value: 6 b'value: 6'
+xslt html <html><body>
+<br><p>x &amp; y</p>
+</body></html>
+
+xslt ran?
+xslt error XSLTApplyError stop
+access xsltLoadDocument: read rights for string://__STRING__XSLT__/secret.xml denied
+dtd True []
+dtd False [(1, 0, 'VALID', 'DTD_CONTENT_MODEL', 'ERROR', 'Element list content does not follow the DTD, expecting (entry)+, got (entry other)'), (1, 0, 'VALID', 'DTD_MISSING_ATTRIBUTE', 'ERROR', 'Element entry does not carry attribute n'), (1, 0, 'VALID', 'DTD_UNKNOWN_ELEM', 'ERROR', 'No declaration for element other')]
+xsd True []
+xsd False [(1, 0, 'SCHEMASV', 'SCHEMAV_CVC_ENUMERATION_VALID', 'ERROR', "Element '{urn:s}order', attribute 'state': [facet 'enumeration'] The value 'pending' is not an element of the set {'open', 'closed'}."), (1, 0, 'SCHEMASV', 'SCHEMAV_CVC_DATATYPE_VALID_1_2_1', 'ERROR', "Element '{urn:s}id': '-4' is not a valid value of the atomic type 'xs:positiveInteger'."), (1, 0, 'SCHEMASV', 'SCHEMAV_CVC_PATTERN_VALID', 'ERROR', "Element '{urn:s}code': [facet 'pattern'] The value 'ab-12' is not accepted by the pattern '[A-Z]{2}-\\d{3}'."), (1, 0, 'SCHEMASV', 'SCHEMAV_CVC_DATATYPE_VALID_1_2_1', 'ERROR', "Element '{urn:s}when': '2026-13-40' is not a valid value of the atomic type 'xs:date'."), (1, 0, 'SCHEMASV', 'SCHEMAV_CVC_DATATYPE_VALID_1_2_1', 'ERROR', "Element '{urn:s}amount': 'x' is not a valid value of the atomic type 'xs:decimal'."), (1, 0, 'SCHEMASV', 'SCHEMAV_ELEMENT_CONTENT', 'ERROR', "Element '{urn:s}extra': This element is not expected.")]
+assert Element '{urn:s}order': The attribute 'state' is required but missing., line 1
+xsd parse element decl. 'a', attribute 'type': The QName value 'nope' does not resolve to a(n) type definition., line 1
+relaxng True []
+relaxng False [(1, 0, 'RELAXNGV', 'RELAXNG_ERR_TYPEVAL', 'ERROR', "Type gYear doesn't allow value 'twenty'"), (1, 0, 'RELAXNGV', 'RELAXNG_ERR_ATTRVALID', 'ERROR', 'Element book failed to validate attributes'), (1, 0, 'RELAXNGV', 'RELAXNG_ERR_ELEMWRONG', 'ERROR', 'Did not expect element preface there')]
+schematron True []
+schematron False ['<svrl:failed-assert xmlns:svrl="http://purl.oclc.org/dsdl/sv']
+schematron (libxml2) True False
+objectify 4 1.0 True xy None [3, 7] IntElement FloatElement BoolElement
+annotated b'<data><count xmlns:py="http://codespeak.net/lxml/objectify/pytype" py:pytype="int">3</count><ratio xmlns:py="http://codespeak.net/lxml/objectify/pytype" py:pytype="float">0.25</ratio><flag xmlns:py="h'
+dump ['data = None [ObjectifiedElement]', '    count = 3 [IntElement]', '    ratio = 0.25 [FloatElement]', '    flag = True [BoolElement]', "    name = 'x' [StringElement]", '    none = None [NoneElement]']
+objectpath 7 True
+maker b'<root><a>1</a><b>x</b></root>'
+builder b'<html><head><title>T</title></head><body><h1 class="big">Head</h1><p>text <b>bold</b> more</p></body></html>'
+builder ns b'<m:doc xmlns:m="urn:m"><m:part id="1">x</m:part></m:doc>'
+html builder b'<div class="c"><p>para</p><a href="/x">link</a></div>'
+sax b'<root xmlns="urn:a" xmlns:b="urn:b" b:attr="1">\n  \n  <item id="1">hello &amp; we'
+sax events [('start', ('urn:z', 'a'), [(None, 'k')]), ('start', ('urn:z', 'b'), []), ('chars', 't')]
+iterparse [('pi', ('_ProcessingInstruction', 'instruction')), ('start-ns', ('', 'urn:a')), ('start-ns', ('b', 'urn:b')), ('start', '{urn:a}root'), ('comment', ('_Comment', ' a comment ')), ('start', '{urn:a}item'), ('end', '{urn:a}item'), ('start', '{urn:a}item'), ('end', '{urn:a}item'), ('start', '{urn:b}item'), ('start', '{urn:a}sub'), ('end', '{urn:a}sub')]
+iterparse tag ['1', '2']
+feed b'<r><a>1</a><a>2</a></r>'
+pull [('start', 'r'), ('start', 'x'), ('end', 'x')] [('start', 'y'), ('end', 'y'), ('end', 'r')]
+target [('start', 'a', {'x': '1'}), ('data', 't'), ('start', 'b', {}), ('end', 'b'), ('end', 'a')]
+html target [('start', 'html', {}), ('start', 'body', {}), ('start', 'p', {}), ('data', 'unclosed'), ('start', 'br', {}), ('end', 'br'), ('data', 'x'), ('end', 'p'), ('end', 'body'), ('end', 'html')]
+xmlfile b'<?xml version=\'1.0\' encoding=\'utf-8\' standalone=\'yes\'?>\n<log xmlns="urn:log"><entry n="0"/>\n<entry n="1"/>\n<entry n="2"/>\ntext &amp; more</log>'
+gzip written 2e3fef9e58ce4e29bf6a6578b26fa34f
+gzip parsed {urn:a}root 5
+xinclude b'<main xmlns:xi="http://www.w3.org/2001/XInclude"><part>included</part>&lt;part&gt;included&lt;/part&gt;none</main>'
+resolver b'<d><from url="mem:thing"/></d>'
+c14n b'<n:a xmlns:n="urn:n" xmlns:unused="urn:u" a="2" z="1"><!-- c --><b x="y"></b>text</n:a>' b'<n:a xmlns:n="urn:n" a="2" z="1"><b x="y"></b>text</n:a>'
+c14n2 <n:a xmlns:n="urn:n" a="2" z="1"><!-- c --><b x="y"></b>text</n:a>
+html html Test & page ['One', 'Two boldboth italic\nlink']
+html out b'<html><head><title>Test &amp; page</title><meta charset="utf-8"></head>\n<body><div id="main" class="a b"><p>One</p><p>Two <b>bold<i>both</i></b> italic<br>\n<a href="/rel">link</a><img src="x.png" alt="pic"></p><table><tr><td>cell</td></tr></table>\n<script>if (a < b) {}</script><!-- comment --></div></body></html>'
+html links [('a', 'href', '/rel'), ('img', 'src', 'x.png')]
+absolute ['https://example.org/rel', 'https://example.org/base/x.png']
+classes ['a', 'b'] main
+fragment [b'<p>b</p>']
+html parse b'<html><body><p>x</p><div>y</div></body></html>'
+html encodings Grüße 日本
+form [('c', 'on'), ('q', 'x'), ('s', '1'), ('t', 'txt')] 1 ['c', 'q', 's', 't']
+htmldiff <p> <ins>The slow</ins> <del>The quick</del> brown fox</p><p>jumps <ins>high</ins> </p>
+html_annotate <p><span title="v1">one</span> <span title="v2">three</span></p>
+clean ImportError lxml.html.clean module is now a separate project lxml_html_c
+version strings 6.1.3 6.1.3
+bad name Invalid tag name 'bad name'
+bad value All strings must be XML compatible: Unicode or ASCII, no NULL bytes or control characters
+entities b'&amp;' b'<a>&#233;&#128512;</a>'
+memory 801400
+done

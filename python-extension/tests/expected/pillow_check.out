@@ -1,0 +1,70 @@
+version 12.3.0
+picture 39cad2772fee31fc (8, 8, 137, 17) 51.0
+glyphs (48, 12) 83bc67b46ba07d0d
+lossless PNG {} PNG (160, 120) True
+lossless PNG {'optimize': True} PNG (160, 120) True
+lossless TIFF {} TIFF (160, 120) True
+lossless TIFF {'compression': 'tiff_lzw'} TIFF (160, 120) True
+lossless TIFF {'compression': 'tiff_adobe_deflate'} TIFF (160, 120) True
+lossless TIFF {'compression': 'packbits'} TIFF (160, 120) True
+lossless WEBP {'lossless': True} WEBP (160, 120) True
+lossless JPEG2000 {} JPEG2000 (160, 120) True
+lossless BMP {} BMP (160, 120) True
+lossless TGA {} TGA (160, 120) True
+lossless PPM {} PPM (160, 120) True
+lossless QOI {} QOI (160, 120) True
+lossy JPEG {'quality': 85} (160, 120) 6.2
+lossy JPEG {'quality': 95, 'subsampling': 0, 'progressive': True} (160, 120) 1.4
+lossy WEBP {'quality': 75} (160, 120) 5.6
+lossy TIFF {'compression': 'jpeg'} (160, 120) 2.4
+lossy JPEG2000 {'irreversible': True, 'quality_layers': [20]} (160, 120) 8.5
+jpeg bytes 6331 d39676f1bd66f94e
+jpeg decode 0649c7b707683eb1
+quantize 970b2008dc0dcca2 16
+animation GIF 3 ['a21b5334']
+animation WEBP 3 ['39cad277']
+animation PNG 3 ['39cad277']
+resize nearest 00defd28944f53cf 
+resize bilinear c12da6994d26ac8c 
+resize bicubic 66718820847b9ec2 
+resize lanczos f493a953c0d5fc18 
+resize box bcffb36806a1f3f6 05b2fbb80fbf5944
+resize hamming de8554aa4ee77d63 
+transpose ca3b78c4db8e6baa 0fb7670294a056c3
+crop paste 8453f518fc4668ef 2b1181e0d5aee61d
+filter BLUR ([136.7, 159.9, 143.8], [(0, 250), (8, 255), (0, 255)])
+filter CONTOUR ([233.2, 235.4, 233.5], [(0, 255), (0, 255), (0, 255)])
+filter DETAIL ([136.6, 160.7, 143.7], [(0, 255), (0, 255), (0, 255)])
+filter EDGE_ENHANCE ([138.3, 162.5, 144.6], [(0, 255), (0, 255), (0, 255)])
+filter EMBOSS ([128.9, 130.1, 129.4], [(0, 255), (0, 255), (0, 255)])
+filter FIND_EDGES ([27.4, 32.6, 29.2], [(0, 255), (0, 255), (0, 255)])
+filter SHARPEN ([136.6, 161.4, 143.3], [(0, 255), (0, 255), (0, 255)])
+filter SMOOTH ([136.6, 159.8, 143.8], [(0, 250), (0, 255), (0, 255)])
+blur ([136.7, 159.9, 143.8], [(1, 250), (30, 254), (5, 245)]) ([136.6, 159.8, 143.8], [(1, 250), (6, 254), (2, 249)]) ([136.6, 162.4, 142.4], [(0, 255), (0, 255), (0, 255)]) 8a7fdb29fb6c3a6d
+rotate ([85.1, 99.5, 89.5], [(0, 255), (0, 255), (0, 255)])
+affine ([121.3, 139.3, 126.9], [(0, 250), (0, 254), (0, 254)])
+convert L L 5c644e1e3fe709c2
+convert LA LA 151d6bfcfbac939c
+convert 1 1 f3ff50aaf64b9f36
+convert P P e6ea2525915354ad
+convert RGBA RGBA c3415b96078909f7
+convert CMYK CMYK e83891957ff1ede0
+convert YCbCr YCbCr d526f4895124f274
+convert HSV HSV ef3302305c38afcb
+convert I I 6ce935feb0433174
+convert F F 79f2cb8060167fb5
+convert I;16 I;16 94378d7ddcef566f
+split merge ['47e82508', '64cf2f56', 'd7f90176'] aebbbc99d1e772bd
+ops b33ebe802eced33b 81bce5af485fae30 72eeaf9afb05cc9d c27d5a0672a57896 4374f307aa7729e3 5c644e1e3fe709c2
+chops c9f3240f6f8adb67 9b6cc8670d801f2c None
+enhance ([125.9, 156.4, 128.2], [(0, 255), (0, 255), (0, 255)]) ([146.2, 153.1, 148.1], [(0, 249), (0, 249), (0, 247)])
+histogram 57600 (0, 0, 160, 120) [(21, (1, 254, 3))]
+numpy (120, 160, 3) |u1 8452070 64b98607abf0e96c
+from float f3ead0192a51d185
+cms LAB [169.0, 123.8, 137.6] sRGB built-in
+cms profile True
+math 1fab4784e8bb6322
+morph erosion4 1046
+morph dilation8 1050
+morph edge 6653
+done

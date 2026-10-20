@@ -1,0 +1,48 @@
+all ['HashTrieMap', 'HashTrieSet', 'List', 'Stack', 'Queue']
+map [('a', 1), ('b', 2), ('c', 3)] [('a', 10), ('b', 2), ('c', 3), ('d', 4)] 3 4 True False
+map get 10 None 0 1
+map remove [('b', 2), ('c', 3), ('d', 4)] [('a', 10), ('b', 2), ('c', 3), ('d', 4)] True
+map remove missing KeyError('z')
+map getitem missing KeyError('z')
+map update [('a', 1), ('b', 2), ('c', 3), ('e', 5), ('f', 6), ('g', 7)]
+map convert True [('x', 1)]
+map fromkeys [('a', None), ('b', None), ('c', None)] [(1, 0), (2, 0)]
+map repr HashTrieMap({}) HashTrieMap({'k': [1, 2]}) HashTrieMap({1: HashTrieMap({})})
+map views ['a', 'b', 'c'] [1, 2, 3] [('a', 1), ('b', 2), ('c', 3)] 3 True True
+map keys ops ['a'] ['a', 'b', 'c', 'z'] ['a']
+map items ops [('a', 1)] [('a', 1), ('b', 2), ('c', 3), ('z', 0)]
+map eq False True True False
+map hash True True
+map hash unhashable TypeError
+map dict True ['a', 'b', 'c']
+collide 20 [0, 5, 10, 15] False 19
+bad eq alone 1
+set [1, 2, 3, 4] 4 True False [1, 2, 3, 4, 9] [2, 3, 4] [1, 2, 3, 4]
+set remove missing KeyError(42)
+set ops [1, 2, 3, 4, 5] [3, 4] [1, 2] [1, 2, 5]
+set methods [1, 2, 3, 4, 5] [3, 4] [1, 2] [1, 2, 5] [1, 2, 3, 4, 8, 9]
+set compare True True True False True no isdisjoint
+set repr HashTrieSet({}) HashTrieSet({'one'})
+set hash True
+list [1, 2, 3] List([1, 2, 3]) 3 1 [2, 3] [0, 1, 2, 3] [2, 3]
+list more [1, 2, 3] [3, 2, 1] True True True List([])
+list empty first IndexError('empty list has no first element')
+list empty drop_first IndexError('empty list has no first element')
+queue [1, 2, 3] Queue([1, 2, 3]) 3 1 [1, 2, 3, 4] [2, 3] False True
+queue more [1, 2] True True Queue([])
+queue empty peek IndexError('peeked an empty queue')
+queue empty dequeue IndexError('dequeued an empty queue')
+stack [3, 2, 1] Stack([1, 2, 3]) 3 3 [0, 3, 2, 1] [2, 1] True
+stack empty peek IndexError('peeked an empty stack')
+stack empty pop IndexError('popped an empty stack')
+pickle Queue cannot pickle 'rpds.Queue' object
+pickle Stack cannot pickle 'rpds.Stack' object
+pickle HashTrieMap True
+pickle HashTrieSet True
+pickle List True
+pickle HashTrieMap True
+versions [1000, 1000, 1000, 1000, 1000, 1000] 9 False 4
+big 100000 99999 4999950000 50000
+big list 50000 0 1249975000
+threads [(0, (5000, 1999000, 5000)), (1, (5000, 1999000, 5000)), (2, (5000, 1999000, 5000)), (3, (5000, 1999000, 5000))]
+done
