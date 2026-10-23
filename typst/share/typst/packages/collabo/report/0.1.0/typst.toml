@@ -1,0 +1,14 @@
+[package]
+name = "report"
+version = "0.1.0"
+entrypoint = "lib.typ"
+authors = ["collaboCore"]
+license = "MIT-0"
+description = "Reports for agents: title page, contents, Korean fonts, callouts, key figures, tables from data, bar and line charts; no other packages needed."
+keywords = ["report", "korean", "charts", "tables"]
+categories = ["report"]
+compiler = "0.15.0"
+
+[template]
+path = "template"
+entrypoint = "main.typ"

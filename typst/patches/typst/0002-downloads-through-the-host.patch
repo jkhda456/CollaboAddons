@@ -1,0 +1,354 @@
+--- /dev/null
++++ b/crates/typst-cli/src/host.rs
+@@ -0,0 +1,319 @@
++//! Downloads through the collaboCore host: the request API on vsock port 1080
++//! (collaboCore's `engine/src/http.rs`, the one `hfetch` speaks). The guest
++//! has no TLS of its own for this: the host makes the request under the app's
++//! network policy and streams the answer back.
++//!
++//!   request   GET URL\n  name: value\n  \n
++//!   response  STATUS TEXT\n  name: value\n  \n  <hex-length>\n<bytes>…  0\n  OK\n
++//!   failure   ERROR kind: message\n    (instead of the status line, or as the trailer)
++//!
++//! `COLLABO_BRIDGE` picks the way: unset, it is vsock port 1080 (`HFETCH_PORT`
++//! names another port); `tcp:HOST:PORT` speaks the protocol over TCP (the
++//! add-on's tests on a development machine); `off` makes every download fail.
++
++use std::any::Any;
++use std::io::{self, BufRead, BufReader, ErrorKind, Read, Write};
++
++use typst_kit::downloader::Downloader;
++
++const DEFAULT_PORT: u32 = 1080;
++
++/// Where the request API is.
++#[derive(Debug, Clone, PartialEq, Eq)]
++enum Endpoint {
++    Vsock(u32),
++    Tcp(String),
++}
++
++fn endpoint() -> Option<Endpoint> {
++    let port = std::env::var("HFETCH_PORT")
++        .ok()
++        .and_then(|port| port.parse().ok())
++        .unwrap_or(DEFAULT_PORT);
++    match std::env::var("COLLABO_BRIDGE").ok().as_deref().map(str::trim) {
++        None | Some("") => Some(Endpoint::Vsock(port)),
++        Some("off" | "0" | "no" | "false") => None,
++        Some(spec) => {
++            if let Some(address) = spec.strip_prefix("tcp:") {
++                Some(Endpoint::Tcp(address.to_string()))
++            } else if let Some(port) = spec.strip_prefix("vsock:") {
++                port.parse().ok().map(Endpoint::Vsock)
++            } else {
++                Some(Endpoint::Vsock(port))
++            }
++        }
++    }
++}
++
++/// Fetches URLs through the host's request API.
++#[derive(Debug, Default)]
++pub struct HostDownloader;
++
++impl Downloader for HostDownloader {
++    fn stream(
++        &self,
++        _: &dyn Any,
++        url: &str,
++    ) -> io::Result<(Option<usize>, Box<dyn Read>)> {
++        let Some(endpoint) = endpoint() else {
++            return Err(io::Error::other(
++                "downloads are off in this sandbox (COLLABO_BRIDGE=off)",
++            ));
++        };
++        get(&endpoint, url)
++    }
++}
++
++/// One GET through the request API at `endpoint`.
++fn get(endpoint: &Endpoint, url: &str) -> io::Result<(Option<usize>, Box<dyn Read>)> {
++    if url.contains([' ', '\r', '\n']) {
++        return Err(io::Error::new(
++            ErrorKind::InvalidInput,
++            "the URL contains whitespace",
++        ));
++    }
++    let mut connection = connect(endpoint)?;
++    connection.write_all(format!("GET {url}\naccept: */*\n\n").as_bytes())?;
++    connection.flush()?;
++    let mut reader = BufReader::with_capacity(64 * 1024, connection);
++
++    let status_line = read_line(&mut reader)?;
++    if let Some(failure) = status_line.strip_prefix("ERROR ") {
++        return Err(host_failure(failure, url));
++    }
++    let status = status_line
++        .split(' ')
++        .next()
++        .and_then(|code| code.parse::<u16>().ok())
++        .ok_or_else(|| {
++            io::Error::new(
++                ErrorKind::InvalidData,
++                format!("malformed answer from the host: {status_line}"),
++            )
++        })?;
++    // The headers: the host has decoded the body, so there is no length to
++    // learn from them.
++    while !read_line(&mut reader)?.is_empty() {}
++
++    let body = Body { reader, left: 0, done: false };
++    match status {
++        200..=299 => Ok((None, Box::new(body))),
++        404 => Err(io::Error::new(ErrorKind::NotFound, format!("{url}: 404 Not Found"))),
++        _ => Err(io::Error::other(format!("{url}: {status_line}"))),
++    }
++}
++
++/// A failure the host reported instead of an answer.
++fn host_failure(failure: &str, url: &str) -> io::Error {
++    let (kind, message) = failure.split_once(": ").unwrap_or(("error", failure));
++    let message = match kind {
++        "denied" => format!(
++            "the sandbox's network policy does not allow {url} ({message}); \
++             allow the host, e.g. packages.typst.org, in the app's network settings"
++        ),
++        _ => format!("collaboCore host ({kind}): {message}"),
++    };
++    let kind = match kind {
++        "denied" => ErrorKind::PermissionDenied,
++        "timeout" => ErrorKind::TimedOut,
++        _ => ErrorKind::Other,
++    };
++    io::Error::new(kind, message)
++}
++
++/// The answer's body: the host's chunks, read on demand.
++struct Body {
++    reader: BufReader<Box<dyn Connection>>,
++    /// Bytes left in the current chunk.
++    left: usize,
++    done: bool,
++}
++
++impl Read for Body {
++    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
++        if self.done || buf.is_empty() {
++            return Ok(0);
++        }
++        if self.left == 0 {
++            let line = read_line(&mut self.reader)?;
++            let length = usize::from_str_radix(line.trim(), 16).map_err(|_| {
++                io::Error::new(
++                    ErrorKind::InvalidData,
++                    format!("malformed chunk length from the host: {line}"),
++                )
++            })?;
++            if length == 0 {
++                self.done = true;
++                let trailer = read_line(&mut self.reader)?;
++                return match trailer.strip_prefix("ERROR ") {
++                    None if trailer == "OK" => Ok(0),
++                    Some(failure) => {
++                        Err(io::Error::other(format!("collaboCore host: {failure}")))
++                    }
++                    None => Err(io::Error::new(
++                        ErrorKind::InvalidData,
++                        format!("malformed trailer from the host: {trailer}"),
++                    )),
++                };
++            }
++            self.left = length;
++        }
++        let wanted = buf.len().min(self.left);
++        let read = self.reader.read(&mut buf[..wanted])?;
++        if read == 0 {
++            return Err(io::Error::new(
++                ErrorKind::UnexpectedEof,
++                "the host closed the connection in the middle of a chunk",
++            ));
++        }
++        self.left -= read;
++        Ok(read)
++    }
++}
++
++fn read_line(reader: &mut impl BufRead) -> io::Result<String> {
++    let mut line = Vec::new();
++    if reader.read_until(b'\n', &mut line)? == 0 {
++        return Err(io::Error::new(
++            ErrorKind::UnexpectedEof,
++            "the host closed the connection",
++        ));
++    }
++    if line.last() == Some(&b'\n') {
++        line.pop();
++    }
++    Ok(String::from_utf8_lossy(&line).into_owned())
++}
++
++trait Connection: Read + Write {}
++impl<T: Read + Write> Connection for T {}
++
++fn connect(endpoint: &Endpoint) -> io::Result<Box<dyn Connection>> {
++    match endpoint {
++        Endpoint::Tcp(address) => Ok(Box::new(std::net::TcpStream::connect(address)?)),
++        Endpoint::Vsock(port) => connect_vsock(*port)
++            .map(|file| Box::new(file) as Box<dyn Connection>)
++            .map_err(|error| {
++                io::Error::new(
++                    error.kind(),
++                    format!(
++                        "cannot reach the host's request API on vsock port {port}: {error}"
++                    ),
++                )
++            }),
++    }
++}
++
++#[cfg(target_os = "linux")]
++fn connect_vsock(port: u32) -> io::Result<std::fs::File> {
++    use std::os::fd::FromRawFd;
++    const AF_VSOCK: libc::c_int = 40;
++    const VMADDR_CID_HOST: u32 = 2;
++    // <linux/vm_sockets.h>'s sockaddr_vm.
++    #[repr(C)]
++    struct SockaddrVm {
++        family: libc::sa_family_t,
++        reserved1: u16,
++        port: u32,
++        cid: u32,
++        flags: u8,
++        zero: [u8; 3],
++    }
++    let address = SockaddrVm {
++        family: AF_VSOCK as libc::sa_family_t,
++        reserved1: 0,
++        port,
++        cid: VMADDR_CID_HOST,
++        flags: 0,
++        zero: [0; 3],
++    };
++    // SAFETY: plain socket calls; the descriptor is owned by the File on
++    // success and closed here on failure.
++    unsafe {
++        let fd = libc::socket(AF_VSOCK, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
++        if fd < 0 {
++            return Err(io::Error::last_os_error());
++        }
++        let result = libc::connect(
++            fd,
++            (&raw const address).cast::<libc::sockaddr>(),
++            size_of::<SockaddrVm>() as libc::socklen_t,
++        );
++        if result < 0 {
++            let error = io::Error::last_os_error();
++            libc::close(fd);
++            return Err(error);
++        }
++        Ok(std::fs::File::from_raw_fd(fd))
++    }
++}
++
++#[cfg(not(target_os = "linux"))]
++fn connect_vsock(_port: u32) -> io::Result<std::fs::File> {
++    Err(io::Error::new(
++        ErrorKind::Unsupported,
++        "no vsock here; set COLLABO_BRIDGE=tcp:HOST:PORT",
++    ))
++}
++
++#[cfg(test)]
++mod tests {
++    use std::io::Read;
++    use std::net::TcpListener;
++
++    use super::*;
++
++    /// A one-shot request API on loopback answering with `reply`; returns
++    /// its address and a handle yielding the request it got.
++    fn serve(reply: &'static [u8]) -> (String, std::thread::JoinHandle<String>) {
++        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
++        let address = listener.local_addr().unwrap().to_string();
++        let handle = std::thread::spawn(move || {
++            let (mut stream, _) = listener.accept().unwrap();
++            let mut head = Vec::new();
++            let mut byte = [0];
++            while !head.ends_with(b"\n\n") {
++                stream.read_exact(&mut byte).unwrap();
++                head.push(byte[0]);
++            }
++            stream.write_all(reply).unwrap();
++            String::from_utf8(head).unwrap()
++        });
++        (address, handle)
++    }
++
++    fn fetch(address: &str, url: &str) -> io::Result<Vec<u8>> {
++        let (_, mut reader) = get(&Endpoint::Tcp(address.into()), url)?;
++        let mut data = Vec::new();
++        reader.read_to_end(&mut data)?;
++        Ok(data)
++    }
++
++    #[test]
++    fn chunks_and_trailer() {
++        let (address, request) =
++            serve(b"200 OK\ncontent-type: x\n\n3\nabc2\nde0\nOK\n");
++        let data = fetch(&address, "https://packages.typst.org/x.tar.gz").unwrap();
++        assert_eq!(data, b"abcde");
++        assert_eq!(
++            request.join().unwrap(),
++            "GET https://packages.typst.org/x.tar.gz\naccept: */*\n\n"
++        );
++    }
++
++    #[test]
++    fn statuses_and_failures() {
++        let (address, _) = serve(b"404 Not Found\n\n0\nOK\n");
++        assert_eq!(
++            fetch(&address, "https://a.test/").unwrap_err().kind(),
++            ErrorKind::NotFound
++        );
++        let (address, _) = serve(b"ERROR denied: host a.test is not allowed\n");
++        let error = fetch(&address, "https://a.test/").unwrap_err();
++        assert_eq!(error.kind(), ErrorKind::PermissionDenied);
++        assert!(error.to_string().contains("network policy"));
++        let (address, _) = serve(b"200 OK\n\n3\nabc0\nERROR network: reset\n");
++        let error = fetch(&address, "https://a.test/").unwrap_err();
++        assert!(error.to_string().contains("reset"));
++    }
++}
+--- a/crates/typst-cli/src/download.rs
++++ b/crates/typst-cli/src/download.rs
+@@ -4,22 +4,18 @@
+ use codespan_reporting::term::termcolor::WriteColor;
+ use ecow::{EcoString, eco_format};
+ use typst::syntax::package::PackageSpec;
+-use typst_kit::downloader::{
+-    Downloader, Progress, ProgressDownloader, ProgressReporter, SystemDownloader,
+-};
++use typst_kit::downloader::{Downloader, Progress, ProgressDownloader, ProgressReporter};
+ 
+-use crate::ARGS;
++use crate::host::HostDownloader;
+ use crate::terminal;
+ 
+ /// Returns a new downloader.
++///
++/// In collaboCore's guest, downloads go through the host's request API, which
++/// makes the request under the sandbox's network policy (and its TLS): there
++/// is no TLS here, so `--cert` has no effect.
+ pub fn downloader() -> impl Downloader {
+-    let user_agent = format!("typst/{}", typst::utils::version().raw());
+-    let system = match ARGS.cert.clone() {
+-        None => SystemDownloader::new(user_agent),
+-        Some(cert) => SystemDownloader::with_cert_path(user_agent, cert),
+-    };
+-
+-    ProgressDownloader::new(system, |key| {
++    ProgressDownloader::new(HostDownloader, |key| {
+         let name = if let Some(spec) = key.downcast_ref::<PackageSpec>() {
+             Some(eco_format!("{spec}"))
+         } else if let Some(&s @ "release") = key.downcast_ref::<&str>() {

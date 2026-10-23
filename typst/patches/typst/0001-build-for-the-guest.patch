@@ -1,0 +1,59 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -1,5 +1,5 @@
+ [workspace]
+-members = ["crates/*", "docs", "tests", "tests/fuzz", "tests/wrapper"]
++members = ["crates/*"]
+ default-members = ["crates/typst-cli"]
+ resolver = "2"
+ 
+--- a/crates/typst-cli/Cargo.toml
++++ b/crates/typst-cli/Cargo.toml
+@@ -55,6 +55,11 @@
+ xz2 = { workspace = true, optional = true }
+ zip = { workspace = true, optional = true }
+ 
++# The guest's missing fork (src/guest.rs), the vsock socket of the host's request API
++# (src/host.rs).
++[target.'cfg(target_os = "linux")'.dependencies]
++libc = "0.2"
++
+ [dependencies.typst-kit]
+ workspace = true
+ features = [
+@@ -65,7 +70,6 @@
+     "universe-packages",
+     "datetime",
+     "emit-diagnostics",
+-    "system-downloader",
+     "watcher",
+     "timer",
+ ]
+--- a/crates/typst-cli/src/main.rs
++++ b/crates/typst-cli/src/main.rs
+@@ -6,6 +6,8 @@
+ mod eval;
+ mod fonts;
+ mod greet;
++mod guest;
++mod host;
+ mod info;
+ mod init;
+ mod packages;
+--- /dev/null
++++ b/crates/typst-cli/src/guest.rs
+@@ -0,0 +1,14 @@
++//! What the guest's libc lacks: collaboCore's guest is WebAssembly Linux without an MMU, so
++//! there is no `fork()`.
++//!
++//! std names `fork` on its process-spawning paths and the `open` crate (`--open`) on its own; in
++//! the guest a program starts with `posix_spawn` or not at all. This makes a stray fork an error
++//! (`ENOSYS`) instead of a link failure.
++
++#[cfg(all(target_arch = "wasm32", target_os = "linux"))]
++#[unsafe(no_mangle)]
++pub extern "C" fn fork() -> libc::pid_t {
++    // SAFETY: errno is this thread's own.
++    unsafe { *libc::__errno_location() = libc::ENOSYS };
++    -1
++}

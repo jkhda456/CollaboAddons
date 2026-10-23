@@ -1,0 +1,13 @@
+diff -ruN -x .cargo-checksum.json -x .cargo_vcs_info.json -x .cargo-ok -x target -x .gitignore -x .github a/src/ioctl/linux.rs b/src/ioctl/linux.rs
+--- a/src/ioctl/linux.rs
++++ b/src/ioctl/linux.rs
+@@ -51,7 +51,8 @@
+     target_arch = "riscv32",
+     target_arch = "riscv64",
+     target_arch = "loongarch64",
+-    target_arch = "csky"
++    target_arch = "csky",
++    target_arch = "wasm32"
+ ))]
+ mod consts {
+     use super::RawOpcode;

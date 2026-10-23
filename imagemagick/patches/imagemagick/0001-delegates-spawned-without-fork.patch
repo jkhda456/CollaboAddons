@@ -1,0 +1,41 @@
+diff --git a/MagickCore/delegate.c b/MagickCore/delegate.c
+index 0637b7a..4b701a2 100644
+--- a/MagickCore/delegate.c
++++ b/MagickCore/delegate.c
+@@ -76,6 +76,11 @@
+ #include "MagickCore/token-private.h"
+ #include "MagickCore/utility.h"
+ #include "MagickCore/utility-private.h"
++#if !defined(MAGICKCORE_HAVE_FORK) && defined(MAGICKCORE_HAVE_POSIX_SPAWNP)
++#include <spawn.h>
++extern char
++  **environ;
++#endif
+ #include "MagickCore/xml-tree.h"
+ #include "MagickCore/xml-tree-private.h"
+ 
+@@ -490,6 +495,7 @@ MagickExport int ExternalDelegateCommand(const MagickBooleanType asynchronous,
+           /*
+             Call application directly rather than from a shell.
+           */
++#if defined(MAGICKCORE_HAVE_FORK) || !defined(MAGICKCORE_HAVE_POSIX_SPAWNP)
+           child_pid=(pid_t) fork();
+           if (child_pid == (pid_t) -1)
+             status=system(sanitize_command);
+@@ -500,6 +506,16 @@ MagickExport int ExternalDelegateCommand(const MagickBooleanType asynchronous,
+                 _exit(1);
+               }
+             else
++#else
++          /*
++            No fork() (WebAssembly): the program is spawned. One that cannot
++            be (not found) fails as its exec would: status 1, quietly.
++          */
++          if (posix_spawnp(&child_pid,arguments[1],(posix_spawn_file_actions_t *)
++                NULL,(posix_spawnattr_t *) NULL,arguments+1,environ) != 0)
++            status=1;
++          else
++#endif
+               {
+                 int
+                   child_status;

@@ -1,0 +1,56 @@
+--- a/crates/typst-kit/src/watcher.rs
++++ b/crates/typst-kit/src/watcher.rs
+@@ -10,7 +10,7 @@
+ use std::time::{Duration, Instant};
+ 
+ use ecow::eco_format;
+-use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as _};
++use notify::{Event, PollWatcher, RecommendedWatcher, RecursiveMode, Watcher as _};
+ use rustc_hash::{FxHashMap, FxHashSet};
+ use same_file::is_same_file;
+ use typst_library::diag::StrResult;
+@@ -19,8 +19,9 @@
+ pub struct Watcher {
+     /// The output file. We ignore any events for it.
+     output: Option<PathBuf>,
+-    /// The underlying watcher.
+-    watcher: RecommendedWatcher,
++    /// The underlying watcher: the platform's, or a poll watcher where the
++    /// platform has none.
++    watcher: Box<dyn notify::Watcher + Send>,
+     /// Notify event receiver.
+     rx: Receiver<notify::Result<Event>>,
+     /// Keeps track of which paths are watched via `watcher`. The boolean is
+@@ -57,8 +58,18 @@
+         // this only affects a tiny number of systems. Most do not use the
+         // [`notify::PollWatcher`].
+         let config = notify::Config::default().with_poll_interval(Self::POLL_INTERVAL);
+-        let watcher = RecommendedWatcher::new(tx, config)
+-            .map_err(|err| eco_format!("failed to setup file watching ({err})"))?;
++        // Where the platform's watcher cannot be set up (a kernel without
++        // inotify, such as collaboCore's guest), poll: it also sees changes
++        // made by the host to files on a shared folder, which inotify would
++        // not report.
++        let watcher: Box<dyn notify::Watcher + Send> =
++            match RecommendedWatcher::new(tx.clone(), config) {
++                Ok(watcher) => Box::new(watcher),
++                Err(_) => Box::new(
++                    PollWatcher::new(tx, config)
++                        .map_err(|err| eco_format!("failed to setup file watching ({err})"))?,
++                ),
++            };
+ 
+         Ok(Self {
+             output,
+@@ -201,6 +212,11 @@
+         notify::EventKind::Modify(kind) => match kind {
+             notify::event::ModifyKind::Any => true,
+             notify::event::ModifyKind::Data(_) => true,
++            // A poll watcher reports a changed modification time this way
++            // (inotify reports attribute changes as `MetadataKind::Any`).
++            notify::event::ModifyKind::Metadata(notify::event::MetadataKind::WriteTime) => {
++                true
++            }
+             notify::event::ModifyKind::Metadata(_) => false,
+             notify::event::ModifyKind::Name(_) => true,
+             notify::event::ModifyKind::Other => false,

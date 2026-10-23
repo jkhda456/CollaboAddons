@@ -1,0 +1,336 @@
+diff --git a/MagickCore/annotate.c b/MagickCore/annotate.c
+index 8294305..0818d33 100644
+--- a/MagickCore/annotate.c
++++ b/MagickCore/annotate.c
+@@ -129,6 +129,9 @@ typedef struct _GraphemeInfo
+ 
+   size_t
+     cluster;
++
++  void
++    *face;  /* the fallback font's face the glyph is from; NULL: the font's own */
+ } GraphemeInfo;
+ 
+ /*
+@@ -1263,6 +1266,7 @@ static size_t ComplexRaqmTextLayout(const Image *image,
+     (*grapheme)[i].y_offset=glyphs[i].y_offset;
+     (*grapheme)[i].y_advance=glyphs[i].y_advance;
+     (*grapheme)[i].cluster=glyphs[i].cluster;
++    (*grapheme)[i].face=(void *) NULL;
+   }
+ 
+ cleanup:
+@@ -1271,10 +1275,177 @@ cleanup:
+ }
+ #endif
+ 
++/*
++  Fonts for the characters a font has no glyph for, as a font on a system with
++  fontconfig falls back to another (Hangul in a Latin font): a list, separated by
++  commas, of type.xml's font names or families, or font files; "none" for none.
++  The image's "type:fallback-font" (-define type:fallback-font=...) if it has
++  one, else the policy "system:fallback-font". A family's member is the one
++  closest to the font's own weight and slant; each font is opened when a
++  character first needs it.
++*/
++#define MaxFallbackFonts  8
++
++typedef struct _FallbackInfo
++{
++  FT_Library
++    library;
++
++  FT_F26Dot6
++    size;
++
++  FT_UInt
++    x_resolution,
++    y_resolution;
++
++  size_t
++    number_fonts;
++
++  char
++    *paths[MaxFallbackFonts];
++
++  FT_Face
++    faces[MaxFallbackFonts];
++
++  MagickBooleanType
++    opened[MaxFallbackFonts];
++} FallbackInfo;
++
++static void AcquireFallbackFonts(const Image *image,const DrawInfo *draw_info,
++  const FT_Face face,FallbackInfo *fallback,ExceptionInfo *exception)
++{
++  char
++    *list,
++    *name,
++    *next;
++
++  const char
++    *value;
++
++  size_t
++    weight;
++
++  StyleType
++    style;
++
++  value=GetImageArtifact(image,"type:fallback-font");
++  if (value == (const char *) NULL)
++    value=GetImageProperty(image,"type:fallback-font",exception);
++  if (value != (const char *) NULL)
++    list=AcquireString(value);
++  else
++    list=GetPolicyValue("system:fallback-font");
++  if (list == (char *) NULL)
++    return;
++  weight=(face->style_flags & FT_STYLE_FLAG_BOLD) != 0 ? 700 : 400;
++  style=(face->style_flags & FT_STYLE_FLAG_ITALIC) != 0 ? ItalicStyle :
++    NormalStyle;
++  for (name=list; (name != (char *) NULL) &&
++       (fallback->number_fonts < MaxFallbackFonts); name=next)
++  {
++    const char
++      *path;
++
++    const TypeInfo
++      *type_info;
++
++    next=strchr(name,',');
++    if (next != (char *) NULL)
++      *next++='\0';
++    StripString(name);
++    if ((*name == '\0') || (LocaleCompare(name,"none") == 0))
++      continue;
++    path=(const char *) NULL;
++    if (IsPathAccessible(name) != MagickFalse)
++      path=name;
++    else
++      {
++        type_info=GetTypeInfoByFamily(name,style,AnyStretch,weight,exception);
++        if ((type_info == (const TypeInfo *) NULL) ||
++            (type_info->family == (char *) NULL) ||
++            (LocaleCompare(type_info->family,name) != 0))
++          type_info=GetTypeInfo(name,exception);
++        if ((type_info != (const TypeInfo *) NULL) &&
++            ((LocaleCompare(type_info->name,name) == 0) ||
++             ((type_info->family != (char *) NULL) &&
++              (LocaleCompare(type_info->family,name) == 0))))
++          path=type_info->glyphs;
++      }
++    if ((path == (const char *) NULL) ||
++        ((draw_info->font != (char *) NULL) &&
++         (LocaleCompare(path,draw_info->font) == 0)))
++      continue;
++    fallback->paths[fallback->number_fonts]=ConstantString(path);
++    fallback->faces[fallback->number_fonts]=(FT_Face) NULL;
++    fallback->opened[fallback->number_fonts]=MagickFalse;
++    fallback->number_fonts++;
++  }
++  list=DestroyString(list);
++}
++
++static void DestroyFallbackFonts(FallbackInfo *fallback)
++{
++  size_t
++    i;
++
++  for (i=0; i < fallback->number_fonts; i++)
++  {
++    if (fallback->faces[i] != (FT_Face) NULL)
++      (void) FT_Done_Face(fallback->faces[i]);
++    fallback->paths[i]=DestroyString(fallback->paths[i]);
++  }
++  fallback->number_fonts=0;
++}
++
++static FT_UInt GetFallbackGlyph(FallbackInfo *fallback,const FT_ULong code,
++  FT_Face *face)
++{
++  size_t
++    i;
++
++  for (i=0; i < fallback->number_fonts; i++)
++  {
++    FT_UInt
++      index;
++
++    if (fallback->opened[i] == MagickFalse)
++      {
++        fallback->opened[i]=MagickTrue;
++        if (FT_New_Face(fallback->library,fallback->paths[i],0,
++              &fallback->faces[i]) != 0)
++          fallback->faces[i]=(FT_Face) NULL;
++        else
++          {
++            (void) FT_Select_Charmap(fallback->faces[i],FT_ENCODING_UNICODE);
++            if (FT_Set_Char_Size(fallback->faces[i],fallback->size,
++                  fallback->size,fallback->x_resolution,
++                  fallback->y_resolution) != 0)
++              {
++                (void) FT_Done_Face(fallback->faces[i]);
++                fallback->faces[i]=(FT_Face) NULL;
++              }
++          }
++      }
++    if (fallback->faces[i] == (FT_Face) NULL)
++      continue;
++    index=FT_Get_Char_Index(fallback->faces[i],code);
++    if (index != 0)
++      {
++        *face=fallback->faces[i];
++        return(index);
++      }
++  }
++  return(0);
++}
++
+ static size_t ComplexTextLayout(const DrawInfo *draw_info,const char *text,
+   const size_t length,const FT_Face face,const FT_Int32 flags,
+-  GraphemeInfo **grapheme)
++  FallbackInfo *fallback,GraphemeInfo **grapheme)
+ {
++  FT_Face
++    glyph_face,
++    last_face;
++
+   const char
+     *p;
+ 
+@@ -1291,16 +1462,37 @@ static size_t ComplexTextLayout(const DrawInfo *draw_info,const char *text,
+   if (*grapheme == (GraphemeInfo *) NULL)
+     return(0);
+   last_glyph=0;
++  last_face=face;
+   p=text;
+   for (i=0; GetUTFCode(p) != 0; p+=(ptrdiff_t) GetUTFOctets(p), i++)
+   {
++    glyph_face=face;
+     (*grapheme)[i].index=(ssize_t) FT_Get_Char_Index(face,(FT_ULong)
+       GetUTFCode(p));
++    (*grapheme)[i].face=(void *) NULL;
++    if (((*grapheme)[i].index == 0) && (fallback != (FallbackInfo *) NULL) &&
++        (GetUTFCode(p) > 0x20))
++      {
++        FT_Face
++          other;
++
++        FT_UInt
++          index;
++
++        index=GetFallbackGlyph(fallback,(FT_ULong) GetUTFCode(p),&other);
++        if (index != 0)
++          {
++            (*grapheme)[i].index=(ssize_t) index;
++            (*grapheme)[i].face=(void *) other;
++            glyph_face=other;
++          }
++      }
+     (*grapheme)[i].x_offset=0;
+     (*grapheme)[i].y_offset=0;
+-    if (((*grapheme)[i].index != 0) && (last_glyph != 0))
++    if (((*grapheme)[i].index != 0) && (last_glyph != 0) &&
++        (glyph_face == last_face))
+       {
+-        if (FT_HAS_KERNING(face))
++        if (FT_HAS_KERNING(glyph_face))
+           {
+             FT_Error
+               ft_status;
+@@ -1308,18 +1500,19 @@ static size_t ComplexTextLayout(const DrawInfo *draw_info,const char *text,
+             FT_Vector
+               kerning;
+ 
+-            ft_status=FT_Get_Kerning(face,(FT_UInt) last_glyph,(FT_UInt)
++            ft_status=FT_Get_Kerning(glyph_face,(FT_UInt) last_glyph,(FT_UInt)
+               (*grapheme)[i].index,ft_kerning_default,&kerning);
+             if (ft_status == 0)
+               (*grapheme)[i-1].x_advance+=(FT_Pos) ((draw_info->direction ==
+                 RightToLeftDirection ? -1.0 : 1.0)*kerning.x);
+           }
+       }
+-    (void) FT_Load_Glyph(face,(FT_UInt) (*grapheme)[i].index,flags);
+-    (*grapheme)[i].x_advance=face->glyph->advance.x;
+-    (*grapheme)[i].y_advance=face->glyph->advance.y;
++    (void) FT_Load_Glyph(glyph_face,(FT_UInt) (*grapheme)[i].index,flags);
++    (*grapheme)[i].x_advance=glyph_face->glyph->advance.x;
++    (*grapheme)[i].y_advance=glyph_face->glyph->advance.y;
+     (*grapheme)[i].cluster=(size_t) (p-text);
+     last_glyph=(*grapheme)[i].index;
++    last_face=glyph_face;
+   }
+   return((size_t) i);
+ }
+@@ -1602,6 +1795,9 @@ static MagickBooleanType RenderFreetype(Image *image,const DrawInfo *draw_info,
+   GlyphInfo
+     glyph;
+ 
++  FallbackInfo
++    fallback;
++
+   GraphemeInfo
+     *grapheme;
+ 
+@@ -1897,24 +2093,38 @@ static MagickBooleanType RenderFreetype(Image *image,const DrawInfo *draw_info,
+     }
+   grapheme=(GraphemeInfo *) NULL;
+   length=strlen(p);
++  (void) memset(&fallback,0,sizeof(fallback));
++  fallback.library=library;
++  fallback.size=(FT_F26Dot6) (64.0*draw_info->pointsize);
++  fallback.x_resolution=(FT_UInt) resolution.x;
++  fallback.y_resolution=(FT_UInt) resolution.y;
+ #if defined(MAGICKCORE_RAQM_DELEGATE)
+   if (ContainsRaqmParagraphSeparator((const unsigned char *) p,length) == MagickFalse)
+     length=ComplexRaqmTextLayout(image,draw_info,p,length,face,&grapheme,
+       exception);
+   else
+ #endif
+-  length=ComplexTextLayout(draw_info,p,length,face,flags,&grapheme);
++  {
++    AcquireFallbackFonts(image,draw_info,face,&fallback,exception);
++    length=ComplexTextLayout(draw_info,p,length,face,flags,&fallback,
++      &grapheme);
++  }
+   missing_glyph_id=FT_Get_Char_Index(face,' ');
+   code=0;
+   last_character=(ssize_t) length-1;
+   for (i=0; i < (ssize_t) length; i++)
+   {
++    FT_Face
++      glyph_face;
++
+     FT_Outline
+       outline;
+ 
+     /*
+       Render UTF-8 sequence.
+     */
++    glyph_face=grapheme[i].face != (void *) NULL ? (FT_Face) grapheme[i].face :
++      face;
+     glyph.id=(FT_UInt) grapheme[i].index;
+     if (glyph.id == 0)
+       glyph.id=missing_glyph_id;
+@@ -1928,10 +2138,10 @@ static MagickBooleanType RenderFreetype(Image *image,const DrawInfo *draw_info,
+         FT_Done_Glyph(glyph.image);
+         glyph.image=(FT_Glyph) NULL;
+       }
+-    ft_status=FT_Load_Glyph(face,glyph.id,flags);
++    ft_status=FT_Load_Glyph(glyph_face,glyph.id,flags);
+     if (ft_status != 0)
+       continue;
+-    ft_status=FT_Get_Glyph(face->glyph,&glyph.image);
++    ft_status=FT_Get_Glyph(glyph_face->glyph,&glyph.image);
+     if (ft_status != 0)
+       continue;
+     outline=((FT_OutlineGlyph) glyph.image)->outline;
+@@ -2152,6 +2362,7 @@ static MagickBooleanType RenderFreetype(Image *image,const DrawInfo *draw_info,
+     Relinquish resources.
+   */
+   annotate_info=DestroyDrawInfo(annotate_info);
++  DestroyFallbackFonts(&fallback);
+   (void) FT_Done_Face(face);
+   FreetypeDone(memory,library,stream);
+   return(status);

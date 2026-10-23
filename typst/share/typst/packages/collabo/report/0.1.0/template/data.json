@@ -1,0 +1,15 @@
+{
+  "period": "2026년 3분기",
+  "kpis": [
+    {"label": "매출", "value": "12.4억", "delta": "+8.2%", "note": "전 분기 대비"},
+    {"label": "영업 비용", "value": "7.1억", "delta": "+3.0%", "good": false},
+    {"label": "장애 시간", "value": "42분", "delta": "-51%", "good": false},
+    {"label": "활성 사용자", "value": "18,240", "delta": "+1,204"}
+  ],
+  "monthly": [
+    {"month": "7월", "revenue": 3.8, "cost": 2.2},
+    {"month": "8월", "revenue": 4.1, "cost": 2.4},
+    {"month": "9월", "revenue": 4.5, "cost": 2.5}
+  ],
+  "regions": {"서울": 52, "부산": 18, "대구": 11, "인천": 9, "기타": 10}
+}

@@ -1,0 +1,4 @@
+{
+  "name": "imagemagick",
+  "description": "ImageMagick 7 in the guest, for agents that edit images on the command line: magick (convert, identify, mogrify, composite, compare, montage) with PNG, JPEG, GIF, WebP, AVIF, HEIC (read), TIFF, JPEG 2000, SVG, ICO, PDF output and ICC profiles, fonts for Korean and Latin text, a guide and a skill for Claude Code and Codex"
+}

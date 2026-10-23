@@ -1,0 +1,110 @@
+--- a/crates/typst-kit/src/packages.rs
++++ b/crates/typst-kit/src/packages.rs
+@@ -23,6 +23,8 @@
+ ///
+ /// - a package data directory (that is intended for system-wide storage of user
+ ///   packages)
++/// - a shared, read-only package directory a distribution installs packages
++///   in (see [`FsPackages::system_shared`]; set with [`Self::with_shared`])
+ /// - a package cache directory (that is intended for caching of automatically
+ ///   downloaded packages)
+ /// - by downloading it from Typst Universe or a mirror of it (if it's namespace
+@@ -34,6 +36,7 @@
+ #[derive(Debug)]
+ pub struct SystemPackages {
+     data: Option<FsPackages>,
++    shared: Option<FsPackages>,
+     cache: Option<FsPackages>,
+     universe: UniversePackages,
+ }
+@@ -63,7 +66,14 @@
+         cache: Option<FsPackages>,
+         universe: UniversePackages,
+     ) -> Self {
+-        Self { data, cache, universe }
++        Self { data, shared: None, cache, universe }
++    }
++
++    /// Adds a shared, read-only package directory, searched after the data
++    /// directory and before the cache.
++    pub fn with_shared(mut self, shared: Option<FsPackages>) -> Self {
++        self.shared = shared;
++        self
+     }
+ 
+     /// Returns a handle to the data package directory.
+@@ -71,6 +81,11 @@
+         self.data.as_ref()
+     }
+ 
++    /// Returns a handle to the shared package directory.
++    pub fn shared(&self) -> Option<&FsPackages> {
++        self.shared.as_ref()
++    }
++
+     /// Returns a handle to the cache package directory.
+     pub fn cache(&self) -> Option<&FsPackages> {
+         self.cache.as_ref()
+@@ -93,10 +108,10 @@
+     /// [`FileStore`](crate::files::FileStore), this is already the case since
+     /// it acquires a lock during file loading.
+     pub fn obtain(&self, spec: &PackageSpec) -> PackageResult<FsRoot> {
+-        if let Some(packages) = &self.data
+-            && let Some(root) = packages.obtain(spec)
+-        {
+-            return Ok(root);
++        for packages in [&self.data, &self.shared].into_iter().flatten() {
++            if let Some(root) = packages.obtain(spec) {
++                return Ok(root);
++            }
+         }
+ 
+         if let Some(cache) = &self.cache {
+@@ -132,11 +147,13 @@
+             self.universe.latest_version(spec)
+         } else {
+             // For other namespaces, search locally. We only search in the data
+-            // directory and not the cache directory, because the latter is not
+-            // intended for storage of local packages.
+-            self.data
+-                .as_ref()
+-                .and_then(|pkgs| pkgs.latest_version(spec))
++            // and shared directories and not the cache directory, because the
++            // latter is not intended for storage of local packages.
++            [&self.data, &self.shared]
++                .into_iter()
++                .flatten()
++                .filter_map(|pkgs| pkgs.latest_version(spec))
++                .max()
+                 .ok_or_else(|| eco_format!("please specify the desired version"))
+         }
+     }
+@@ -181,6 +198,20 @@
+         dirs::cache_dir().map(|dir| FsPackages::new(dir.join("typst/packages")))
+     }
+ 
++    /// Tries to provide a handle to the shared, read-only package directory a
++    /// distribution installs packages in: `$TYPST_SHARED_PACKAGE_PATH`, else
++    /// `/usr/share/typst/packages` on Unix (where collaboCore's typst add-on
++    /// puts its own), if it exists.
++    #[cfg(feature = "system-packages")]
++    pub fn system_shared() -> Option<FsPackages> {
++        let path = match std::env::var_os("TYPST_SHARED_PACKAGE_PATH") {
++            Some(path) if !path.is_empty() => PathBuf::from(path),
++            _ if cfg!(unix) => PathBuf::from("/usr/share/typst/packages"),
++            _ => return None,
++        };
++        path.is_dir().then(|| FsPackages::new(path))
++    }
++
+     /// Returns the path from which this serves packages.
+     pub fn path(&self) -> &Path {
+         &self.0
+--- a/crates/typst-cli/src/packages.rs
++++ b/crates/typst-cli/src/packages.rs
+@@ -15,4 +15,5 @@
+             .or_else(FsPackages::system_cache),
+         UniversePackages::new(crate::download::downloader()),
+     )
++    .with_shared(FsPackages::system_shared())
+ }

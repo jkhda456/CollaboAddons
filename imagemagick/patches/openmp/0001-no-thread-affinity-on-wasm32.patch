@@ -1,0 +1,15 @@
+On wasm32 Linux (the guest: __linux__ and __wasm32__), no thread affinity: there is no CPU
+mask to read or set, and kmp_affinity.h knows no system call numbers for the architecture.
+(The WASI and Emscripten builds have none either, by KMP_OS_WASI.)
+
+--- a/runtime/src/kmp_os.h
++++ b/runtime/src/kmp_os.h
+@@ -77,7 +77,7 @@
+ 
+ #if (KMP_OS_LINUX || KMP_OS_WINDOWS || KMP_OS_FREEBSD || KMP_OS_NETBSD ||      \
+      KMP_OS_DRAGONFLY || KMP_OS_AIX) &&                                        \
+-    !KMP_OS_WASI
++    !KMP_OS_WASI && !KMP_ARCH_WASM
+ #define KMP_AFFINITY_SUPPORTED 1
+ #if KMP_OS_WINDOWS && KMP_ARCH_X86_64
+ #define KMP_GROUP_AFFINITY 1

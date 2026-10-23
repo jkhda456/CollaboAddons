@@ -1,0 +1,11 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -47,7 +47,7 @@
+     } else if #[cfg(windows)] {
+         #[path = "windows.rs"]
+         mod imp;
+-    } else if #[cfg(all(target_family = "wasm", not(target_os = "emscripten")))] {
++    } else if #[cfg(all(all(target_family = "wasm", not(target_os = "linux")), not(target_os = "emscripten")))] {
+         #[path = "wasm.rs"]
+         mod imp;
+     } else {

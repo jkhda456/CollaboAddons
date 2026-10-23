@@ -1,0 +1,4 @@
+{
+  "name": "typst",
+  "description": "typst: the Typst typesetting system (0.15.1) in the guest, for agents that write reports: PDF, PNG, SVG and HTML from Typst markup and data files (JSON, CSV, YAML), Korean fonts (Nanum), a report template (@collabo/report), Markdown/LaTeX-math/plot packages that work offline, and a skill for Claude Code and Codex; other Typst Universe packages through the host's request API"
+}

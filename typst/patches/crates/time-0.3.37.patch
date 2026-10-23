@@ -1,0 +1,60 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -175,7 +175,7 @@
+ [target."cfg(__ui_tests)".dev-dependencies.trybuild]
+ version = "1.0.68"
+ 
+-[target.'cfg(all(target_family = "wasm", not(any(target_os = "emscripten", target_os = "wasi"))))'.dependencies.js-sys]
++[target.'cfg(all(all(target_family = "wasm", not(target_os = "linux")), not(any(target_os = "emscripten", target_os = "wasi"))))'.dependencies.js-sys]
+ version = "0.3.58"
+ optional = true
+ 
+--- a/src/offset_date_time.rs
++++ b/src/offset_date_time.rs
+@@ -95,7 +95,7 @@
+     #[cfg(feature = "std")]
+     pub fn now_utc() -> Self {
+         #[cfg(all(
+-            target_family = "wasm",
++            all(target_family = "wasm", not(target_os = "linux")),
+             not(any(target_os = "emscripten", target_os = "wasi")),
+             feature = "wasm-bindgen"
+         ))]
+@@ -104,7 +104,7 @@
+         }
+ 
+         #[cfg(not(all(
+-            target_family = "wasm",
++            all(target_family = "wasm", not(target_os = "linux")),
+             not(any(target_os = "emscripten", target_os = "wasi")),
+             feature = "wasm-bindgen"
+         )))]
+@@ -1585,7 +1585,7 @@
+ }
+ 
+ #[cfg(all(
+-    target_family = "wasm",
++    all(target_family = "wasm", not(target_os = "linux")),
+     not(any(target_os = "emscripten", target_os = "wasi")),
+     feature = "wasm-bindgen"
+ ))]
+@@ -1603,7 +1603,7 @@
+ }
+ 
+ #[cfg(all(
+-    target_family = "wasm",
++    all(target_family = "wasm", not(target_os = "linux")),
+     not(any(target_os = "emscripten", target_os = "wasi")),
+     feature = "wasm-bindgen"
+ ))]
+--- a/src/sys/local_offset_at/mod.rs
++++ b/src/sys/local_offset_at/mod.rs
+@@ -6,7 +6,7 @@
+ #[cfg_attr(target_family = "unix", path = "unix.rs")]
+ #[cfg_attr(
+     all(
+-        target_family = "wasm",
++        all(target_family = "wasm", not(target_os = "linux")),
+         not(any(target_os = "emscripten", target_os = "wasi")),
+         feature = "wasm-bindgen"
+     ),

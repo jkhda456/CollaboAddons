@@ -1,0 +1,20 @@
+diff --git a/MagickCore/resource.c b/MagickCore/resource.c
+index 7bc3eac..98fa9ae 100644
+--- a/MagickCore/resource.c
++++ b/MagickCore/resource.c
+@@ -1291,8 +1291,15 @@ MagickPrivate MagickBooleanType ResourceComponentGenesis(void)
+       limit=DestroyString(limit);
+     }
+   number_threads=(ssize_t) GetOpenMPMaximumThreads();
++#if !defined(__wasm__)
+   if (number_threads > 1)
+     number_threads--;  /* reserve core for OS */
++#else
++  /*
++    A WebAssembly guest's CPUs are its engine's threads, each one the
++    program's: none to reserve.
++  */
++#endif
+   (void) SetMagickResourceLimit(ThreadResource,(size_t) number_threads);
+   limit=GetEnvironmentValue("MAGICK_THREAD_LIMIT");
+   if (limit != (char *) NULL)

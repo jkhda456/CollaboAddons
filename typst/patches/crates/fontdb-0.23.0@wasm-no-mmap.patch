@@ -1,0 +1,41 @@
+diff -ruN -x .cargo-checksum.json -x .cargo_vcs_info.json -x .cargo-ok -x target -x .gitignore -x .github a/src/lib.rs b/src/lib.rs
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -265,7 +265,12 @@
+     // A non-generic version.
+     #[cfg(all(feature = "fs", feature = "memmap"))]
+     fn load_font_file_impl(&mut self, path: &std::path::Path) -> Result<(), std::io::Error> {
++        // wasm32 Linux (collaboCore's guest) has no mmap(): the file is read instead.
++        #[cfg(target_arch = "wasm32")]
++        let data: &[u8] = &std::fs::read(path)?;
++        #[cfg(not(target_arch = "wasm32"))]
+         let file = std::fs::File::open(path)?;
++        #[cfg(not(target_arch = "wasm32"))]
+         let data: &[u8] = unsafe { &memmap2::MmapOptions::new().map(&file)? };
+ 
+         self.load_fonts_from_file(path, data);
+@@ -753,7 +758,12 @@
+                 return Some((data.clone(), face_index));
+             }
+             Source::File(ref path) => {
++                #[cfg(target_arch = "wasm32")]
++                let shared_data = std::sync::Arc::new(std::fs::read(path).ok()?)
++                    as std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>;
++                #[cfg(not(target_arch = "wasm32"))]
+                 let file = std::fs::File::open(path).ok()?;
++                #[cfg(not(target_arch = "wasm32"))]
+                 let shared_data = std::sync::Arc::new(memmap2::MmapOptions::new().map(&file).ok()?)
+                     as std::sync::Arc<dyn AsRef<[u8]> + Send + Sync>;
+                 (path.clone(), shared_data)
+@@ -910,7 +920,11 @@
+             }
+             #[cfg(all(feature = "fs", feature = "memmap"))]
+             Source::File(ref path) => {
++                #[cfg(target_arch = "wasm32")]
++                let data: &[u8] = &std::fs::read(path).ok()?;
++                #[cfg(not(target_arch = "wasm32"))]
+                 let file = std::fs::File::open(path).ok()?;
++                #[cfg(not(target_arch = "wasm32"))]
+                 let data = unsafe { &memmap2::MmapOptions::new().map(&file).ok()? };
+ 
+                 Some(p(data))

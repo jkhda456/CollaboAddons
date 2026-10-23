@@ -1,0 +1,39 @@
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -46,7 +46,7 @@
+ #![cfg_attr(
+     all(
+         feature = "nightly",
+-        target_family = "wasm",
++        all(target_family = "wasm", not(target_os = "linux")),
+         target_feature = "atomics"
+     ),
+     feature(stdarch_wasm_atomic_wait)
+--- a/src/parking_lot.rs
++++ b/src/parking_lot.rs
+@@ -18,7 +18,7 @@
+ // Don't use Instant on wasm32-unknown-unknown, it just panics.
+ cfg_if::cfg_if! {
+     if #[cfg(all(
+-        target_family = "wasm",
++        all(target_family = "wasm", not(target_os = "linux")),
+         target_os = "unknown",
+         target_vendor = "unknown"
+     ))] {
+--- a/src/thread_parker/mod.rs
++++ b/src/thread_parker/mod.rs
+@@ -68,12 +68,12 @@
+         mod imp;
+     } else if #[cfg(all(
+         feature = "nightly",
+-        target_family = "wasm",
++        all(target_family = "wasm", not(target_os = "linux")),
+         target_feature = "atomics"
+     ))] {
+         #[path = "wasm_atomic.rs"]
+         mod imp;
+-    } else if #[cfg(target_family = "wasm")] {
++    } else if #[cfg(all(target_family = "wasm", not(target_os = "linux")))] {
+         #[path = "wasm.rs"]
+         mod imp;
+     } else {

@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# userspace/bin/wasm-cc as the add-on's builds call it (CC of CMake, configure, make). CMake adds -v
+# to the compiles and links whose output it reads (the compiler's ABI), and wasm-cc takes any -v for
+# a question to the compiler and links nothing: -v goes through only alone.
+U="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../userspace" && pwd)"
+[[ $# == 1 && "$1" == -v ]] && exec "$U/bin/wasm-cc" -v
+args=()
+for a in "$@"; do case "$a" in -v|-Wl,-v) ;; *) args+=("$a") ;; esac; done
+exec "$U/bin/wasm-cc" "${args[@]}"

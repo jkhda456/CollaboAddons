@@ -1,0 +1,42 @@
+# Every source the imagemagick add-on builds from but ImageMagick itself (the clone ../org/ImageMagick
+# at IM_REV, build.sh): name, URL, sha256 of the download, and the file name it is kept under in
+# build/dl when the URL's own name says too little. A file another add-on has downloaded already
+# (wpe, python-extension, typst) is taken from its build/dl, hard-linked, and checked the same.
+#
+# The delegate libraries are the versions the other add-ons build (wpe: libpng, libjpeg-turbo,
+# libwebp, FreeType, libxml2; python-extension: zlib, xz, libtiff, Little CMS, OpenJPEG), with the
+# sha256 those add-ons pin. Their projects sign releases rather than publish checksums: for those,
+# the hash of the download reviewed when it was first added.
+
+# the delegate libraries (static, in the one program)
+zlib          https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz                                    9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23
+xz            https://github.com/tukaani-project/xz/releases/download/v5.6.4/xz-5.6.4.tar.gz                               269e3f2e512cbd3314849982014dc199a7b2148cf5c91cedc6db629acdf5e09b
+libpng        https://download.sourceforge.net/libpng/libpng-1.6.58.tar.xz                                                 28eb403f51f0f7405249132cecfe82ea5c0ef97f1b32c5a65828814ae0d34775
+jpegturbo     https://github.com/libjpeg-turbo/libjpeg-turbo/releases/download/3.2.0/libjpeg-turbo-3.2.0.tar.gz            6f30092cef9fb839779646608f4ee14ae3cbac989c47fa05e841b0841f09878e
+libwebp       https://storage.googleapis.com/downloads.webmproject.org/releases/webp/libwebp-1.6.0.tar.gz                  e4ab7009bf0629fd11982d4c2aa83964cf244cffba7347ecd39019a9e38c4564
+tiff          https://download.osgeo.org/libtiff/tiff-4.7.1.tar.gz                                                         f698d94f3103da8ca7438d84e0344e453fe0ba3b7486e04c5bf7a9a3fabe9b69
+openjpeg      https://github.com/uclouvain/openjpeg/archive/v2.5.4.tar.gz                                                  a695fbe19c0165f295a8531b1e4e855cd94d0875d2f88ec4b61080677e27188a  openjpeg-2.5.4.tar.gz
+freetype      https://download.savannah.gnu.org/releases/freetype/freetype-2.14.3.tar.xz                                   36bc4f1cc413335368ee656c42afca65c5a3987e8768cc28cf11ba775e785a5f
+lcms2         https://github.com/mm2/Little-CMS/releases/download/lcms2.19.1/lcms2-2.19.1.tar.gz                           bfc54f7bab59fbc921012014a8032e4cba4abd46db47d46b76416a8c0b2815c8
+libxml2       https://download.gnome.org/sources/libxml2/2.15/libxml2-2.15.4.tar.xz                                        98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821
+
+# fonts (/usr/share/fonts): DejaVu (Latin, Greek, Cyrillic; Bitstream Vera license) and Nanum
+# Gothic / Myeongjo (Korean, with Latin; SIL OFL 1.1), the files the wpe and typst add-ons carry
+dejavu        https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2    fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7
+nanum-gothic-regular   https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf             76f45ef4a6bcff344c837c95a7dcc26e017e38b5846d5ae0cdcb5b86be2e2d31
+nanum-gothic-bold      https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Bold.ttf                f96298f9fb18e364d2370f4c3ce948ac67a2b61af992d7234bc15c42b033c674
+nanum-myeongjo-regular https://github.com/google/fonts/raw/main/ofl/nanummyeongjo/NanumMyeongjo-Regular.ttf         7ed9e8653a8ed04285d51dc343ffea6eb3d9c73afc27383ea8929ee4ffd03205
+nanum-myeongjo-bold    https://github.com/google/fonts/raw/main/ofl/nanummyeongjo/NanumMyeongjo-Bold.ttf            bc9ed8e60d93fe6db054b8fb988481b625f2eef8cb2317ad0e9834681b8fe3f3
+nanum-ofl              https://github.com/google/fonts/raw/main/ofl/nanumgothic/OFL.txt                             eeacf16032901d0ed0456876ec77b8f0fda6b3fecec7d972f8543eb602e6c30f
+
+# LLVM 19.1.7 (the release of this machine's clang-19): its OpenMP runtime (libomp), and libc++ for
+# the headers libomp's C++ includes; the archive the node, jdk, nmap, wpe and python-extension
+# add-ons download
+llvm          https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.7/llvm-project-19.1.7.src.tar.xz       82401fea7b79d0078043f7598b835284d6650a75b93e64b6f761ea7b63097501
+
+# HEIC and AVIF (libheif): HEVC decoding (libde265; no HEVC encoder: HEIC is read, not written),
+# AV1 decoding and encoding (libaom, its generic C code). Release archives; their projects publish
+# no checksums: the hash of the download reviewed when it was added (2026-10-15)
+libheif       https://github.com/strukturag/libheif/releases/download/v1.23.6/libheif-1.23.6.tar.gz              4484346dc5995319dbc11e3a1c35d0a2ec46511ce370900869337fd2c7033125
+libde265      https://github.com/strukturag/libde265/releases/download/v1.1.3/libde265-1.1.3.tar.gz              554228bd17788c99a7e63b37ab5634722190e6e2bf60c1dcb01cef328e133905
+libaom        https://storage.googleapis.com/aom-releases/libaom-3.15.2.tar.gz                                   67bb54b245f33ed98600e08269e6139986e48114e14042474ddd8885801dfddc
