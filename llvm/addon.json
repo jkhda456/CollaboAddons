@@ -1,4 +1,4 @@
 {
   "name": "llvm",
-  "description": "LLVM toolchain in the guest: clang, opt, llc, llvm-mc, lld, llvm-readobj, llvm-objdump, llvm-nm, llvm-dwarfdump, llvm-symbolizer, llvm-objcopy as wasm32 Linux programs"
+  "description": "LLVM toolchain in the guest: clang, lld, llvm-ar and the LLVM tools as wasm32 Linux programs, with cc/c++ and a sysroot (musl, libc++ with exceptions, compiler-rt) to build the guest's own programs and the shared libraries its dlopen loads"
 }

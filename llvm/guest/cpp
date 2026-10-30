@@ -1,0 +1,3 @@
+#!/bin/sh
+# cpp: the C preprocessor, as cc runs it (cc -E)
+exec /usr/bin/cc -E "$@"

@@ -1,0 +1,140 @@
+#!/bin/sh
+# cc, c++: the guest's C and C++ compiler — clang, for programs and shared libraries of the guest's
+# own, the way userspace/bin/wasm-cc builds the system's on the host:
+#
+#   compile    wasm32 with Linux's macros; atomics and bulk memory (a program's memory is shared:
+#              threads); setjmp/longjmp and C++ exceptions as WebAssembly exceptions, in the
+#              standard encoding (the engine runs no other); position-independent with default
+#              visibility, as on Linux (any object can go into a shared library, which exports what
+#              it does not hide); headers from /usr/include (C++: libc++'s, c++/v1) and
+#              /usr/local/include
+#   link       a program: crt1.o, the C library, compiler-rt (C++: libc++, libc++abi, libunwind
+#              first); its memory imported and shared, as the kernel runs every program; a function
+#              table from 3 (function pointers 1 and 2 are SIG_IGN and SIG_HOLD); 8 MiB of stack
+#   -shared    a library the C library's dlopen loads: a WebAssembly side module (wasm-ld
+#              --experimental-pic -shared), its own symbols bound to itself (-Bsymbolic), what it
+#              does not define imported from the program or the libraries loaded before it, its
+#              constructors in __wasm_call_ctors (which wasm-ld does not export by itself: the
+#              loader calls it), its thread-local storage set up by __wasm_init_tls for each
+#              thread; compiler-rt in it (C++: libc++ too), not the C library
+#   -rdynamic  a program that loads them: the whole C library in it and exported (libc.exports),
+#              everything else not hidden exported, and a function table that can grow
+#   -r         a partial link: objects only
+#
+# Linker options of GNU ld that wasm-ld lacks, which build systems for Linux pass (-Wl,--as-needed,
+# --version-script, -z relro, --start-group, ...), are left out, and so are a program's table
+# options in a library's link (Python's LDSHARED has --export-table); -lstdc++, -lgcc, -latomic and
+# the like name what is linked anyway. `cc -dumpmachine` says wasm32-unknown-linux-musl.
+CLANG=/usr/bin/clang
+LIB=/usr/lib
+RT=$LIB/clang/24/lib/wasm32-unknown-unknown/libclang_rt.builtins
+
+case ${0##*/} in *++) cxx=1 ;; *) cxx=0 ;; esac
+
+link=1 shared=0 partial=0 rdynamic=0 probe=0 startfiles=1 stdlibs=1
+for a; do
+  case $a in
+    -c|-S|-E|-M|-MM|-fsyntax-only) link=0 ;;
+    -shared) shared=1 ;;
+    -r|-Wl,-r|-Wl,--relocatable) partial=1 ;;
+    -rdynamic) rdynamic=1 ;;
+    -nostdlib) startfiles=0 stdlibs=0 ;;
+    -nostartfiles) startfiles=0 ;;
+    -nodefaultlibs) stdlibs=0 ;;
+    -lstdc++|-lc++|-lsupc++) cxx=1 ;;
+    -print-*|--print-*|--version|-dumpversion|--help) probe=1 ;;
+    -dumpmachine) echo wasm32-unknown-linux-musl; exit 0 ;;
+  esac
+done
+[ $# = 1 ] && [ "$1" = -v ] && probe=1
+
+COMMON="--target=wasm32-unknown-unknown --sysroot=/usr -matomics -mbulk-memory -fwasm-exceptions
+  -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false -D__linux__=1 -D__linux=1 -D__unix__=1
+  -D__unix=1 -D__gnu_linux__=1 -Wno-unused-command-line-argument -Wno-override-module"
+# shellcheck disable=SC2086
+if [ $probe = 1 ]; then exec $CLANG $COMMON "$@"; fi
+COMMON="$COMMON -fPIC -fvisibility=default -idirafter /usr/local/include"
+# shellcheck disable=SC2086
+if [ $link = 0 ]; then exec $CLANG $COMMON "$@"; fi
+
+# ld_opt OPT: one option of a -Wl, list (or -Xlinker's), added to $ldout (comma-separated) unless
+# wasm-ld lacks it; the option after one that takes a value is that value.
+ld_skip=0 ld_z=0 ldout=
+ld_add() { ldout="${ldout:+$ldout,}$1"; }
+ld_opt() {
+  if [ $ld_skip = 1 ]; then ld_skip=0; return; fi
+  if [ $ld_z = 1 ]; then
+    ld_z=0
+    case $1 in stack-size=*|muldefs) ld_add -z; ld_add "$1" ;; esac
+    return
+  fi
+  case $1 in
+    -z) ld_z=1 ;;
+    -zstack-size=*|-zmuldefs) ld_add "$1" ;;
+    -z*) ;;
+    --version-script|--dynamic-list|--exclude-libs|-rpath-link|--rpath-link) ld_skip=1 ;;
+    --version-script=*|--dynamic-list=*|--exclude-libs=*|-rpath-link=*|--rpath-link=*|--hash-style=*|--icf=*|\
+    --sort-section=*|--compress-debug-sections=*|--dependency-file=*|--as-needed|--no-as-needed|--no-undefined|\
+    --start-group|--end-group|-\(|-\)|--eh-frame-hdr|--enable-new-dtags|--disable-new-dtags|\
+    --allow-shlib-undefined|--no-allow-shlib-undefined|-Bsymbolic-functions|-Bsymbolic-non-weak-functions|\
+    --warn-common|--sort-common|--copy-dt-needed-entries|--no-copy-dt-needed-entries|--push-state|--pop-state|\
+    -x|--discard-all|-X|--discard-locals) ;;
+    -E) ld_add --export-dynamic ;;
+    -h) ld_add -soname ;;
+    # a program's table options, which a library (it imports the program's table) cannot have:
+    # Python's LDSHARED is its LDFLAGS with -shared
+    --export-table|--growable-table) [ $shared = 1 ] || ld_add "$1" ;;
+    *) ld_add "$1" ;;
+  esac
+}
+
+# the arguments again, for the link: what is left out, the linker options filtered
+xlinker=0
+for a; do
+  shift
+  if [ $xlinker = 1 ]; then
+    xlinker=0 ldout=; ld_opt "$a"
+    [ -n "$ldout" ] && set -- "$@" "-Wl,$ldout"
+    continue
+  fi
+  case $a in
+    -rdynamic|-static|-static-libgcc|-static-libstdc++|-shared-libgcc|-pie|-no-pie|-nopie|-static-pie|-fuse-ld=*|\
+    --ld-path=*|-lstdc++|-lc++|-lc++abi|-lsupc++|-lunwind|-lgcc|-lgcc_s|-lgcc_eh|-latomic|-lssp|-lssp_nonshared) ;;
+    -Xlinker) xlinker=1 ;;
+    -Wl,*)
+      ldout= rest=${a#-Wl,},
+      while [ -n "$rest" ]; do
+        o=${rest%%,*} rest=${rest#*,}
+        [ -n "$o" ] && ld_opt "$o"
+      done
+      [ -n "$ldout" ] && set -- "$@" "-Wl,$ldout" ;;
+    *) set -- "$@" "$a" ;;
+  esac
+done
+
+# shellcheck disable=SC2086
+if [ $partial = 1 ]; then exec $CLANG $COMMON -nostdlib "$@"; fi
+
+cxxlibs=
+[ $cxx = 1 ] && [ $stdlibs = 1 ] && cxxlibs="-lc++ -lc++abi -lunwind"
+
+if [ $shared = 1 ]; then
+  rt=; [ $stdlibs = 1 ] && rt=$RT-shared.a
+  # shellcheck disable=SC2086
+  exec $CLANG $COMMON -nostdlib -L$LIB -L/usr/local/lib \
+    -Wl,--experimental-pic -Wl,--shared-memory -Wl,--import-memory -Wl,-Bsymbolic -Wl,--export-dynamic \
+    -Wl,--no-entry -Wl,--unresolved-symbols=import-dynamic -Wl,--export-if-defined=__wasm_call_ctors \
+    -Wl,--export-if-defined=__wasm_init_tls -Wl,--export-if-defined=__tls_size \
+    -Wl,--export-if-defined=__tls_align -Wl,--export-if-defined=__tls_base \
+    "$@" -x none $cxxlibs $rt
+fi
+# (-x none after the arguments, above and below: a -x c among them, as in `cc -x c -`, would take
+# compiler-rt for C)
+
+crt=; [ $startfiles = 1 ] && crt=$LIB/crt1.o
+libs=; [ $stdlibs = 1 ] && libs="$cxxlibs -lc $RT.a"
+dynamic=; [ $rdynamic = 1 ] && dynamic="-Wl,--export-dynamic -Wl,--growable-table -Wl,@$LIB/libc.exports"
+# shellcheck disable=SC2086
+exec $CLANG $COMMON -nostdlib -L$LIB -L/usr/local/lib -Wl,--table-base=3 -Wl,--import-memory \
+  -Wl,--max-memory=4294967296 -Wl,--shared-memory -Wl,--export-table -Wl,-z,stack-size=8388608 \
+  $crt $dynamic "$@" -x none $libs

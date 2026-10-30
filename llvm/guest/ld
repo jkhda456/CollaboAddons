@@ -1,0 +1,3 @@
+#!/bin/sh
+# ld: the linker, wasm-ld (lld run as `ld` would be its ELF linker)
+exec /usr/bin/wasm-ld "$@"
