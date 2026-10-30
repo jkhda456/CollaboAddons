@@ -32,6 +32,14 @@ archive() {
     && strip ab -o ab.stripped && ./ab.stripped && objdump -h ab.stripped | grep -c CODE \
     && llvm-readobj --file-headers ab | grep Format && cc -r a.o b.o -o ab.o && nm ab.o
 }
+main_envp() { cc envp.c -o envp && ENVP_CHECK=1 ./envp a b; }
+lto() { c++ -O2 -flto lto.cpp -o lto && ./lto && c++ -O2 -flto=thin lto.cpp -o ltothin && ./ltothin; }
+# strip keeps what dlopen reads of a library (dylink.0: patches/0005), as CMake's install/strip
+# and pybind11's modules strip them
+strip_shared() {
+  cp lib.so lib.stripped.so && cp libxx.so libxx.stripped.so && strip lib.stripped.so && llvm-strip libxx.stripped.so \
+    && objdump -h lib.stripped.so | grep -c dylink.0 && ./dlmain ./lib.stripped.so ./libxx.stripped.so | head -1
+}
 probes() {
   cc -dumpmachine
   test -f "$(cc -print-libgcc-file-name)" && echo "compiler-rt: found"
@@ -42,7 +50,7 @@ probes() {
   c++ -v 2>&1 | head -1
 }
 
-for s in tools hello cfeatures cxx_hello cxx_features shared ld_options archive probes; do
+for s in tools hello cfeatures cxx_hello cxx_features shared ld_options archive main_envp lto strip_shared probes; do
   echo "### $s"
   ( $s ) 2>&1
   echo "### status $?"

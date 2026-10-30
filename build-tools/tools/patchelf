@@ -1,0 +1,58 @@
+#!/bin/sh
+# patchelf for the guest, whose programs and libraries are WebAssembly, not ELF: they have no run
+# path, no interpreter, no soname and no DT_NEEDED a program is linked with (a program loads its
+# libraries with dlopen, by path). So what patchelf reads of them is nothing, and what it would
+# change is not there to change: --print-* print nothing, --set-*/--add-*/--remove-* leave the
+# file as it is. Build tools that fix up a library's run path when they install it (meson-python;
+# without a patchelf on PATH it asks pip to build one) get the answer they would on a library
+# without one. A file that is not WebAssembly is refused, as patchelf refuses what is not ELF.
+version="patchelf 0.18.0 (collaboCore: WebAssembly files, which have no run path)"
+
+usage() {
+  echo "usage: patchelf OPTION... FILE..." >&2
+  echo "  --print-rpath --print-needed --print-soname: nothing (WebAssembly has none)" >&2
+  echo "  --set-rpath P --add-rpath P --remove-rpath --shrink-rpath --force-rpath --set-soname S" >&2
+  echo "  --add-needed L --remove-needed L --replace-needed A B --no-default-lib: nothing to change" >&2
+  echo "  --print-interpreter --set-interpreter: refused (a WebAssembly program has no interpreter)" >&2
+}
+
+files= interp=0
+while [ $# -gt 0 ]; do
+  case $1 in
+    --version) echo "$version"; exit 0 ;;
+    -h|--help) usage; exit 0 ;;
+    --set-rpath|--add-rpath|--set-soname|--add-needed|--remove-needed|--allowed-rpath-prefixes|--page-size|\
+    --output|--add-debug-tag|--rename-dynamic-symbols|--clear-symbol-version|--set-os-abi)
+      [ $# -ge 2 ] || { echo "patchelf: $1 needs an argument" >&2; exit 1; }
+      shift ;;
+    --replace-needed)
+      [ $# -ge 3 ] || { echo "patchelf: $1 needs two arguments" >&2; exit 1; }
+      shift 2 ;;
+    --print-interpreter|--set-interpreter|--interpreter)
+      interp=1
+      case $1 in --set-interpreter|--interpreter) shift ;; esac ;;
+    --*) ;;
+    *) files="$files
+$1" ;;
+  esac
+  shift
+done
+[ -n "$files" ] || { usage; exit 1; }
+
+status=0
+printf '%s\n' "$files" | {
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    if [ ! -f "$f" ]; then
+      echo "patchelf: getting info about '$f': No such file or directory" >&2; status=1; continue
+    fi
+    # \0asm: the WebAssembly binary format's magic
+    if [ "$(head -c 4 "$f" | od -An -tx1 | tr -d ' \n')" != "0061736d" ]; then
+      echo "patchelf: $f: not a WebAssembly file (this guest's patchelf knows no other)" >&2; status=1; continue
+    fi
+    if [ $interp = 1 ]; then
+      echo "patchelf: $f: a WebAssembly program has no interpreter" >&2; status=1
+    fi
+  done
+  exit $status
+}

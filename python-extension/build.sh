@@ -16,7 +16,7 @@
 #
 #   addons/python-extension/build.sh [PACKAGE...]   the packages to put in (default: all, in PACKAGES order)
 #   FORCE=stage[,stage]    redo those stages: libcxx host rust-std <package> <package>-src
-#                          fpcast-<package> install cpio
+#                          fpcast-<package> install dev cpio
 #   JOBS=N
 set -euo pipefail
 PYEXT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -175,9 +175,27 @@ if stage install "$INSTALLED" "${dones[@]}" "$PYEXT/tools/install-tree.py" "$P/s
   touch "$INSTALLED"
 fi
 
+# ── dev: what a build of an extension module in the guest reads ────────────────────────────────
+# The interpreter's headers, in /usr/include/python3.13 (sysconfig's INCLUDEPY), and its
+# pkg-config file (python3.pc, python-3.13.pc), as a distribution's python3-dev has them; numpy's
+# are in its package already (numpy.get_include()). Not the -embed ones: there is no libpython to
+# link a program with. Libs.private names the interpreter's own static libraries (python/deps,
+# linked into it, at their build paths): a module links none of them.
+DEV="$B/dev"
+if stage dev "$DEV/.done" "$P/stage/usr/include/python3.13/pyconfig.h" "$P/stage/usr/lib/pkgconfig/python-3.13.pc"; then
+  rm -rf "$DEV"; mkdir -p "$DEV/include" "$DEV/pkgconfig"
+  cp -a "$P/stage/usr/include/python3.13" "$DEV/include/python3.13"
+  sed '/^Libs.private:/d' "$P/stage/usr/lib/pkgconfig/python-3.13.pc" > "$DEV/pkgconfig/python-3.13.pc"
+  if grep -rlq "$ROOT" "$DEV"; then
+    echo "the Python headers or python-3.13.pc name build paths:" >&2; grep -rl "$ROOT" "$DEV" >&2; exit 1
+  fi
+  touch "$DEV/.done"
+  redo cpio
+fi
+
 # ── cpio: the overlay ───────────────────────────────────────────────────────────────────────────
 CPIO="$PYEXT/out/python-extension.cpio"
-if stage cpio "$CPIO" "$INSTALLED"; then
+if stage cpio "$CPIO" "$INSTALLED" "$DEV/.done"; then
   rm -rf "$PYEXT/out/licenses"; mkdir -p "$PYEXT/out/licenses"
   for info in "$SITE"/*.dist-info; do
     pkg="$(basename "$info" | cut -d- -f1)"
@@ -193,8 +211,12 @@ if stage cpio "$CPIO" "$INSTALLED"; then
       break
     fi
   done
+  cp "$P/src/Python-3.13.14/LICENSE" "$PYEXT/out/licenses/addon-python-extension-cpython-headers.txt"
   python3 "$U/mkinitramfs.py" --overlay -o "$CPIO" \
     --tree usr/bin="$B/scripts" \
-    --tree usr/lib/python3.13/site-packages="$SITE"
+    --tree usr/lib/python3.13/site-packages="$SITE" \
+    --tree usr/include/python3.13="$DEV/include/python3.13" \
+    --file usr/lib/pkgconfig/python-3.13.pc="$DEV/pkgconfig/python-3.13.pc" \
+    --link usr/lib/pkgconfig/python3.pc=python-3.13.pc
 fi
 ls -l "$CPIO"

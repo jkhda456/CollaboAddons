@@ -1,0 +1,14 @@
+# Every source the build-tools add-on builds from: name, URL, sha256 of the download, and the file
+# name it is kept under in build/dl when the URL's own name says too little.
+# GNU make and pkgconf: their release tarballs (GNU signs its releases rather than publish
+# checksums: the hash of the download reviewed when it was added). ninja: the archive of its
+# GitHub tag. libc++ is LLVM 19.1.7's, the release of the host's clang-19 (ninja is C++), as the
+# nmap, node and jdk add-ons build it. googletest: what ninja's CMakeLists.txt pins for ninja_test
+# (built for the tests only, TEST=1). CMake: its release tarball, with the sha256 Kitware publishes
+# (cmake-4.4.5-SHA-256.txt).
+make       https://ftp.gnu.org/gnu/make/make-4.4.1.tar.gz                                              dd16fb1d67bfab79a72f5e8390735c49e3e8e70b4945a15ab1f81ddb78658fb3
+ninja      https://github.com/ninja-build/ninja/archive/refs/tags/v1.13.2.tar.gz                       974d6b2f4eeefa25625d34da3cb36bdcebe7fbce40f4c16ac0835fd1c0cbae17 ninja-1.13.2.tar.gz
+pkgconf    https://distfiles.ariadne.space/pkgconf/pkgconf-3.0.10.tar.xz                               9371b2f6372da574d4c6dc96fe9b1463037bcf6afcb6671c1555afde7b17e2de
+llvm       https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.7/llvm-project-19.1.7.src.tar.xz 82401fea7b79d0078043f7598b835284d6650a75b93e64b6f761ea7b63097501
+googletest https://github.com/google/googletest/releases/download/v1.16.0/googletest-1.16.0.tar.gz     78c676fc63881529bf97bf9d45948d905a66833fbfa5318ea2cd7478cb98f399
+cmake      https://github.com/Kitware/CMake/releases/download/v4.4.5/cmake-4.4.5.tar.gz                a0c54c88abb8078dd8eccadb717fc6bb194bf18e7d44c86309910288886e04e2

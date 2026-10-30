@@ -1,0 +1,41 @@
+diff --git a/tests/scripts/functions/shell b/tests/scripts/functions/shell
+index 55fec05..f65bf84 100644
+--- a/tests/scripts/functions/shell
++++ b/tests/scripts/functions/shell
+@@ -137,11 +137,16 @@ all: ; @echo $(.SHELLSTATUS)
+     # This test could be ported to Windows, using taskkill ... ?
+ 
+     # Figure out the exit code for SIGINT
+-    my $pid = fork();
+-    if (! $pid) {
+-        exec('kill -2 $$') or die "exec: Cannot execute sleep\n";
++    if ($Config{d_fork}) {
++        my $pid = fork();
++        if (! $pid) {
++            exec('kill -2 $$') or die "exec: Cannot execute sleep\n";
++        }
++        waitpid($pid, 0);
++    } else {
++        # a perl without fork(): the same through the shell system() starts
++        system('kill -2 $$');
+     }
+-    waitpid($pid, 0);
+     # .SHELLSTATUS for a signal gives 128 + the signal number
+     my $ret = $?;
+     if ($ret > 255) {
+diff --git a/tests/test_driver.pl b/tests/test_driver.pl
+index 9380195..8ccc090 100644
+--- a/tests/test_driver.pl
++++ b/tests/test_driver.pl
+@@ -1125,8 +1125,9 @@ sub _run_with_timeout
+       $code = (($vms_code & 0xFFF) >> 3) * 256;
+     }
+ 
+-  } elsif ($port_type eq 'W32' && $^O ne 'msys') {
+-    # Using ActiveState Perl (?)
++  } elsif (($port_type eq 'W32' && $^O ne 'msys') || !$Config{d_fork}) {
++    # Using ActiveState Perl (?), or a perl without fork() whose system(1, LIST)
++    # starts the program without waiting, as Windows perl's does
+     my $pid = system(1, @_);
+     $pid > 0 or die "Cannot execute $_[0]: $!\n";
+     local $SIG{ALRM} = sub {

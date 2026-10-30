@@ -187,7 +187,16 @@ pub fn spawn_on_pty(pty: &Pty, argv: &[String], env: &[(String, String)]) -> Res
         libc::posix_spawn_file_actions_adddup2(&mut actions, 0, 2);
         let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
         libc::posix_spawnattr_init(&mut attr);
-        libc::posix_spawnattr_setflags(&mut attr, libc::POSIX_SPAWN_SETSID as libc::c_short);
+        // SIGPIPE back to its default: we ignore it (main), and an ignored signal stays ignored
+        // across exec; the session's `yes | head` must end with yes killed, as everywhere else.
+        let mut def: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut def);
+        libc::sigaddset(&mut def, libc::SIGPIPE);
+        libc::posix_spawnattr_setsigdefault(&mut attr, &def);
+        libc::posix_spawnattr_setflags(
+            &mut attr,
+            (libc::POSIX_SPAWN_SETSID | libc::POSIX_SPAWN_SETSIGDEF) as libc::c_short,
+        );
         let mut pid: libc::pid_t = 0;
         let rc = libc::posix_spawnp(&mut pid, program.as_ptr(), &actions, &attr, argv_ptrs.as_ptr(), env_ptrs.as_ptr());
         libc::posix_spawn_file_actions_destroy(&mut actions);

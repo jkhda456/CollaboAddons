@@ -1,0 +1,44 @@
+diff --git a/Utilities/cmlibuv/src/unix/linux.c b/Utilities/cmlibuv/src/unix/linux.c
+index 0ba2e987..a1c67386 100644
+--- a/Utilities/cmlibuv/src/unix/linux.c
++++ b/Utilities/cmlibuv/src/unix/linux.c
+@@ -455,6 +455,8 @@ int uv__io_uring_register(int fd, unsigned opcode, void* arg, unsigned nargs) {
+ static int uv__use_io_uring(uint32_t flags) {
+ #if defined(__ANDROID_API__)
+   return 0;  /* Possibly available but blocked by seccomp. */
++#elif defined(__wasm__)
++  return 0;  /* collaboCore's wasm32 guest: no io_uring, and no mmap for its rings. */
+ #elif defined(__arm__) && __SIZEOF_POINTER__ == 4
+   /* See https://github.com/libuv/libuv/issues/4158. */
+   return 0;  /* All 32 bits kernels appear buggy. */
+@@ -500,6 +502,14 @@ static void uv__iou_init(int epollfd,
+                          struct uv__iou* iou,
+                          uint32_t entries,
+                          uint32_t flags) {
++#if defined(__wasm__)
++  /* Never used there (uv__use_io_uring): the ring stays "failed", epoll does it all. */
++  (void) epollfd;
++  (void) iou;
++  (void) entries;
++  (void) flags;
++}
++#else
+   struct uv__io_uring_params params;
+   struct epoll_event e;
+   size_t cqlen;
+@@ -622,12 +632,15 @@ fail:
+ 
+   uv__close(ringfd);
+ }
++#endif
+ 
+ 
+ static void uv__iou_delete(struct uv__iou* iou) {
+   if (iou->ringfd > -1) {
++#if !defined(__wasm__)
+     munmap(iou->sq, iou->maxlen);
+     munmap(iou->sqe, iou->sqelen);
++#endif
+     uv__close(iou->ringfd);
+     iou->ringfd = -1;
+   }

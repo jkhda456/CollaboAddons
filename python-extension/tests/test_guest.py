@@ -145,6 +145,20 @@ def main():
         check(f"{c}: as with the wheels ({len(want.splitlines())} lines)", status == "0" and got == want,
               (diff or f"status {status}") + ("\n" + err[-2000:] if status != "0" else ""))
 
+    # the interpreter's headers and python3.pc, where sysconfig says a build finds them
+    rc, out, err = guest("""
+        inc=$(python3 -c 'import sysconfig; print(sysconfig.get_paths()["include"])'); echo "include $inc"
+        ls "$inc"/Python.h "$inc"/pyconfig.h "$inc"/cpython/object.h >/dev/null && echo headers-ok
+        grep -E '^(Version|Cflags):' /usr/lib/pkgconfig/python3.pc; grep -c 'Libs.private\\|/opt/' /usr/lib/pkgconfig/python3.pc
+        ls /usr/lib/pkgconfig/python3-embed.pc 2>&1 | grep -c 'No such file'
+        python3 -c 'import sysconfig as s; print("compilers", s.get_config_var("CC"), s.get_config_var("CXX"), s.get_config_var("LDSHARED").split()[:2], s.get_config_var("LDCXXSHARED").split()[:2])'
+    """)
+    check("the interpreter's headers in /usr/include/python3.13 (sysconfig), python3.pc without build paths, no -embed",
+          "include /usr/include/python3.13" in out and "headers-ok" in out and "Version: 3.13" in out
+          and "Cflags: -I${includedir}/python3.13" in out and "\n0\n1\ncompilers" in out, out + err)
+    check("sysconfig's compilers are the guest's cc and c++ (CXX, LDCXXSHARED: python/pack-stdlib.sh)",
+          "compilers cc c++ ['cc', '-shared'] ['c++', '-shared']" in out, out + err)
+
     # pip, the console scripts, threads, what differs from the wheels
     rc, out, err = guest("""
         python3 -m pip list --format=freeze 2>/dev/null | grep -iE '^(""" + "|".join(VERSIONS) + """)=='

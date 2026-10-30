@@ -1,4 +1,4 @@
 {
   "name": "python-extension",
-  "description": "More of Python for the guest: packages with compiled extension modules — numpy, Pillow, LIEF, lxml, cffi, cryptography and rpds-py — built for the guest as shared libraries its python3 loads with dlopen, added to site-packages, and the MCP SDK (mcp) with what it needs; needs the Python image, built with dlopen (addons/mod 0019-0022)"
+  "description": "More of Python for the guest: packages with compiled extension modules — numpy, Pillow, LIEF, lxml, cffi, cryptography and rpds-py — built for the guest as shared libraries its python3 loads with dlopen, added to site-packages, and the MCP SDK (mcp) with what it needs, and the interpreter's headers (/usr/include/python3.13, python3.pc) for builds in the guest; needs the Python image, built with dlopen (addons/mod 0019-0022)"
 }

@@ -1,0 +1,13 @@
+# GNU make's run_make_tests.pl in the guest: the scripts that may fail, with how many of their
+# tests at most. Not make's: what the guest runs them with.
+features/archives 15     # ar: the guest has none (the llvm add-on's llvm-ar, once it has it)
+features/output-sync 1   # TMPDIR made unwritable (mode 0500): the guest runs as root, which writes there
+features/temp_stdin 1    # the same
+functions/shell 1        # the shell's "can't execute 'bad-command'" has quotes, which break the test's echo '...'
+#
+# CMake's unit tests in the guest (ctest over build/cmake, mounted where it was built) that may fail:
+kwsys.testProcess-4 -                     # a child that crashes by writing to address 4: in WebAssembly's memory that is memory, no fault
+kwsys.testProcess-5 -                     # the same, as the child of a child
+CMakeLib.testDebuggerAdapterPipe -        # a Unix socket bound in the build tree, a shared folder: the engine's virtio-fs makes no sockets or FIFOs (MKNOD)
+CMakeLib.testDebuggerNamedPipe-Project -  # the same
+CMakeLib.testDebuggerNamedPipe-Script -   # the same

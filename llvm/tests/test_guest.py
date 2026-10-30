@@ -42,6 +42,9 @@ EXPECTED = {
         "file: written 123",
     ],
     "cxx_hello": ["hello from c++"],
+    "main_envp": ["envp: argc 3, ENVP_CHECK there"],
+    "lto": ["lto caught: deep 3", "lto longjmp: 7", "lto caught: deep 3", "lto longjmp: 7"],
+    "strip_shared": ["1", "lib_add: 45"],
     "cxx_features": [
         "static constructor",
         "unwound frame 0",

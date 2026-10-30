@@ -1,0 +1,4 @@
+{
+  "name": "build-tools",
+  "description": "The programs that drive a build, for the guest: GNU make 4.4.1 (gmake), ninja 1.13.2, pkgconf 3.0.10 (pkg-config) and CMake 4.4.5 (cmake, ctest), without fork(): their commands start with posix_spawn; the compilers are the llvm add-on's"
+}

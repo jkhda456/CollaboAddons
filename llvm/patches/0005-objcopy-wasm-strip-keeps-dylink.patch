@@ -1,0 +1,15 @@
+--- a/llvm/lib/ObjCopy/wasm/WasmObjcopy.cpp
++++ b/llvm/lib/ObjCopy/wasm/WasmObjcopy.cpp
+@@ -27,7 +27,11 @@
+ 
+ static bool isEngineInterpretedSection(const Section &Sec) {
+   return Sec.SectionType != llvm::wasm::WASM_SEC_CUSTOM ||
+-         Sec.Name.starts_with("metadata.code.");
++         Sec.Name.starts_with("metadata.code.") ||
++         // A shared library's (wasm-ld -shared): what its dynamic loader reads
++         // to load it (its memory and table, the libraries it needs), as ELF's
++         // .dynamic, which strip keeps too.
++         Sec.Name == "dylink.0" || Sec.Name == "dylink";
+ }
+ 
+ static Error dumpSectionToFile(StringRef SecName, StringRef Filename,

@@ -72,6 +72,11 @@ What the host's `userspace/bin/wasm-cc` does for the system's programs, as a scr
 - **`-rdynamic`**: a program that loads them: the whole C library in it and exported
   (`/usr/lib/libc.exports`), everything else not hidden exported, a function table that can grow.
 - **`-r`**: a partial link, objects only.
+- **every link** passes the compile's exception options to the linker too
+  (`-Wl,-mllvm,-exception-model=wasm`, `-wasm-use-legacy-eh=false`, `-wasm-enable-sjlj`): with
+  `-flto` (pybind11's modules in Release, CMake's `INTERPROCEDURAL_OPTIMIZATION`) the objects are
+  bitcode, compiled in wasm-ld, which takes none of the compile's options — without them a C++
+  exception went uncaught and `longjmp` trapped.
 
 Build systems for Linux pass GNU ld's options, which wasm-ld lacks: `cc` leaves them out
 (`--as-needed`, `--no-undefined`, `--version-script`, `--dynamic-list`, `--exclude-libs`,
@@ -152,7 +157,9 @@ rethrow, `exception_ptr` across threads, RTTI, static constructors, threads, `st
 `std::format`); `cc -shared` and `c++ -shared` libraries loaded by a `cc -rdynamic` program
 (constructors, the program's C library and setjmp, thread-local storage, function pointers,
 libc++ and an exception thrown and caught in a library); a library linked with GNU ld's options;
-`ar`/`ranlib`/`nm`/`strip`/`objdump`/`cc -r`; the compiler's answers to build systems
+`ar`/`ranlib`/`nm`/`strip`/`objdump`/`cc -r`; `main(argc, argv, envp)` (the C library's
+`userspace/patches/musl-main-envp.patch`); C++ exceptions and setjmp/longjmp through `-flto` and
+`-flto=thin`; `strip` of shared libraries that still load; the compiler's answers to build systems
 (`-dumpmachine`, `-print-libgcc-file-name`, the predefined macros, `cpp`, a program from standard
 input, `cc -Wl,--version` as meson asks, `c++ -v`). Then `tests/pyext.sh`, with the Python image
 and the interpreter's headers (`python/stage`) mounted at `/usr/include/python3.13`: a C extension
@@ -169,6 +176,7 @@ What this platform lacks, in `patches/` (applied in order to the exported source
 | `0002-support-no-mmap-on-wasm` | no `mmap`: file mappings report "not supported" so files are read instead; "mapped" memory is page-aligned heap memory (lld's output buffers use it) |
 | `0003-clang-bytecode-no-musttail-without-wasm-tail-call` | the constant interpreter's `[[clang::musttail]]` needs the wasm tail-call feature; turned off as on PPC/i386 |
 | `0004-lld-macho-no-madvise-on-wasm` | lld's Mach-O page-in uses `madvise` |
+| `0005-objcopy-wasm-strip-keeps-dylink` | `strip`/`llvm-strip` (`--strip-all`) keeps only the sections the engine reads, and so removed a shared library's `dylink.0`, which the C library's dlopen reads: a stripped library (CMake's `install/strip`, pybind11's modules, which it strips) no longer loaded ("no dylink.0 section"). Kept, as ELF's `.dynamic` is |
 
 To change one: edit `build/src/...`, rebuild with `addons/llvm/build.sh` (incremental), then
 regenerate the patch against the pinned revision, e.g.

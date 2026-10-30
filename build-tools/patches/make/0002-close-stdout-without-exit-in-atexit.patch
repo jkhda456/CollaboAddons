@@ -1,0 +1,15 @@
+diff --git a/src/main.c b/src/main.c
+index a9d3a64..dc1c6eb 100644
+--- a/src/main.c
++++ b/src/main.c
+@@ -736,7 +736,9 @@ close_stdout (void)
+         perror_with_name (_("write error: stdout"), "");
+       else
+         O (error, NILF, _("write error: stdout"));
+-      exit (MAKE_TROUBLE);
++      /* _exit, as gnulib's close_stdout does: this runs from atexit, inside
++         exit, and exit called again there is undefined (musl traps).  */
++      _exit (MAKE_TROUBLE);
+     }
+ }
+ 

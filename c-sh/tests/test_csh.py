@@ -34,6 +34,9 @@ STEPS = [
     ("run_long", "c-sh run sh 'echo this-is-a-long-command-line-that-has-to-wrap-in-a-sixty-column-terminal-for-sure; echo after'"),
     ("run_bg", "c-sh run sh 'sleep 1 &'"),
     ("run_timeout", "c-sh run sh 'sleep 5' --timeout 1"),
+    # SIGPIPE is the session's default again (c-sh ignores it): yes ends when head has had enough,
+    # where an ignored one leaves busybox's yes writing for ever.
+    ("run_sigpipe", "c-sh run sh 'yes 123456789 | head -3000 | wc -l; echo pipeline-ended' --timeout 30"),
     ("interrupt", "c-sh key sh ctrl+c && c-sh run sh 'echo back'"),
     ("enter", "c-sh enter sh 'echo typed-line' && c-sh wait sh text typed-line --timeout 5"),
     ("read_new", "sleep 0.3; c-sh read sh"),
@@ -117,6 +120,7 @@ CHECKS = {
     "run_long": (0, ["this-is-a-long-command-line", "after"], ["CSH", "printf", '"$?"']),
     "run_bg": (0, [], ["CSH"]),
     "run_timeout": (3, ["timed out", "still running"], []),
+    "run_sigpipe": (0, ["3000", "pipeline-ended"], ["timed out"]),
     "interrupt": (0, ["back"], []),
     "enter": (0, [], []),
     "read_new": (0, ["typed-line"], []),

@@ -51,6 +51,10 @@ done
 COMMON="--target=wasm32-unknown-unknown --sysroot=/usr -matomics -mbulk-memory -fwasm-exceptions
   -mllvm -wasm-enable-sjlj -mllvm -wasm-use-legacy-eh=false -D__linux__=1 -D__linux=1 -D__unix__=1
   -D__unix=1 -D__gnu_linux__=1 -Wno-unused-command-line-argument -Wno-override-module"
+# The same code generation for what the linker compiles itself: with -flto (pybind11's modules,
+# CMake's INTERPROCEDURAL_OPTIMIZATION) objects are bitcode, compiled in wasm-ld, which takes none
+# of the compile's options — without these an exception went uncaught and longjmp trapped.
+LTO="-Wl,-mllvm,-exception-model=wasm -Wl,-mllvm,-wasm-use-legacy-eh=false -Wl,-mllvm,-wasm-enable-sjlj"
 # shellcheck disable=SC2086
 if [ $probe = 1 ]; then exec $CLANG $COMMON "$@"; fi
 COMMON="$COMMON -fPIC -fvisibility=default -idirafter /usr/local/include"
@@ -100,6 +104,9 @@ for a; do
   case $a in
     -rdynamic|-static|-static-libgcc|-static-libstdc++|-shared-libgcc|-pie|-no-pie|-nopie|-static-pie|-fuse-ld=*|\
     --ld-path=*|-lstdc++|-lc++|-lc++abi|-lsupc++|-lunwind|-lgcc|-lgcc_s|-lgcc_eh|-latomic|-lssp|-lssp_nonshared) ;;
+    # a library's -lc (zlib's link of libz.so): the C library is the program's, which a library
+    # imports from it; not PIC, it cannot go into one
+    -lc) [ $shared = 1 ] || set -- "$@" "$a" ;;
     -Xlinker) xlinker=1 ;;
     -Wl,*)
       ldout= rest=${a#-Wl,},
@@ -113,7 +120,7 @@ for a; do
 done
 
 # shellcheck disable=SC2086
-if [ $partial = 1 ]; then exec $CLANG $COMMON -nostdlib "$@"; fi
+if [ $partial = 1 ]; then exec $CLANG $COMMON $LTO -nostdlib "$@"; fi
 
 cxxlibs=
 [ $cxx = 1 ] && [ $stdlibs = 1 ] && cxxlibs="-lc++ -lc++abi -lunwind"
@@ -121,7 +128,7 @@ cxxlibs=
 if [ $shared = 1 ]; then
   rt=; [ $stdlibs = 1 ] && rt=$RT-shared.a
   # shellcheck disable=SC2086
-  exec $CLANG $COMMON -nostdlib -L$LIB -L/usr/local/lib \
+  exec $CLANG $COMMON $LTO -nostdlib -L$LIB -L/usr/local/lib \
     -Wl,--experimental-pic -Wl,--shared-memory -Wl,--import-memory -Wl,-Bsymbolic -Wl,--export-dynamic \
     -Wl,--no-entry -Wl,--unresolved-symbols=import-dynamic -Wl,--export-if-defined=__wasm_call_ctors \
     -Wl,--export-if-defined=__wasm_init_tls -Wl,--export-if-defined=__tls_size \
@@ -135,6 +142,6 @@ crt=; [ $startfiles = 1 ] && crt=$LIB/crt1.o
 libs=; [ $stdlibs = 1 ] && libs="$cxxlibs -lc $RT.a"
 dynamic=; [ $rdynamic = 1 ] && dynamic="-Wl,--export-dynamic -Wl,--growable-table -Wl,@$LIB/libc.exports"
 # shellcheck disable=SC2086
-exec $CLANG $COMMON -nostdlib -L$LIB -L/usr/local/lib -Wl,--table-base=3 -Wl,--import-memory \
+exec $CLANG $COMMON $LTO -nostdlib -L$LIB -L/usr/local/lib -Wl,--table-base=3 -Wl,--import-memory \
   -Wl,--max-memory=4294967296 -Wl,--shared-memory -Wl,--export-table -Wl,-z,stack-size=8388608 \
   $crt $dynamic "$@" -x none $libs

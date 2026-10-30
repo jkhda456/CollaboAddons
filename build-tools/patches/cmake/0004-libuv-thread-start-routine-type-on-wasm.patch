@@ -1,0 +1,67 @@
+diff --git a/Utilities/cmlibuv/src/unix/thread.c b/Utilities/cmlibuv/src/unix/thread.c
+index 8994b5b4..f65dad68 100644
+--- a/Utilities/cmlibuv/src/unix/thread.c
++++ b/Utilities/cmlibuv/src/unix/thread.c
+@@ -135,6 +135,24 @@ int uv_thread_detach(uv_thread_t *tid) {
+ }
+ 
+ 
++#if defined(__wasm__)
++/* WebAssembly checks the type of every call through a pointer: pthread_create calls its start
++ * routine as void* (void*), which `entry` is not (it returns nothing), so the cast below ends the
++ * new thread at its start. A start routine of that type, which calls it (with its argument). */
++struct uv__thread_start {
++  void (*entry)(void* arg);
++  void* arg;
++};
++
++static void* uv__thread_start(void* p) {
++  struct uv__thread_start start = *(struct uv__thread_start*) p;
++  uv__free(p);
++  start.entry(start.arg);
++  return NULL;
++}
++#endif
++
++
+ int uv_thread_create_ex(uv_thread_t* tid,
+                         const uv_thread_options_t* params,
+                         void (*entry)(void *arg),
+@@ -146,11 +164,13 @@ int uv_thread_create_ex(uv_thread_t* tid,
+   size_t stack_size;
+   size_t min_stack_size;
+ 
++#if !defined(__wasm__)
+   /* Used to squelch a -Wcast-function-type warning. */
+   union {
+     void (*in)(void*);
+     void* (*out)(void*);
+   } f;
++#endif
+ 
+   stack_size =
+       params->flags & UV_THREAD_HAS_STACK_SIZE ? params->stack_size : 0;
+@@ -177,8 +197,23 @@ int uv_thread_create_ex(uv_thread_t* tid,
+       abort();
+   }
+ 
++#if defined(__wasm__)
++  {
++    struct uv__thread_start* start = uv__malloc(sizeof(*start));
++    if (start == NULL) {
++      err = ENOMEM;
++    } else {
++      start->entry = entry;
++      start->arg = arg;
++      err = pthread_create(tid, attr, uv__thread_start, start);
++      if (err != 0)
++        uv__free(start);
++    }
++  }
++#else
+   f.in = entry;
+   err = pthread_create(tid, attr, f.out, arg);
++#endif
+ 
+   if (attr != NULL)
+     pthread_attr_destroy(attr);

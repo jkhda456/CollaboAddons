@@ -1,0 +1,136 @@
+diff --git a/Source/kwsys/ProcessUNIX.c b/Source/kwsys/ProcessUNIX.c
+index 8c22b4e4..1c52167c 100644
+--- a/Source/kwsys/ProcessUNIX.c
++++ b/Source/kwsys/ProcessUNIX.c
+@@ -69,6 +69,14 @@ do.
+ #include <time.h>      /* gettimeofday */
+ #include <unistd.h>    /* pipe, close, fork, execvp, select, _exit */
+ 
++/* A Linux without fork() (collaboCore's wasm32 guest, which has no MMU): a child is started with
++   posix_spawn, which does what the forked child does in kwsysProcessCreate before its execvp. */
++#if defined(__wasm__) && defined(__linux__)
++#  define KWSYSPE_USE_SPAWN
++#  include <spawn.h>
++extern char** environ;
++#endif
++
+ #if defined(__VMS)
+ #  define KWSYSPE_VMS_NONBLOCK , O_NONBLOCK
+ #else
+@@ -184,8 +192,14 @@ static void kwsysProcessSetExitExceptionByIndex(kwsysProcess* cp, int sig,
+                                                 int idx);
+ static void kwsysProcessChildErrorExit(int errorPipe);
+ static void kwsysProcessRestoreDefaultSignalHandlers(void);
++#if defined(KWSYSPE_USE_SPAWN)
++static int kwsysProcessSpawn(kwsysProcess* cp, int prIndex,
++                             kwsysProcessCreateInformation* si,
++                             sigset_t const* mask, int const pgidPipe[2]);
++#else
+ static pid_t kwsysProcessFork(kwsysProcess* cp,
+                               kwsysProcessCreateInformation* si);
++#endif
+ static void kwsysProcessKill(pid_t process_id);
+ #if defined(__VMS)
+ static int kwsysProcessSetVMSFeature(char const* name, int value);
+@@ -1754,7 +1768,23 @@ static int kwsysProcessCreate(kwsysProcess* cp, int prIndex,
+   }
+ 
+ /* Fork off a child process.  */
+-#if defined(__VMS)
++#if defined(KWSYSPE_USE_SPAWN)
++  {
++    int err = kwsysProcessSpawn(cp, prIndex, si, &old_mask, pgidPipe);
++    if (err != 0) {
++      /* As a child that failed to exec reports it; ForkPIDs stays 0 (cleanup
++         kills a nonzero one, and kill(-1) would be everything).  */
++      sigprocmask(SIG_SETMASK, &old_mask, 0);
++      kwsysProcessCleanupDescriptor(&si->ErrorPipe[0]);
++      kwsysProcessCleanupDescriptor(&si->ErrorPipe[1]);
++      kwsysProcessCleanupDescriptor(&pgidPipe[0]);
++      kwsysProcessCleanupDescriptor(&pgidPipe[1]);
++      strncpy(cp->ErrorMessage, strerror(err), KWSYSPE_PIPE_BUFFER_SIZE);
++      errno = err;
++      return 0;
++    }
++  }
++#elif defined(__VMS)
+   /* VMS needs vfork and execvp to be in the same function because
+      they use setjmp/longjmp to run the child startup code in the
+      parent!  TODO: OptionDetach.  Also
+@@ -2449,7 +2479,75 @@ static void kwsysProcessExit(void)
+   _exit(0);
+ }
+ 
+-#if !defined(__VMS)
++#if defined(KWSYSPE_USE_SPAWN)
++/* The child as kwsysProcessCreate's forked one sets it up: stdin, stdout and stderr (a
++   descriptor duplicated onto itself loses its close-on-exec flag, POSIX.1-2024, as the fork's
++   fcntl clears it), the default signal handlers, the signal mask from before the start, a new
++   session for CreateProcessGroup; not the read ends of the error and process group pipes (their
++   write ends are close-on-exec). A failed exec is posix_spawn's result. Not OptionDetach: that
++   takes an intermediate process, a second fork.  */
++static int kwsysProcessSpawn(kwsysProcess* cp, int prIndex,
++                             kwsysProcessCreateInformation* si,
++                             sigset_t const* mask, int const pgidPipe[2])
++{
++  posix_spawn_file_actions_t fa;
++  posix_spawnattr_t attr;
++  sigset_t all;
++  short flags = POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_SETSIGMASK;
++  pid_t pid;
++  int err;
++
++  if (cp->OptionDetach) {
++    return ENOSYS;
++  }
++  if ((err = posix_spawn_file_actions_init(&fa)) != 0) {
++    return err;
++  }
++  if ((err = posix_spawnattr_init(&attr)) != 0) {
++    posix_spawn_file_actions_destroy(&fa);
++    return err;
++  }
++  err = posix_spawn_file_actions_addclose(&fa, si->ErrorPipe[0]);
++  if (!err) {
++    err = posix_spawn_file_actions_addclose(&fa, pgidPipe[0]);
++  }
++  if (!err) {
++    err = si->StdIn >= 0 ? posix_spawn_file_actions_adddup2(&fa, si->StdIn, 0)
++                         : posix_spawn_file_actions_addclose(&fa, 0);
++  }
++  if (!err) {
++    err = posix_spawn_file_actions_adddup2(&fa, si->StdOut, 1);
++  }
++  if (!err) {
++    err = posix_spawn_file_actions_adddup2(&fa, si->StdErr, 2);
++  }
++  sigfillset(&all);
++  if (!err) {
++    err = posix_spawnattr_setsigdefault(&attr, &all);
++  }
++  if (!err) {
++    err = posix_spawnattr_setsigmask(&attr, mask);
++  }
++  if (cp->CreateProcessGroup) {
++    flags |= POSIX_SPAWN_SETSID;
++  }
++  if (!err) {
++    err = posix_spawnattr_setflags(&attr, flags);
++  }
++  if (!err) {
++    err = posix_spawnp(&pid, cp->Commands[prIndex][0], &fa, &attr,
++                       cp->Commands[prIndex], environ);
++  }
++  posix_spawnattr_destroy(&attr);
++  posix_spawn_file_actions_destroy(&fa);
++  if (!err) {
++    cp->ForkPIDs[prIndex] = pid;
++  }
++  return err;
++}
++#endif
++
++#if !defined(__VMS) && !defined(KWSYSPE_USE_SPAWN)
+ static pid_t kwsysProcessFork(kwsysProcess* cp,
+                               kwsysProcessCreateInformation* si)
+ {

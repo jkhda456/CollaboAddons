@@ -1,0 +1,23 @@
+# config.site for configure scripts run in collaboCore's guest (autoconf reads it as
+# $prefix/share/config.site: /usr/local/share, and /usr/share for --prefix=/usr; CONFIG_SITE names
+# another). What a configure here cannot find out by itself:
+#
+# The machine. `uname -m` says wasm, which no config.guess knows, and config.guess looks for ldd:
+# without this, "cannot guess build type; you must specify one". (Not a cross build: build and host
+# are both the guest, so configure runs its test programs.)
+if test -z "$build_alias"; then
+  build_alias=wasm32-unknown-linux-musl
+fi
+# Static libraries unless --enable-shared says otherwise: libtool links a project's programs to
+# its shared libraries, and a program here loads libraries with dlopen only (links to none). The
+# objects are position-independent (cc compiles them so), so a static library still goes into a
+# library of one's own: a Python extension module's.
+: "${enable_shared=no}"
+# What the guest has not (no MMU), said before a check can be fooled: fork and vfork (the C
+# library has neither), mmap of a file; sigaltstack, as the python step's config.site has it.
+ac_cv_func_fork=no
+ac_cv_func_vfork=no
+ac_cv_func_fork_works=no
+ac_cv_func_vfork_works=no
+ac_cv_func_mmap_fixed_mapped=no
+ac_cv_func_sigaltstack=no

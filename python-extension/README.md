@@ -56,6 +56,14 @@ work (`tests/`), and pip sees them as installed distributions (`pip list`, `pip 
 numpy` says it is there already). Other packages that need a compiler cannot be pip-installed in
 the guest; they are added here, one folder each in `packages/` (`packages/README.md`).
 
+The add-on also carries what a build of an extension module reads: the interpreter's headers in
+`/usr/include/python3.13` (where `sysconfig.get_paths()["include"]` points) and its pkg-config
+file (`python3.pc`: `pkg-config --cflags python3` is `-I/usr/include/python3.13`), as a
+distribution's python3-dev has them; numpy's headers are in its package (`numpy.get_include()`).
+They are for the guest's own compiler — the llvm add-on, driven by the build-tools add-on's make,
+ninja and pkg-config — which has no C library for the guest yet: until it has, `pip install` of a
+package that needs one still fails.
+
 ## Turning it on
 
 ```json
@@ -66,8 +74,8 @@ or `--addon-dir addons/python-extension/out --addon python-extension` on the eng
 It has no settings. It needs the Python image (`python.cpio`, which `--stdio` adds unless the app
 asks for `python: false`): the add-on is an overlay over it that adds the packages to
 `/usr/lib/python3.13/site-packages` and their console scripts to `/usr/bin`; the interpreter, the
-standard library, pip and the openai SDK are the image's own. The add-on's image is 65 MB (rpds-py,
-mcp and its wheels: 9 MB of it).
+standard library, pip and the openai SDK are the image's own. The add-on's image is 67 MB (rpds-py,
+mcp and its wheels: 9 MB of it; the interpreter's headers 2.3 MB).
 
 The guest must be able to load shared libraries, which upstream's cannot yet: the C library's
 `dlopen`, the engine's dynamic linker and an interpreter that uses them are `addons/mod/0019`–`0022`
@@ -169,6 +177,7 @@ Stages (`FORCE=stage,...` redoes them, `JOBS=N`):
 | `mcp` | `packages/mcp`: mcp's wheel and those of what it needs (pure Python), unpacked side by side |
 | `fpcast-numpy`, ... | each package's compiles (recorded in `build/<package>/compdb`) scanned for functions CPython would call as another type; stops the build on one (`packages/<package>/fpcasts.allow` for those reviewed as never called) |
 | `install` | the packages into `build/site`, each module checked to link against the interpreter |
+| `dev` | the interpreter's headers (`python/stage/usr/include/python3.13`) and `python-3.13.pc` (without `Libs.private`: the interpreter's own static libraries, at their build paths) → `build/dev`; not the `-embed` files (there is no libpython to link a program with) |
 | `cpio` | `out/python-extension.cpio`, `out/licenses/` |
 
 Sources are pinned by sha256 in `sources.lock`. The packages' patches are in
@@ -206,7 +215,8 @@ jsonschema, referencing, pyjwt and python-multipart at work — printing
 **exactly what they print with the packages' own wheels** from PyPI on this machine
 (`tests/expected/`, written by `tests/reference.py`, or `tests/run.sh --reference`; the host
 CPython has no `ssl`, which mcp's check needs: `reference.py` builds `_ssl` and `_hashlib` for it
-once, against the python step's OpenSSL source, in `build/reference/ssl`); pip, the
+once, against the python step's OpenSSL source, in `build/reference/ssl`); the interpreter's
+headers and `python3.pc` where `sysconfig` says a build finds them; pip, the
 console scripts, the packages in threads (one of them started before the modules were loaded,
 calling a cffi callback another thread made), and the differences listed above.
 
@@ -271,5 +281,6 @@ its COPYRIGHT lists) and the crates listed in `addon-python-extension-cryptograp
 (MIT, Apache-2.0, BSD-3-Clause); rpds-py: MIT, with Rust's standard library and the crates listed in
 `addon-python-extension-rpds_py-crates.txt` (MIT, MIT OR Apache-2.0); mcp and mcp-types: MIT, with
 jsonschema, jsonschema-specifications, referencing, attrs and pyjwt (MIT), opentelemetry-api and
-python-multipart (Apache-2.0), Starlette, sse-starlette, uvicorn and click (BSD-3-Clause). All in
+python-multipart (Apache-2.0), Starlette, sse-starlette, uvicorn and click (BSD-3-Clause); the
+interpreter's headers: CPython's (PSF-2.0, `addon-python-extension-cpython-headers.txt`). All in
 `out/licenses/`.
