@@ -1,0 +1,26 @@
+[package]
+name = "guided-arrow"
+version = "0.1.0"
+edition = "2021"
+description = "guided-arrow: verified command-line cheat sheets (tldr pages, cheat.sh's sheets) carried in its own compressed archive"
+license = "GPL-3.0-only"
+publish = false
+
+[[bin]]
+name = "guided-arrow"
+path = "src/main.rs"
+
+# No dependencies: the compression, the archive, the page formats, the search and the JSON output
+# are all our own code.
+[dependencies]
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+# The packer compresses ~25 MB with an optimal parse; the tests pack real data.
+[profile.test]
+opt-level = 2

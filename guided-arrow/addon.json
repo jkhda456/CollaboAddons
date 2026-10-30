@@ -1,0 +1,5 @@
+{
+  "name": "guided-arrow",
+  "description": "guided-arrow: verified command-line cheat sheets offline — tldr pages (every language) and the sheets cheat.sh serves (cheat.sheets, cheat/cheatsheets), from one archive of its own compression; look a command up, search examples by task, see each page's upstream commit and license",
+  "bundled": true
+}
