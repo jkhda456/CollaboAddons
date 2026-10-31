@@ -38,6 +38,10 @@ declare -A TOPICS=(
   [0009-process-cache-and-prewarming-follow-the-cache-model]="Source/WebKit/UIProcess/WebProcessPool.cpp"
   # no loadable modules: the injected bundle is linked into the program (tools/lib.sh)
   [0008-injected-bundle-linked-in]="Source/WebKit/WebProcess/InjectedBundle/glib/InjectedBundleGlib.cpp"
+  # and so is the browser's web process extension (browser/extension.c: headers on requests)
+  [0010-web-process-extension-linked-in]="Source/WebKit/WebProcess/InjectedBundle/API/glib/WebProcessExtensionManager.cpp"
+  # an inspector frontend in the program: the browser's developer tools (browser/devtools.js)
+  [0011-inspector-frontend-in-the-program]="Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp"
 )
 
 git -C "$S" add -N -- Source/WebKit/WPEPlatform/wpe/collabo   # new files show in the diff

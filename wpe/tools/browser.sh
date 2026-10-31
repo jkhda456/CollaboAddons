@@ -2,7 +2,8 @@
 # The add-on's programs, linked against the WebKit build (tools/webkit.sh):
 #
 #   build/browser/wpe-browser.wasm   every process of the browser in one static program: the UI
-#                                    process (browser/browser.c), WPEWebProcess, WPENetworkProcess
+#                                    process (browser/browser.c), WPEWebProcess with the browser's
+#                                    web process extension (browser/extension.c), WPENetworkProcess
 #                                    (by the name it is run as, browser/main.cpp)
 #   build/browser/web.wasm           the `web` command (browser/web.c), no WebKit in it
 #
@@ -26,9 +27,12 @@ mkdir -p "$OUT"
 [[ -f "$O/lib/libWPEWebKit-2.0.a" ]] || { echo "no WebKit build in $O; run tools/webkit.sh" >&2; exit 1; }
 
 # ── web: the command line, small and quick to start ─────────────────────────────────────────────
-if [[ ! -f "$OUT/web.wasm" || "$A/browser/web.c" -nt "$OUT/web.wasm" ]]; then
+# (its guide for agents, web --agent-help, is browser/agent-help.txt)
+python3 "$A/browser/gen-js.py" "$OUT/agent-help.h.new" "$A/browser/agent-help.txt"
+cmp -s "$OUT/agent-help.h.new" "$OUT/agent-help.h" 2>/dev/null && rm "$OUT/agent-help.h.new" || mv "$OUT/agent-help.h.new" "$OUT/agent-help.h"
+if [[ ! -f "$OUT/web.wasm" || "$A/browser/web.c" -nt "$OUT/web.wasm" || "$OUT/agent-help.h" -nt "$OUT/web.wasm" ]]; then
   echo "== web"
-  "$U/bin/wasm-cc" -O2 -Wall -Wextra -Wno-unused-parameter "$A/browser/web.c" -o "$OUT/web.wasm" \
+  "$U/bin/wasm-cc" -O2 -Wall -Wextra -Wno-unused-parameter -I"$OUT" "$A/browser/web.c" -o "$OUT/web.wasm" \
     -Wl,--import-memory -Wl,--max-memory=4294967296 -Wl,--shared-memory -Wl,--export-table -Wl,-z,stack-size=1048576
 fi
 
@@ -37,8 +41,9 @@ H="$B/stage/usr/include/wpe-webkit-2.0"   # WebKit's API headers, installed ther
 INCLUDES=(
   -I"$OUT" -I"$H" -I"$H/wpe-platform"
   -I"$P/include" -I"$P/include/glib-2.0" -I"$P/lib/glib-2.0/include" -I"$P/include/libsoup-3.0"
+  -I"$P/include/freetype2"   # the captions of --screenshot (libpng and FreeType: WebKit's own)
 )
-python3 "$A/browser/gen-js.py" "$OUT/browser-js.h.new" "$A/browser/snapshot.js" "$A/browser/target.js"
+python3 "$A/browser/gen-js.py" "$OUT/browser-js.h.new" "$A/browser/snapshot.js" "$A/browser/target.js" "$A/browser/identity.js" "$A/browser/devtools.js"
 cmp -s "$OUT/browser-js.h.new" "$OUT/browser-js.h" 2>/dev/null && rm "$OUT/browser-js.h.new" || mv "$OUT/browser-js.h.new" "$OUT/browser-js.h"
 
 objects=()
@@ -52,6 +57,7 @@ compile() { # source object compiler flags...
 }
 echo "== wpe-browser"
 compile "$A/browser/browser.c" "$OUT/browser.o" "$CC" -std=gnu11
+compile "$A/browser/extension.c" "$OUT/extension.o" "$CC" -std=gnu11
 compile "$A/browser/tls.c" "$OUT/tls.o" "$CC" -std=gnu11
 compile "$A/browser/main.cpp" "$OUT/main.o" "$CXX" -std=c++20 -fno-exceptions -fno-rtti
 

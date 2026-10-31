@@ -1,0 +1,79 @@
+diff --git a/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp b/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp
+index e988d2a7..01a2fdef 100644
+--- a/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp
++++ b/Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp
+@@ -75,8 +75,10 @@
+ #include "WebKitWebsiteDataManagerPrivate.h"
+ #include "WebKitWebsitePoliciesPrivate.h"
+ #include "WebKitWindowPropertiesPrivate.h"
++#include "WebPageInspectorController.h"
+ #include "WebPageMessages.h"
+ #include <JavaScriptCore/APICast.h>
++#include <JavaScriptCore/InspectorFrontendChannel.h>
+ #include <JavaScriptCore/JSRetainPtr.h>
+ #include <WebCore/CertificateInfo.h>
+ #include <WebCore/FloatPoint.h>
+@@ -6146,3 +6148,63 @@ WebKitImageList* webkit_web_view_get_page_icons(WebKitWebView* webView)
+     return webView->priv->pageIcons.get();
+ }
+ #endif
++
++// An inspector frontend in the program itself: a C function of the program's gets the inspector
++// protocol's messages as text and sends its own, as the automation's passthrough channel does with
++// the page's inspector controller. WebKit's own frontends are a page of their own (the Web
++// Inspector) or one at the other end of the remote inspector, which a static WebKit for
++// WebAssembly leaves out; this one is how a program built with it records the network as the Web
++// Inspector would (the wpe add-on's developer tools). Not API: the program declares these itself.
++namespace {
++
++class ProgramInspectorFrontend final : public Inspector::FrontendChannel {
++public:
++    using Callback = void (*)(const char* message, void* userData);
++
++    ProgramInspectorFrontend(WebPageProxy& page, Callback callback, void* userData)
++        : m_page(page)
++        , m_callback(callback)
++        , m_userData(userData)
++    {
++    }
++
++    ConnectionType connectionType() const final { return ConnectionType::Remote; }
++    void sendMessageToFrontend(const String& message) final { m_callback(message.utf8().data(), m_userData); }
++
++    RefPtr<WebPageProxy> page() const { return m_page.get(); }
++
++private:
++    WeakPtr<WebPageProxy> m_page;
++    Callback m_callback;
++    void* m_userData;
++};
++
++} // namespace
++
++extern "C" void* webkit_web_view_connect_inspector_frontend(WebKitWebView* webView, void (*callback)(const char* message, void* userData), void* userData)
++{
++    g_return_val_if_fail(WEBKIT_IS_WEB_VIEW(webView), nullptr);
++    g_return_val_if_fail(callback, nullptr);
++
++    Ref page = getPage(webView);
++    auto* frontend = new ProgramInspectorFrontend(page, callback, userData);
++    page->inspectorController().connectFrontend(*frontend);
++    return frontend;
++}
++
++extern "C" void webkit_inspector_frontend_send(void* handle, const char* message)
++{
++    auto* frontend = static_cast<ProgramInspectorFrontend*>(handle);
++    if (RefPtr page = frontend ? frontend->page() : nullptr)
++        page->inspectorController().dispatchMessageFromFrontend(String::fromUTF8(message));
++}
++
++extern "C" void webkit_inspector_frontend_disconnect(void* handle)
++{
++    auto* frontend = static_cast<ProgramInspectorFrontend*>(handle);
++    if (!frontend)
++        return;
++    if (RefPtr page = frontend->page())
++        page->inspectorController().disconnectFrontend(*frontend);
++    delete frontend;
++}

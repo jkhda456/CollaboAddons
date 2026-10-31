@@ -1,7 +1,7 @@
 random: crng init done
 printk: legacy bootconsole [earlycon0] enabled
 Linux version 7.1.5+ (work@work) (Ubuntu clang version 19.1.7 (20ubuntu4), Ubuntu LLD 19.1.7) # SMP 1970-01-01 00:00:00 UTC
-Heap:	(ptrval) -> (ptrval) = 22544
+Heap:	(ptrval) -> (ptrval) = 22512
 Stack:	(ptrval) -> (ptrval) = 65536
 Core count: 2
 Zone ranges:
@@ -13,7 +13,7 @@ Initmem setup node 0 [mem 0x0000000000000000-0x00000000fffeffff]
 On node 0, zone Normal: 1 pages in unavailable ranges
 percpu: max_distance=0x20000 too large for vmalloc space 0x0
 percpu: Embedded 1 pages/cpu s17972 r0 d47564 u65536
-Kernel command line: console=hvc0 collabo.wasmstack=33554432 collabo.agent=1 collabo.quiet=1 collabo.ip=192.0.2.2 collabo.gw=192.0.2.1 collabo.mount=mount0:/t
+Kernel command line: console=hvc0 collabo.wasmstack=33554432 collabo.version=0.2.4 collabo.agent=1 collabo.quiet=1 collabo.ip=192.0.2.2 collabo.gw=192.0.2.1 collabo.mount=mount0:/t
 printk: log buffer data + meta data: 131072 + 409600 = 540672 bytes
 Dentry cache hash table entries: 524288 (order: 5, 2097152 bytes, linear)
 Inode-cache hash table entries: 262144 (order: 4, 1048576 bytes, linear)
@@ -41,7 +41,7 @@ Timer migration: 1 hierarchy levels; 8 children per group; 1 crossnode level
 smp: Bringing up secondary CPUs ...
 Hello from cpu 1!
 smp: Brought up 1 node, 2 CPUs
-Memory: 3932096K/4194240K available (256640K reserved, 0K cma-reserved)
+Memory: 3914112K/4194240K available (274624K reserved, 0K cma-reserved)
 devtmpfs: initialized
 posixtimers hash table entries: 1024 (order: 0, 12288 bytes, linear)
 futex hash table entries: 512 (32768 bytes on 1 NUMA nodes, total 32 KiB, linear).
@@ -59,13 +59,14 @@ TCP bind hash table entries: 32768 (order: 4, 786432 bytes, linear)
 TCP: Hash tables configured (established 32768 bind 32768)
 UDP hash table entries: 2048 (order: 1, 114688 bytes, linear)
 NET: Registered PF_UNIX/PF_LOCAL protocol family
+Unpacking initramfs...
 workingset: timestamp_bits=30 (anon: 26) max_order=16 bucket_order=0 (anon: 0)
 squashfs: version 4.0 (2009/01/31) Phillip Lougher
 fuse: init (API version 7.45)
 io scheduler mq-deadline registered
 io scheduler kyber registered
-Unpacking initramfs...
-Freeing initrd memory: 249792K
+Freeing initrd memory: 267776K
+NET: Registered PF_PACKET protocol family
 NET: Registered PF_VSOCK protocol family
 printk: legacy console [hvc0] enabled
 printk: legacy bootconsole [earlycon0] disabled

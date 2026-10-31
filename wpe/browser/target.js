@@ -38,6 +38,7 @@
   const scale = window.devicePixelRatio || 1;
   return JSON.stringify({
     x: Math.round(x * scale), y: Math.round(y * scale),
+    box: [r.left, r.top, r.width, r.height].map(v => Math.round(v * scale)),
     tag: el.tagName.toLowerCase(),
     text: (el.innerText || el.value || el.getAttribute("aria-label") || el.getAttribute("placeholder") || "").replace(/\s+/g, " ").trim().slice(0, 80),
     href: el.href || undefined,

@@ -1,0 +1,30 @@
+diff --git a/Source/WebKit/WebProcess/InjectedBundle/API/glib/WebProcessExtensionManager.cpp b/Source/WebKit/WebProcess/InjectedBundle/API/glib/WebProcessExtensionManager.cpp
+index eb3f0f94..32adf98b 100644
+--- a/Source/WebKit/WebProcess/InjectedBundle/API/glib/WebProcessExtensionManager.cpp
++++ b/Source/WebKit/WebProcess/InjectedBundle/API/glib/WebProcessExtensionManager.cpp
+@@ -27,6 +27,13 @@
+ #include <wtf/FileSystem.h>
+ #include <wtf/text/CString.h>
+ 
++// Where nothing is loaded at run time (a static WebKit: WebAssembly), a program can link its web
++// process extension in: its entry point is then called with the initialization user data, whether
++// or not a directory of extensions is set; elsewhere this is null.
++#if ENABLE(2022_GLIB_API)
++extern "C" __attribute__((weak)) void webkit_web_process_extension_initialize_with_user_data(WebKitWebProcessExtension*, const GVariant*);
++#endif
++
+ namespace WebKit {
+ 
+ WebProcessExtensionManager& WebProcessExtensionManager::singleton()
+@@ -106,6 +113,11 @@ void WebProcessExtensionManager::initialize(InjectedBundle* bundle, API::Object*
+     GRefPtr<GVariant> userData;
+     parseUserData(userDataObject, webProcessExtensionsDirectory, userData);
+ 
++#if ENABLE(2022_GLIB_API)
++    if (webkit_web_process_extension_initialize_with_user_data)
++        webkit_web_process_extension_initialize_with_user_data(m_extension.get(), userData.get());
++#endif
++
+     if (webProcessExtensionsDirectory.isNull())
+         return;
+ 

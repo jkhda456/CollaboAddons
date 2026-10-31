@@ -76,8 +76,12 @@ for step in "${steps[@]}"; do
     # the library and every object the add-on's program links (tools/browser.sh; lib.sh
     # webkit_objects), without linking WebKit's own programs
     mapfile -t objects < <(webkit_objects "$O"; webkit_bmalloc_objects "$O")
+    # (without pipefail: the filter finds nothing in a build that goes well, and grep says so with 1)
+    set +o pipefail
     ninja -C "$O" -j"$JOBS" ${NINJA_FLAGS:-} WebKit lib/libPAL.a lib/libSkia.a lib/libxdgmime.a "${objects[@]}" 2>&1 | tee "$LOG" | grep -E "^FAILED|error:|^ninja: build stopped" | head -50
-    [[ ${PIPESTATUS[0]} == 0 ]] || { echo "webkit build failed (log: $LOG)" >&2; exit 1; }
+    status=${PIPESTATUS[0]}
+    set -o pipefail
+    [[ $status == 0 ]] || { echo "webkit build failed (log: $LOG)" >&2; exit 1; }
     # the API headers, as an installation has them, for the add-on's programs (tools/browser.sh)
     rm -rf "$B/stage"
     DESTDIR="$B/stage" cmake --install "$O" --component Development > "$B/webkit-install.log"

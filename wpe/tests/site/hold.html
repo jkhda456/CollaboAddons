@@ -1,0 +1,8 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Hold</title></head>
+<body>
+<h1>Hold</h1>
+<p id="state">waiting</p>
+<button onclick="fetch('/api/data?clicked=1').then(r => r.json()).then(d => this.textContent = d.query)">Ask</button>
+<script src="hold.js"></script>
+</body></html>

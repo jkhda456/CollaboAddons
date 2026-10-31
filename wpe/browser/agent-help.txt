@@ -1,0 +1,906 @@
+web --agent-help: the sandbox's web browser (WPE WebKit), driven from the shell, explained for an
+LLM agent: how it works, every command with its output, real examples, pitfalls, recipes.
+
+  web --agent-help              this whole guide
+  web --agent-help TOPIC...     only those parts (a topic's first letters do: net, inter)
+  web --agent-help topics       the topics
+  web help                      the short reference of every command and option
+
+Topics
+  start       how the browser works, the loop every task follows, a first session
+  read        reading a page: read (numbered [N] elements), text, links, html, info, history
+  act         click, type, key, select, hover, scroll: targets, outputs, what each waits for
+  wait        loads and waits: open, back, reload, wait text|selector|gone|load, slow pages
+  screenshot  pictures: web screenshot, --screenshot on an action, when each is taken
+  js          JavaScript in the page: eval (an expression), run (a file or stdin, await, args)
+  identity    user agent, headers, languages, cookies, injected scripts, settings
+  network     developer tools: requests, details, bodies, search, HAR files, export as curl...
+  intercept   pause the page's requests: show, send changed, drop, answer with a mock
+  browsers    several browsers (-n NAME), start options, environment, logs, closing
+  errors      exit statuses, error messages and what to do about each
+  recipes     whole tasks: log in, search, fill a form, scrape, find and replay an API, mock...
+
+The rules that matter most
+  1. One browser keeps running between commands: the page, cookies and history stay. Each `web`
+     command acts on it and prints a short answer. Run commands one at a time.
+  2. Look before you act: `web read` prints the page with every link, button and field numbered
+     [N]. Act with those numbers: `web click 7`, `web type 'text' 3`.
+  3. The numbers exist only after a `web read` of the current page: `web open` then `web click 1`
+     fails ("nothing matches"). After a click that loads another page or changes the page,
+     `web read` again before using a number.
+  4. `web type` adds to what a field holds; it does not clear it. To replace:
+     `web click N; web key ctrl+a; web type 'new text'`.
+  5. Check the result of every action that matters: `web read`, `web eval`, `web wait text`, or a
+     picture (`--screenshot FILE`). The exit status says the command ran, not that the site
+     did what you wanted (a 404 page loads with exit 0).
+  6. Pages built by JavaScript fill in after `open` returns: `web wait text 'X'` or
+     `web wait selector CSS` before reading them.
+  7. Quote every argument with single quotes; give JavaScript with quotes in it through stdin:
+     `web run - <<'EOF' ... EOF`.
+  8. Exit statuses: 0 done, 1 failed, 2 usage, 3 timed out, 4 not found, 5 no browser,
+     6 requests paused for you (web intercept). Messages go to stderr.
+
+## start: how the browser works, the loop, a first session
+
+The browser is WebKit (Safari's engine) running in the sandbox: pages run HTML, CSS, JavaScript,
+cookies, storage, forms, redirects and HTTPS as in a desktop browser. `web` is a small command
+that talks to it. The first `web` command starts the browser (its first start on a computer
+compiles it: about 20 s, said on stderr); later ones reuse it. It runs until `web close`.
+
+There is one page (one tab) per browser. Popups and target=_blank links open in the same page.
+Dialogs (alert, confirm, prompt) are accepted at once; `web info` shows the last one. Permission
+requests (location, camera, notifications) are denied. Downloads go to ~/Downloads.
+
+The loop of every task:
+  1. go:     web open URL                  (prints the final address and the title)
+  2. look:   web read                      (the page as text, interactive elements [N])
+  3. act:    web click N | web type 'TEXT' N | web key Enter | web select N 'VALUE'
+  4. check:  web read / web wait text 'X' / web eval 'JS' / --screenshot FILE
+  5. repeat from 2 (the numbers changed if the page did)
+
+A first session (real output):
+
+  $ web open example.com
+  https://example.com/
+  Example Domain
+
+  $ web read
+  Example Domain
+  https://example.com/
+
+  This domain is for use in documentation examples without needing permission. ...
+  [1]Learn more <https://iana.org/help/example-domains>
+
+Logging in (real output, https://the-internet.herokuapp.com/login, a public test site):
+
+  $ web open https://the-internet.herokuapp.com/login
+  https://the-internet.herokuapp.com/login
+  The Internet
+  $ web read
+  The Internet
+  https://the-internet.herokuapp.com/login
+
+  ## Login Page
+  ...
+  Username
+  [1] input text username:
+
+  Password
+  [2] input password password:
+
+  [3] button: Login
+  ...
+  $ web type tomsmith 1
+  typed 8 characters into {"x":263,"y":350,"box":[28,334,469,32],"tag":"input","text":"",...}
+  $ web type 'SuperSecretPassword!' 2
+  typed 20 characters into {...}
+  $ web click Login
+  clicked {"x":110,"y":473,"box":[28,443,164,59],"tag":"button","text":"Login",...}
+  https://the-internet.herokuapp.com/secure
+  The Internet
+  $ web wait text 'Secure Area' 10 && echo logged-in
+  found
+  https://the-internet.herokuapp.com/secure
+  The Internet
+  logged-in
+  $ web read 600
+  ...
+   You logged into a secure area!  [1]×
+
+  ## Secure Area
+
+Good habits
+  - Read before acting; act by [N]; read again after the page changes.
+  - Big pages: `web read > /tmp/page.txt` then grep it, or `web read 8000` (the first 8000
+    characters). The default is 40000.
+  - Prefer [N] over text: a text target takes the first link or button whose text matches, and
+    pages repeat texts ("More", "Next", "Delete").
+  - When a step does not do what you expected, look: `web --screenshot` on the action, or
+    `web screenshot` and view the PNG, then `web logs` for the page's JavaScript errors.
+  - Address bar input: `web open` takes a full URL, a bare host (https:// is added), localhost
+    (http://), an absolute path (file://), or words (a DuckDuckGo search).
+
+## read: reading a page
+
+  web read [MAX] [--all]   the page as text in reading order, every visible link, button and field
+                           numbered [N]; MAX characters (40000), --all: hidden elements too
+  web text                 the page's visible text only (innerText), no numbers
+  web links                every link: its text, two spaces, its address (one per line)
+  web html [CSS]           the HTML of the page, or of the first element CSS matches
+  web info                 address, title, loading, back/forward, size, user agent, devtools,
+                           the last load error, the last dialog
+  web url | web title      just the address or the title
+  web history [N | --all] [TEXT]   pages visited (the last 30), with time; TEXT filters
+  web history clear        forget them
+
+How `web read` writes a page
+  first line: the title; second: the address; then the page:
+  # Heading, ## Subheading      headings (h1..h6)
+  - item                        list items
+  [N]Link text <URL>            a link; (link) when it has no text
+  [N] button: Text              a button, or an element with a role: [N] tab: Settings
+  [N] input text NAME "placeholder": VALUE    a field: its type, name (or id), placeholder, value
+  [N] input password password: ********       a password field (its value never shown)
+  [N] select NAME: *chosen | other | other    a <select>: its options, * on the chosen one
+  [N] radio NAME (checked): Label             a radio or checkbox; (checked) when it is
+  [N] checkbox NAME: Label
+  [N] textbox NAME: TEXT                      a <textarea> or an editable element
+  [image: alt text]            an image with alt text
+  a | b | c                     table cells of a row
+  [... cut at 40000 characters: ...]          the page was longer than MAX
+
+  The numbers are put on the elements by this read (and removed by the next one). They cover
+  the whole document, not only what is on screen. Content inside <iframe>s, <canvas> and <svg>
+  is not in the read: look at a picture and use `web click X Y` there.
+
+Real output (https://httpbin.org/forms/post):
+
+  $ web read
+
+  https://httpbin.org/forms/post
+
+  Customer name:  [1] input text custname:
+
+  Telephone:  [2] input tel custtel:
+  ...
+  [4] radio size: Small Small
+
+  [5] radio size: Medium Medium
+  ...
+  [7] checkbox topping: Bacon Bacon
+  ...
+  Delivery instructions:  [12] textbox comments:
+
+  [13] button: Submit order
+
+  (The empty first line is the page's title: this page has none.)
+
+  $ web click Medium; web click 7; web read | grep checked
+  ...
+  [5] radio size (checked): Medium Medium
+  [7] checkbox topping (checked): Bacon Bacon
+
+  $ web info
+  url: http://127.0.0.1:8000/index.html
+  title: WPE 시험 페이지 (200000)
+  loading: no (100%)
+  back: yes
+  forward: no
+  size: 1024x768
+  user agent: default
+  devtools: off
+  last dialog: confirm: Sure?
+
+  $ web links
+  Second page  http://127.0.0.1:8000/second.html
+  nowhere  https://example.invalid/
+
+  $ web html '#out'
+  <p id="out">hello Choi / b</p>
+
+  $ web history 3
+      1  2026-10-19 09:03:12  WPE 시험 페이지 (200000)  <http://127.0.0.1:8000/index.html>
+      2  2026-10-19 09:03:19  Second  <http://127.0.0.1:8000/second.html>
+      3  2026-10-19 09:03:19  WPE 시험 페이지 (200000)  <http://127.0.0.1:8000/index.html>
+
+Tips
+  - Search a long page: `web read > /tmp/p.txt; grep -n 'Price' /tmp/p.txt`.
+  - Exact values (prices, ids, attributes): `web eval` with a selector is more precise than
+    reading (see: web --agent-help js).
+  - The history keeps every page visited across restarts of the browser (not with --ephemeral).
+
+## act: click, type, key, select, hover, scroll
+
+TARGET (for click, dblclick, rightclick, hover, type, select) is, tried in this order:
+  1. a number N from the latest `web read` of this page
+  2. a CSS selector: the first element it matches ('#login', 'input[name=q]', 'form button')
+  3. the visible text of a link, button, label, tab, menu item, summary or option: the first
+     whose whole text is it (any case, spaces collapsed), else the first that contains it
+  The element is scrolled to the middle of the view and clicked at a point where it is on top.
+  Nothing found: exit 4, "nothing matches ...".
+
+  Pitfalls of targets
+  - A number from an older read (another page, or before the page changed) is gone: it is then
+    tried as text, and may hit an element whose text merely contains it ("16" in "Page 16").
+  - A text that is also a tag name ("button", "form", "header", "nav", "a", "label") is taken as
+    a CSS selector. Use [N] or a selector then.
+  - Clicking a label focuses or checks its field: `web click 'Medium'` checks that radio.
+
+  web click TARGET | X Y      click (left button). Waits for a page the click loads (up to 30 s);
+                              without a load within 0.8 s it answers at once
+  web dblclick TARGET | X Y   double click        web rightclick TARGET | X Y   context click
+  web hover TARGET | X Y      move the pointer there (menus that open on hover)
+  web type TEXT [TARGET]      click TARGET, then type TEXT as key presses, one per character (any
+                              language: 한국어 too). No TARGET: into what has the focus.
+                              Does NOT clear the field and does not wait for a load
+  web key KEY...              press keys in order; waits for a page they load (Enter in a form)
+  web select TARGET VALUE     choose an option of a <select> by its value or its text (any case;
+                              else the first option whose text contains VALUE)
+  web scroll [down|up|left|right [N]] | top | bottom    N wheel notches (3) at the middle of
+                              the view; top/bottom: the page's start/end
+
+  X Y are view pixels (the picture's pixels at the default size 1024x768): read them off a
+  screenshot. Every action can take --screenshot FILE (web --agent-help screenshot).
+
+KEY names: Enter, Tab, Escape (Esc), Backspace, Delete, Insert, Home, End, PageUp, PageDown,
+  ArrowLeft/Right/Up/Down (Left, Right, Up, Down), Space, F1..F12, a single character ('a',
+  'A', '/', '?'); combinations with ctrl+, shift+, alt+, meta+: ctrl+a, ctrl+Enter, shift+Tab.
+  An unknown name: exit 2, "unknown key".
+
+What each prints (real output)
+
+  $ web click Login
+  clicked {"x":110,"y":473,"box":[28,443,164,59],"tag":"button","text":"Login","editable":false,"select":false}
+  https://the-internet.herokuapp.com/secure        <- the address and title after the click
+  The Internet
+
+  The JSON says what was clicked: the point, the box [left, top, width, height], the tag, its
+  text, href for a link, editable for a field. Check that it is what you meant.
+
+  $ web click 640 220
+  clicked (640, 220)
+  ...
+
+  $ web type 'Claude 한글' '#name'
+  typed 9 characters into {"x":182,"y":196,"box":[76,184,212,25],"tag":"input","text":"your name",...}
+
+  $ web key Tab shift+Tab ctrl+a
+  pressed 3 keys
+  http://127.0.0.1:8000/index.html
+  WPE 시험 페이지 (200000)
+
+  $ web select '#color' green
+  selected green
+
+  $ web hover 'Second page'
+  hovering {"x":76,"y":238,"box":[24,228,104,19],"tag":"a","text":"Second page",...}
+
+  $ web scroll down
+  scrolled down 3
+
+  $ web click 'No such thing'
+  nothing matches "No such thing" (a number from `web read`, a CSS selector or a link's or button's text)
+  (exit 4)
+
+Typing into a field that has text: type adds to it (real):
+  $ web type Kim '#name'; web type Lee '#name'; web eval 'document.querySelector("#name").value'
+  ...
+  KimLee
+  To replace the text, select it first:
+  $ web click '#name'; web key ctrl+a; web type Park       -> Park
+  To empty it:  web click '#name'; web key ctrl+a Backspace
+
+Submitting: `web key Enter` in a field submits its form as a person would; `web click` on the
+submit button does too. Both wait for the page that loads.
+
+Checkboxes and radios: `web click N` (or the label's text) checks; a checkbox clicked again
+unchecks. `web read` marks them "(checked)".
+
+Scrolling: the wheel goes to the middle of the view, so a scrollable panel there scrolls instead
+of the page. To scroll an element: `web eval 'document.querySelector(".list").scrollTop += 600'`.
+A page that loads more as you scroll: scroll, then `web wait` for the new content (recipes).
+
+## wait: loads and waits
+
+  web open URL [TIMEOUT]       load and wait until loaded (TIMEOUT seconds, 60)
+  web back | forward | reload [TIMEOUT]
+  web wait load [TIMEOUT]      until the current load ends (at once if none is going on);
+                               `web wait` alone is the same
+  web wait text 'STRING' [TIMEOUT]    until the page's visible text contains STRING (case
+                               matters), checked every 0.3 s; TIMEOUT seconds (30)
+  web wait selector CSS [TIMEOUT]     until an element matches CSS
+  web wait gone CSS [TIMEOUT]         until no element matches CSS (a spinner, an overlay)
+
+They print the address and title (wait text/selector/gone: "found" first). Exit 3 when time
+runs out ("not found in time: text never"); exit 1 when a load fails (the message, then the
+address and title of what is shown).
+
+  $ web open https://the-internet.herokuapp.com/login
+  https://the-internet.herokuapp.com/login
+  The Internet
+
+  $ web wait text 'Secure Area' 10
+  found
+  https://the-internet.herokuapp.com/secure
+  The Internet
+
+  $ web wait text never 2
+  not found in time: text never
+  (exit 3)
+
+  $ web open http://127.0.0.1:9/
+  failed to load http://127.0.0.1:9/: Not allowed to use restricted network port
+  http://127.0.0.1:8000/index.html          <- the page still shown
+  WPE 시험 페이지 (200000)
+  (exit 1)
+
+What "loaded" means: `open` returns when the document and its parts have loaded (the load
+event). Then:
+  - An HTTP error page loads like any page: `web open .../missing` exits 0 with the server's
+    404 page (title "Error response", "Not Found"...). Read the page, or turn on the developer
+    tools and look at the status (web --agent-help network).
+  - Single-page applications (React, Vue...) often draw their content after the load: wait for
+    what you need with `web wait text` or `web wait selector`, then read.
+  - Clicks that update the page without loading another (a "Load more" button, a filter):
+    `web click` answers within a second; wait for the change with `web wait text|selector|gone`.
+
+Slow pages: JavaScript is interpreted here (no JIT), so script-heavy sites are slower than on a
+desktop: give `open` a longer TIMEOUT (`web open URL 120`). A timed-out `open` leaves the page
+loading; `web wait load 60` waits more, `web info` says "loading: yes (NN%)".
+
+## screenshot: pictures of the page
+
+  web screenshot [FILE] [--max-width N]   the view as PNG (default /tmp/NAME.png: /tmp/web.png);
+                                          prints the file. Needs the guest's display (gui)
+  ACTION ... --screenshot FILE            (or --screenshot=FILE) a PNG of the page with where the
+                                          action went marked; for click, dblclick, rightclick,
+                                          hover, type, select, key, scroll, open, back, forward,
+                                          reload, wait. Works without the display too
+
+  $ web screenshot
+  /tmp/web.png: web:1 1024x768, 11353 bytes
+  /tmp/web.png
+  $ web screenshot /tmp/small.png --max-width 400
+  /tmp/small.png: web:1 400x300, 3467 bytes
+  /tmp/small.png
+
+  $ web click Count --screenshot /tmp/click.png
+  clicked {"x":56,"y":313,"box":[24,299,64,28],"tag":"button","text":"Count",...}
+  http://127.0.0.1:8000/index.html
+  WPE 시험 페이지 (200000)
+  screenshot: /tmp/click.png (1024x768, before the click; marked: the point and the element)
+
+What the marks are: a red ring at the point the pointer went (two rings for a double click), a
+frame around the element acted on (for click X Y: the element at that point; for key and type
+without a target: what has the focus), an arrow for a scroll, a caption in a corner:
+`click (512, 300) · button "Search"`, `type 9 characters · input "your name"`,
+`scroll down 3 · y 0 → 249`.
+
+When the picture is taken
+  - click, dblclick, rightclick: just BEFORE the click goes in (after the element was scrolled
+    into view). It shows where the click lands, not its result. For the result, take one more:
+    `web screenshot`, or `web wait text 'X' --screenshot FILE`.
+  - type, key, hover, select: AFTER the action, once the page has received the input and drawn
+    its next frames (about two frames, at most 0.5 s). key: after a load it started.
+  - scroll: after the page has stopped moving (up to 2 s); the answer says from where to where.
+  - open, back, forward, reload: once loaded. wait: when the wait ends.
+  Not in the picture: what happens later (a debounced search box, a request that answers later,
+  a long animation). Wait for it (`web wait text|selector`), then `web screenshot`.
+
+A picture that cannot be taken never fails the action: its exit status is the action's, and the
+last line says why ("screenshot not taken: /nonexistent/shot.png: No such file or directory",
+or "...the display's settings do not allow screenshots"). FILE's folder must exist.
+
+To look at a PNG, open it with your image-viewing tool if you have one. Coordinates in the
+picture are the ones `web click X Y` takes (at the default size; a --max-width picture is
+scaled down).
+
+## js: JavaScript in the page
+
+  web eval 'EXPRESSION'               evaluate in the page; prints the value
+  web run [--timeout S] FILE|- [ARG...]   a script file (or stdin: -) as the body of an async
+                                      function: `return` gives the value, `await` works,
+                                      `args` holds the ARGs as strings; S seconds (120)
+
+The value: a string is printed as it is; numbers, booleans, arrays and plain objects as JSON
+(indented); undefined as "undefined". Errors: exit 1 with "JavaScript error: ..." (and the line).
+
+  $ web eval 'document.title'
+  Example Domain
+  $ web eval 'document.querySelectorAll("a").length'
+  2
+  $ web eval '({a: 1, b: [1, 2]})'
+  {
+    "a": 1,
+    "b": [
+      1,
+      2
+    ]
+  }
+  $ web eval 'undefinedThing.x'
+  JavaScript error: http://127.0.0.1:8000/index.html:1:15: ReferenceError: Can't find variable: undefinedThing
+  (exit 1)
+
+eval cannot wait: a Promise gives "JavaScript error: Unsupported result type". Use run:
+
+  $ web run - /api/data?x=1 <<'EOF'
+  const r = await fetch(args[0]);
+  return { status: r.status, body: await r.json() };
+  EOF
+  {
+    "status": 200,
+    "body": {
+      "query": "x=1",
+      "ok": true
+    }
+  }
+
+Return plain data, not DOM elements: map them to strings and objects first. Use run (stdin, a
+heredoc with 'EOF') for anything with quotes in it: no shell escaping needed.
+
+Extract a table as JSON:
+  $ web run - 'table' <<'EOF'
+  const t = document.querySelector(args[0]);
+  const rows = [...t.querySelectorAll('tr')].map(r => [...r.cells].map(c => c.innerText.trim()));
+  return rows;
+  EOF
+
+Wait inside the page for something to appear (up to 10 s):
+  $ web run - <<'EOF'
+  for (let i = 0; i < 100 && !document.querySelector('.results li'); i++)
+    await new Promise(r => setTimeout(r, 100));
+  return [...document.querySelectorAll('.results li')].map(li => li.innerText);
+  EOF
+
+More
+  - The page's own functions and variables are there (window.APP_STATE, a framework's store).
+  - fetch from the page carries its cookies and origin: a quick way to call the site's API
+    as the logged-in page would.
+  - Setting a field's .value from JavaScript skips the page's input events; frameworks may
+    not notice. Prefer `web type`; else dispatch events:
+    el.value = 'x'; el.dispatchEvent(new Event('input', {bubbles: true}));
+  - A script that runs past S seconds: exit 3 ("the script has not finished within S s"); it
+    goes on in the page.
+  - Console messages and JavaScript errors of the page: `web logs`.
+  - JavaScript before every page's own scripts (stubs, hooks): `web inject add FILE`
+    (web --agent-help identity).
+
+## identity: how the browser presents itself
+
+Each of these applies from the next request on; `web reload` shows the current page with it.
+`web settings` shows them all.
+
+  web ua [PROFILE | 'USER AGENT' | list]   the user agent. Profiles: default (WebKit on Linux),
+                       safari (Safari on a Mac: the same engine, the most consistent choice),
+                       chrome, edge, firefox (on Windows), iphone, android (mobile sites; with
+                       `web resize 390x844`). The page's navigator and Chrome's Sec-CH-UA
+                       headers follow
+  web header [list]                       headers put on every request of the page
+  web header set NAME VALUE [--host HOST] add or replace one; --host: only to HOST and its
+                       subdomains (use it for tokens); an empty VALUE takes the header off
+  web header unset NAME [--host HOST] | web header clear
+  web lang [LANGUAGES | default]          ko-KR,en: Accept-Language, navigator.languages, Intl
+  web cookie [list [URL] [--all]]         the cookies for URL (the page's), or all of them
+  web cookie set 'NAME=VALUE[; Domain=..; Path=..; Max-Age=..; Secure; HttpOnly]'... [--url URL]
+                       a Set-Cookie, or a Cookie header ('a=1; b=2': two cookies); for the
+                       page's site unless --url or Domain= says
+  web cookie delete NAME [--url URL | --all] | web cookie clear
+  web inject [list] | inject add FILE|- | inject remove FILE | inject clear
+                       JavaScript run at the start of every page, in every frame, before the
+                       page's own scripts
+  web settings         all of the above, and the developer tools
+
+  $ web ua chrome; web reload
+  $ web header set Authorization 'Bearer eyJ...' --host api.example.com
+  $ web lang ko-KR,en
+  $ web cookie set 'session=abc123; Path=/; Secure' --url https://example.com/
+  $ web settings                             (a test session's: other headers, a script)
+  user agent: chrome (Chrome on Windows)
+    Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36
+    navigator.platform "Win32", vendor "Google Inc.", userAgentData (Google Chrome 151, Windows); Sec-CH-UA headers to https sites
+  languages: ko-KR, en (Accept-Language, navigator.languages)
+  headers:
+    X-Only-Other: other   (to example.com and its subdomains)
+  injected scripts (at the start of every page, in every frame):
+    /t/js/inject.js (145 bytes)
+  developer tools: off (web devtools on records the network)
+
+Notes
+  - A Cookie header cannot be set with `web header` (the cookie jar replaces it): exit 2 says to
+    use `web cookie set`.
+  - A site that turns this browser away ("browser not supported"): try `web ua safari`, then
+    `web ua chrome`, then `web reload`. Another user agent changes what the site is told, not
+    what the engine can do (no WebAssembly, WebGL, video here).
+  - Settings can also be given when a browser starts:
+    `web --user-agent chrome --lang ko-KR open URL` (web --agent-help browsers).
+
+## network: the developer tools (requests, bodies, HAR, export)
+
+Off until turned on. While on, every request the page makes is recorded: the document, scripts,
+styles, images, fetch and XMLHttpRequest, frames', workers', WebSockets (with their messages).
+
+  web devtools on [--bodies text|all|none] | off | toggle | status
+                       record from now on; response bodies kept: text (default), all, none
+  web network [TEXT] [--type T] [--status S] [--failed] [--last N | --all]
+                       the requests (the last 100); TEXT: in the address; T: document,
+                       stylesheet, script, image, font, xhr (with fetch), fetch, websocket...;
+                       S: 404 or 4xx; --failed: errors and 4xx/5xx
+  web network show N|TEXT      one in detail: status, timings, headers as sent (with cookies),
+                               query, request body, response headers, start of the body
+  web network body N|TEXT [FILE]   its response body (a binary one into FILE)
+  web network search TEXT [--case] [--regex] [--in url,headers,body,messages] [--type T] ...
+                               TEXT in every request's address, headers, bodies, messages
+  web network watch [TEXT...] [--timeout S]   requests as they finish, until S or interrupted
+  web network clear            forget them
+  web network export N... [--as curl|fetch|node|python|http|raw|har] [-o FILE] [--no-cookies]
+                               requests as commands of other tools, to run again (curl default)
+  web har [FILE] [--no-bodies] save all as an HTTP Archive (default /tmp/NAME.har)
+  web har view FILE [N | TEXT...]     a HAR file of any browser: listed, or entry N
+  web har search FILE TEXT [OPTION...] | web har export FILE N... [--as FORMAT] [-o OUT]
+
+N is the number in the listing's first column; TEXT a part of the address (the last request
+that has it). Turn the tools on BEFORE the action whose requests you want.
+
+Real session (https://httpbin.org/forms/post, the form submitted):
+
+  $ web devtools on
+  developer tools: on, recording the network (response bodies: text); 0 requests of 0 pages; bodies: text, 0 B kept
+  web network lists the requests, web network show N one of them, web har FILE saves them all
+  $ web open https://httpbin.org/forms/post
+  ...
+  $ web click 'Submit order'
+  ...
+  $ web network
+     #  status method  type             size     time  url
+     1  200    GET     document       1.5 kB   986 ms  https://httpbin.org/forms/post
+     2  200    POST    document       1.1 kB   483 ms  https://httpbin.org/post
+  2 requests, 2.7 kB transferred, 2.4 kB of content (web network show N: one in detail; web network export N: as curl...)
+
+  $ web network show post
+  #2 POST https://httpbin.org/post
+  status: 200 OK   HTTP/2   type: document   page: page_3
+  remote address: 44.206.195.5:443   connection: 13   priority: high   TLS 1.2 ECDHE-RSA-AES128-GCM-SHA256
+  started: 2026-10-19T09:04:19.810Z   time: 483 ms (blocked 1.8 ms, dns 0.1 ms, connect 237 ms, ssl 228 ms, ...)
+  initiator: other
+  size: 1.1 kB transferred (headers 136 B, body 984 B), 966 B of content (application/json)
+
+  request headers (as sent, 313 B):
+    Referer: https://httpbin.org/forms/post
+    Origin: https://httpbin.org
+    Content-Type: application/x-www-form-urlencoded
+    ...
+  request body (application/x-www-form-urlencoded, 67 B):
+  custname=Kim&custtel=&custemail=&size=medium&delivery=&comments=
+
+  response headers:
+    Content-Type: application/json
+    ...
+  response body:
+  {
+    "args": {},
+  ...
+
+A page's API calls (a local test page; status "..." is still loading, "failed" an error):
+
+  $ web network --type fetch
+     #  status method  type             size     time  url
+     5  200    GET     fetch           240 B   1.4 ms  http://127.0.0.1:8000/api/data?x=1&y=two
+     6  200    POST    fetch           750 B   4.1 ms  http://127.0.0.1:8000/api/echo
+     8  404    GET     fetch           521 B   3.3 ms  http://127.0.0.1:8000/missing.js
+     9  302    GET     fetch             0 B   1.9 ms  http://127.0.0.1:8000/redirect  -> http://127.0.0.1:8000/second.html
+  ...
+  $ web network body 'api/data?x=1'
+  {"ok": true, "query": "x=1&y=two"}
+
+  $ web network search 세계
+     4  200    GET     script         1.5 kB   7.5 ms  http://127.0.0.1:8000/net.js
+         response body 7:105  ...Type': 'application/json' }, body: JSON.stringify({ hello: '세계' }),
+     6  200    POST    fetch           750 B   4.1 ms  http://127.0.0.1:8000/api/echo
+         request body 1:11  {"hello":"세계"}
+  3 matches in 2 requests (of 13) (web network show N, web network body N)
+  (no match: exit 4)
+
+  $ web network export api/echo
+  # #6 POST http://127.0.0.1:8000/api/echo (200, fetch)
+  curl 'http://127.0.0.1:8000/api/echo' \
+    -H 'Content-Type: application/json' \
+    -H 'Referer: http://127.0.0.1:8000/net.html' \
+    ...
+    -H 'Cookie: flavor=choco; b=2; devtools=yes' \
+    --data-raw '{"hello":"세계"}' \
+    --compressed
+  $ web network export api/echo --as python -o /tmp/echo.py
+  /tmp/echo.py: 1 request as python (... bytes, executable)
+
+  $ web har /tmp/site.har
+  /tmp/site.har: 13 requests of 1 page; bodies: text, 3.1 kB kept (HAR 1.2, 41354 bytes)
+
+Uses: find the API a page calls (`web network --type fetch`, then `show`), read its JSON
+(`network body`), find where a value comes from (`network search VALUE`), replay or vary a
+request outside the browser (`export`, then edit and run the curl), debug a failing form
+(`network --failed`), check a page's HTTP status (the document's row).
+
+Without the developer tools, `web network` says: "nothing recorded: the developer tools are
+off" (exit 1). `web --devtools open URL` records from the browser's start.
+
+## intercept: pause the page's requests for approval
+
+Like an intercepting proxy (Burp's Intercept), inside the browser: HTTPS needs nothing extra.
+Requests the rules take PAUSE before they go (or their responses before the page gets them)
+until you send, drop or answer them. Turns the developer tools on.
+
+  web intercept on [TEXT...] [--regex] [--case] [--type T[,T]] [--method M[,M]]
+                   [--stage request|response|both]     pause what matches (all with no rules)
+  web intercept [status] | off       the rules; off lets all paused ones go unchanged
+  web intercept list                 the paused requests (their numbers are web network's)
+  web intercept show N               what would go: method, address, headers, body
+  web intercept send N... [--url U] [--method M] [--header 'NAME: VALUE']... [--unset NAME]...
+                   [--body TEXT | --body-file FILE]     let it go, changed so
+  web intercept drop N... [--error general|access|cancel|timeout]   the page gets a network error
+  web intercept respond N... [--status S] [--header 'NAME: VALUE']... [--mime TYPE]
+                   [--body TEXT | --body-file FILE]     answer it yourself; nothing is sent
+  web intercept wait [TIMEOUT]       until a request pauses (30 s; exit 3 if none)
+  N: a number, all, or a part of the address.
+
+Exit 6: while a request is paused, commands that wait on the page (open, back, forward,
+reload, click, key, wait, run) stop waiting and list the paused requests with exit 6. Decide
+each (send / drop / respond), then `web wait load` (or `web wait text ...`) to go on.
+
+Real session (a local test page that loads, then fetches):
+
+  $ web intercept on --type document,fetch
+  $ web open http://127.0.0.1:8000/hold.html
+  paused: 1 request paused, waiting for the agent:
+     #  stage         method  type          waited  url
+    17  request       GET     document       0.0 s  http://127.0.0.1:8000/hold.html
+  (web intercept show N; send N [--url U] [--header 'NAME: VALUE'] [--body TEXT] | drop N | respond N [--status S] --body TEXT; ...)
+  the page waits for them (web wait load, once they are decided)
+  (exit 6)
+  $ web intercept show 17
+  #17 GET http://127.0.0.1:8000/hold.html
+  paused before it goes (waiting 0.0 s)   type: document   page: page_2
+  ...
+  $ web intercept send 17
+  sent #17 GET http://127.0.0.1:8000/hold.html
+  nothing else is paused
+  $ web intercept wait 30
+  1 request paused, waiting for the agent:
+     #  stage         method  type          waited  url
+    19  request       GET     fetch          0.0 s  http://127.0.0.1:8000/api/data?hold=1
+  $ web intercept send hold=1 --url '/api/data?changed=1'
+  $ web intercept send api/echo --body '{"hello":"agent"}' --header 'X-Agent: yes'
+  sent #20 POST http://127.0.0.1:8000/api/echo (changed: headers, body)
+  $ web intercept drop drop=1
+  dropped #21 GET http://127.0.0.1:8000/api/data?drop=1 (the page gets a network error)
+  $ web intercept respond mock=1 --status 201 --body '{"mocked":true}'
+  answered #22 GET http://127.0.0.1:8000/api/data?mock=1 here: 201 Created, 15 B of application/json (not sent)
+  $ web intercept off
+  $ web wait load
+
+Notes
+  - At the response stage (--stage response) the body has not arrived: you can replace the
+    whole response (`send N --status S --body TEXT`) but not read or edit its body, and not
+    drop it.
+  - Headers shown at the request stage are the page's; the network adds Cookie, Host,
+    Accept-Encoding after.
+  - Not interceptable: WebSockets, synchronous XHR, sendBeacon, data: URLs, service workers.
+  - A paused request waits forever: always send/drop/respond it, or `web intercept off`.
+
+## browsers: several browsers, options, environment, logs
+
+  web [-n NAME] [BROWSER OPTION...] COMMAND [ARG...]
+  -n NAME          the browser to use (default "web"); a new NAME starts a new browser with its
+                   own cookies, storage and history (~/.local/share/collabo-web/NAME)
+  web list         the running browsers and their pages
+  web close        end the browser (also: quit, stop — `stop` closes, it does not stop a load)
+  web resize WxH   the view's size (390x844 for a phone)
+  web logs         the browser's log: the page's console messages and JavaScript errors,
+                   downloads, crashes (gui logs NAME)
+  web view         show the browser on the guest's display (gui view NAME)
+
+  $ web -n other open http://127.0.0.1:8000/second.html
+  http://127.0.0.1:8000/second.html
+  Second
+  $ web list
+  other	http://127.0.0.1:8000/second.html
+  web	http://127.0.0.1:8000/second.html
+  $ web logs | tail -3
+  http://127.0.0.1:8000/index.html:1:15: CONSOLE JS ERROR ReferenceError: Can't find variable: undefinedThing
+  http://127.0.0.1:8000/index.html:1:12: CONSOLE LOG hello from the page
+
+Use two names for two sessions at once (two accounts, a logged-in and a logged-out view); work
+in parallel only across different names.
+
+Browser options go BEFORE the command. A browser this command starts gets them all; a running
+one gets the settings among them and says the others need a new start (`web close` first):
+  settings:   --user-agent PROFILE|UA   --header 'NAME: VALUE'   --header-for HOST 'NAME: VALUE'
+              --lang LANGUAGES   --inject FILE   --devtools
+  start only: --ephemeral (no cookies, storage or history kept)   --ignore-tls-errors
+              --size WxH
+
+  $ web --ephemeral --user-agent iphone --size 390x844 -n phone open example.com
+
+Environment of the `web` that starts a browser: WEB_USER_AGENT, WEB_HEADERS (lines NAME: VALUE),
+WEB_LANG, WEB_DEVTOOLS (1, or text|all|none), WEB_BROWSER_ARGS (more options),
+WEB_START_TIMEOUT (seconds to wait for the start, 300), WPE_BROWSER_DEBUG=1 (log loads).
+
+## errors: exit statuses and what to do
+
+  0  done
+  1  failed: a load failed, JavaScript threw, no page to go back to, nothing recorded...
+  2  usage: a wrong command, option or key name; read the message (web help)
+  3  timed out: open/wait/run/intercept wait ran out of time
+  4  not found: no element for a TARGET, no option, no request or match, no cookie
+  5  no browser: it could not start (is the wpe add-on on?) or went away
+  6  requests are paused for you (web intercept): decide them, then web wait load
+
+Messages and what to do
+  nothing matches "X" (exit 4)
+      `web read` again: the page changed, or X is not a link's or button's text. Use the [N]
+      from the new read or a CSS selector. Maybe it is in an iframe: a picture and click X Y.
+  not found in time: text X (exit 3)
+      Not there (yet). `web read`/`web screenshot` to see the page; a longer TIMEOUT; check the
+      exact text (case matters) or wait for a selector instead.
+  failed to load URL: MESSAGE (exit 1)
+      DNS, connection, TLS: check the address. The page shown is still the one before (its
+      address and title follow the message).
+  failed to load URL: Unacceptable TLS certificate (checked against this sandbox's clock, ...)
+      Certificates are checked against the sandbox's clock; when it is days off, some sites
+      fail. Real (example.com's "Learn more" link):
+        $ web click 1
+        failed to load https://www.iana.org/help/example-domains: Unacceptable TLS certificate (checked against this sandbox's clock, 2026-10-19 09:10 UTC)
+        https://example.com/
+        Example Domain
+      A browser started with --ignore-tls-errors skips the check: web close, then
+      `web --ignore-tls-errors open URL` (only for reading; do not send secrets that way).
+  JavaScript error: ... (exit 1)
+      Fix the script; `Unsupported result type`: eval returned a Promise or a DOM object (use
+      run, return plain data).
+  the script has not finished within S s (exit 3)
+      `web run --timeout S` with a larger S, or make the script return sooner.
+  the page's process ended (crashed | out of memory) (in web info)
+      `web reload`. A page too heavy for the sandbox may keep failing.
+  the browser went away before answering (did it crash? `gui logs web`)
+      The browser crashed: the next `web` command starts a new one (cookies kept on disk).
+  web: starting the browser "web" (its first start on this computer compiles it: about 20 s)...
+      Normal on the first start: wait.
+  paused: N requests paused, waiting for the agent (exit 6)
+      web intercept list / send / drop / respond, or web intercept off.
+
+Sites that do not work: robot checks that need WebAssembly (AWS WAF: Amazon) stay on an empty
+check page; video, audio, WebGL, WebRTC and PDF viewing are not there. Very script-heavy
+applications are slow: use longer timeouts, or the site's API (devtools, then curl).
+
+## recipes: whole tasks
+
+Log in, then check it worked
+  web open https://the-internet.herokuapp.com/login
+  web read                                   # find the fields: [1] username, [2] password
+  web type tomsmith 1
+  web type 'SuperSecretPassword!' 2
+  web click Login                            # waits for the page after it
+  web wait text 'Secure Area' 10 && echo logged-in
+  (the cookies stay in the browser: later commands are logged in)
+
+Search a site and read the results
+  web open 'wpe webkit'                      # words: a DuckDuckGo search
+  web read 4000
+  # or on the site's own search box:
+  web read | grep -n 'input'                 # find the box, e.g. [2] input text q:
+  web type 'wireless mouse' 2; web key Enter
+  web wait selector '.results' 15; web read
+
+Fill a form with radios, checkboxes, a select and a textarea
+  web read
+  web type 'Kim' 1                           # text field [1]
+  web click 5                                # a radio, or its label: web click 'Medium'
+  web click 7                                # a checkbox (click again to uncheck)
+  web select 9 'Express'                     # a <select>, by option text or value
+  web type 'Leave at the door' 12            # a textarea
+  web read | grep checked                    # [5] radio size (checked): Medium ...
+  web eval 'new FormData(document.forms[0]).getAll("topping").join(",")'    # bacon
+  web click 'Submit order'
+
+Replace what a field holds
+  web click 3; web key ctrl+a; web type 'new value'
+
+Scrape a list or table into JSON
+  web run - '.product' <<'EOF'
+  return [...document.querySelectorAll(args[0])].map(p => ({
+    name: p.querySelector('h2')?.innerText.trim(),
+    price: p.querySelector('.price')?.innerText.trim(),
+    link: p.querySelector('a')?.href,
+  }));
+  EOF
+
+Go through pages of results
+  for page in 1 2 3; do
+    web read > /tmp/page$page.txt
+    web click 'Next' || break                # exit 4 when there is no Next
+  done                                       # (the "clicked" JSON says which link it took)
+
+Load everything on an infinite-scroll page (prints how many items there are in the end)
+  web run --timeout 300 - '.item' <<'EOF'
+  let n = document.querySelectorAll(args[0]).length;
+  for (let round = 0; round < 50; round++) {
+    window.scrollBy(0, -300);     // away from the end, then back: its marker comes into view again
+    await new Promise(r => setTimeout(r, 200));
+    window.scrollTo(0, document.documentElement.scrollHeight);
+    let grew = false;
+    for (let i = 0; i < 50 && !grew; i++) {
+      await new Promise(r => setTimeout(r, 100));
+      grew = document.querySelectorAll(args[0]).length > n;
+    }
+    if (!grew) break;             // nothing more within 5 s: the end
+    n = document.querySelectorAll(args[0]).length;
+  }
+  return n;
+  EOF
+  (Scrolling straight to the end again, without moving away first, often loads nothing more:
+  the page's trigger only fires when its marker comes into view.)
+
+Make sure a click hit the right thing
+  web click 640 220 --screenshot /tmp/before.png    # the ring shows where it goes in
+  web screenshot /tmp/after.png                     # and what came of it
+  (the JSON after "clicked" also names the element: tag, text, href)
+
+Wait for a single-page application
+  web open https://app.example.com/dashboard
+  web wait gone '.spinner' 30; web wait selector 'table tbody tr' 30
+  web read
+
+Find the API behind a page, then call it directly
+  web devtools on
+  web open https://shop.example.com/search?q=mouse
+  web network --type fetch                   # the JSON calls
+  web network show 12                        # address, headers, query, response
+  web network body 12 > /tmp/results.json
+  web network export 12 -o /tmp/call.sh      # a curl command with the cookies; edit and run
+  sh /tmp/call.sh
+
+Call the site's API as the logged-in page (cookies included)
+  web run - <<'EOF'
+  const r = await fetch('/api/me', { headers: { Accept: 'application/json' } });
+  return { status: r.status, body: await r.json() };
+  EOF
+
+Mock an API response to test the page
+  web intercept on api/prices --type fetch
+  web reload                                 # exit 6 if the fetch paused during the load
+  web intercept wait 30                      # it is paused (at once if it already was)
+  web intercept respond api/prices --body '{"price": 0}' --mime application/json
+  web wait load; web read
+  web intercept off                          # when done: nothing pauses any more
+
+Block requests (ads, trackers, a broken script)
+  web intercept on doubleclick analytics --type script,xhr,fetch,image
+  web open https://news.example.com
+  status=$?
+  while [ $status = 6 ]; do                  # 6: some paused; drop them, wait for the page
+    web intercept drop all >/dev/null; web wait load >/dev/null; status=$?
+  done
+  web intercept off                          # or what the page asks for later waits forever
+
+Add a header or a token for one host
+  web header set Authorization 'Bearer TOKEN' --host api.example.com
+  web reload
+
+Look like a phone
+  web ua iphone; web resize 390x844; web reload
+
+Two accounts at once
+  web -n alice open https://site.example/login   # each name: its own cookies
+  web -n bob open https://site.example/login
+
+Download a file
+  The click ends with exit 1, "failed to load URL: Frame load interrupted": that is the browser
+  handing the address to its download; the file goes to the browser's ~/Downloads (real):
+  $ web click 'Download data'
+  failed to load http://127.0.0.1:8001/data.bin: Frame load interrupted
+  http://127.0.0.1:8001/dl.html
+  Files
+  $ web logs | grep downloading
+  wpe-browser: downloading to /root/Downloads/data.bin
+
+Pages on disk
+  web open /tmp/report.html                  # an absolute path: file://
