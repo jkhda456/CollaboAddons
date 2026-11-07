@@ -1,0 +1,4 @@
+{
+  "name": "rust",
+  "description": "The Rust toolchain in the guest: rustc 1.99.1 and cargo as wasm32 Linux programs, for the guest's own target (wasm32-unknown-linux-musl, built into this rustc) with its standard library, rust-lld, proc macros (side modules loaded with dlopen), build scripts, cargo test with doc tests (rustdoc), clippy and rustfmt"
+}

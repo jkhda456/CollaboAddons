@@ -1,0 +1,87 @@
+The built-in target wasm32-unknown-linux-musl: the CollaboCore guest (tombl/linux wasm32, musl, ILP32),
+with panic=unwind, PIC, dylibs and proc macros as WebAssembly side modules. Its JSON twin is the
+add-on's target/wasm32-unknown-linux-musl.json (for the host's rustc).
+
+diff -ruN a/compiler/rustc_target/src/spec/mod.rs b/compiler/rustc_target/src/spec/mod.rs
+--- a/compiler/rustc_target/src/spec/mod.rs
++++ b/compiler/rustc_target/src/spec/mod.rs
+@@ -1652,6 +1652,7 @@
+     ("wasm32-wasip3", wasm32_wasip3),
+     ("wasm32-wasip1-threads", wasm32_wasip1_threads),
+     ("wasm32-wali-linux-musl", wasm32_wali_linux_musl),
++    ("wasm32-unknown-linux-musl", wasm32_unknown_linux_musl),
+     ("wasm64-unknown-unknown", wasm64_unknown_unknown),
+ 
+     ("thumbv6m-none-eabi", thumbv6m_none_eabi),
+diff -ruN a/compiler/rustc_target/src/spec/targets/wasm32_unknown_linux_musl.rs b/compiler/rustc_target/src/spec/targets/wasm32_unknown_linux_musl.rs
+--- a/compiler/rustc_target/src/spec/targets/wasm32_unknown_linux_musl.rs
++++ b/compiler/rustc_target/src/spec/targets/wasm32_unknown_linux_musl.rs
+@@ -0,0 +1,68 @@
++//! The `wasm32-unknown-linux-musl` target: WebAssembly Linux as tombl/linux's wasm32 port runs it
++//! (the guest of CollaboCore), with musl. Unlike WALI (`wasm32-wali-linux-musl`) its C ABI is ILP32
++//! (`long` is 32 bits) and a program is a module of its own that imports a shared memory.
++//!
++//! - Programs are linked by rust-lld (wasm-ld) with musl's `crt1.o` and `libc.a` and compiler-rt
++//!   from the self-contained directory, as the guest's C compiler links them: a function table
++//!   based at 3 (function pointers 1 and 2 are `SIG_IGN` and `SIG_HOLD`) and exported, an 8 MiB
++//!   stack, memory imported and shared, up to 4 GiB.
++//! - `dylib`s, `cdylib`s and proc macros are WebAssembly side modules (`dylink.0`), which the C
++//!   library's `dlopen` loads into a program: position-independent code (the default relocation
++//!   model, as on other Linux targets, so the same rlibs go into both), their own symbols bound to
++//!   themselves, everything else imported from the program, no C library of their own.
++//! - Panics unwind, with WebAssembly exception handling (the standard `exnref` encoding).
++
++use crate::spec::{
++    Arch, BinaryFormat, Cc, LinkOutputKind, LinkerFlavor, PanicStrategy, RelocModel, Target,
++    TargetMetadata, TargetOptions, add_link_args, base, crt_objects, cvs,
++};
++
++pub(crate) fn target() -> Target {
++    let mut options = base::linux_wasm::opts();
++
++    // Instead of the base's: no `--stack-first` (data first, as the guest's C programs) and no
++    // `--allow-undefined` (an undefined symbol is an error). The arguments that only a program
++    // takes (table, stack size) are the linker's, by output kind (`WasmLd::set_output_kind`).
++    let args: &[&'static str] =
++        &["--no-demangle", "--import-memory", "--shared-memory", "--max-memory=4294967296"];
++    options.pre_link_args = TargetOptions::link_args(LinkerFlavor::WasmLld(Cc::No), args);
++    let cc_args: &[&'static str] = &[
++        "-Wl,--no-demangle",
++        "-Wl,--import-memory",
++        "-Wl,--shared-memory",
++        "-Wl,--max-memory=4294967296",
++    ];
++    add_link_args(&mut options.pre_link_args, LinkerFlavor::WasmLld(Cc::Yes), cc_args);
++
++    options.binary_format = BinaryFormat::Wasm;
++    options.only_cdylib = false;
++    options.dll_prefix = "lib".into();
++    options.dll_suffix = ".so".into();
++    options.exe_suffix = "".into();
++    options.relocation_model = RelocModel::Pic;
++    options.panic_strategy = PanicStrategy::Unwind;
++    options.llvm_args = cvs!["-wasm-use-legacy-eh=false"];
++    options.entry_name = "__main_argc_argv".into();
++    options.main_needs_argc_argv = true;
++    options.pre_link_objects_self_contained = crt_objects::new(&[
++        (LinkOutputKind::DynamicNoPicExe, &["crt1.o"]),
++        (LinkOutputKind::DynamicPicExe, &["crt1.o"]),
++        (LinkOutputKind::StaticNoPicExe, &["crt1.o"]),
++        (LinkOutputKind::StaticPicExe, &["crt1.o"]),
++    ]);
++    options.post_link_objects_self_contained = Default::default();
++
++    Target {
++        llvm_target: "wasm32-unknown-linux-musl".into(),
++        metadata: TargetMetadata {
++            description: Some("WebAssembly Linux (tombl/linux) with musl-libc, ILP32".into()),
++            tier: Some(3),
++            host_tools: Some(true),
++            std: Some(true),
++        },
++        pointer_width: 32,
++        data_layout: "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20".into(),
++        arch: Arch::Wasm32,
++        options,
++    }
++}

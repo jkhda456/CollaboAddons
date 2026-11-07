@@ -1,0 +1,76 @@
+{
+  "arch": "wasm32",
+  "binary-format": "wasm",
+  "crt-objects-fallback": "true",
+  "crt-static-allows-dylibs": true,
+  "crt-static-default": true,
+  "crt-static-respected": true,
+  "data-layout": "e-m:e-p:32:32-p10:8:8-p20:8:8-i64:64-i128:128-n32:64-S128-ni:1:10:20",
+  "dll-prefix": "lib",
+  "dll-suffix": ".so",
+  "dynamic-linking": true,
+  "eh-frame-header": false,
+  "emit-debug-gdb-scripts": false,
+  "entry-name": "__main_argc_argv",
+  "env": "musl",
+  "exe-suffix": "",
+  "features": "+atomics,+bulk-memory,+mutable-globals,+sign-ext",
+  "generate-arange-section": false,
+  "has-thread-local": true,
+  "is-like-wasm": true,
+  "limit-rdylib-exports": false,
+  "linker": "rust-lld",
+  "linker-flavor": "wasm-lld",
+  "linker-is-gnu": false,
+  "lld-flavor": "wasm",
+  "llvm-args": [
+    "-wasm-use-legacy-eh=false"
+  ],
+  "llvm-target": "wasm32-unknown-linux-musl",
+  "main-needs-argc-argv": true,
+  "max-atomic-width": 64,
+  "metadata": {
+    "description": "WebAssembly Linux (tombl/linux) with musl-libc, ILP32",
+    "host_tools": true,
+    "std": true,
+    "tier": 3
+  },
+  "only-cdylib": false,
+  "os": "linux",
+  "panic-strategy": "unwind",
+  "pre-link-args": {
+    "wasm-lld": [
+      "--no-demangle",
+      "--import-memory",
+      "--shared-memory",
+      "--max-memory=4294967296"
+    ],
+    "wasm-lld-cc": [
+      "-Wl,--no-demangle",
+      "-Wl,--import-memory",
+      "-Wl,--shared-memory",
+      "-Wl,--max-memory=4294967296"
+    ]
+  },
+  "pre-link-objects-fallback": {
+    "dynamic-nopic-exe": [
+      "crt1.o"
+    ],
+    "dynamic-pic-exe": [
+      "crt1.o"
+    ],
+    "static-nopic-exe": [
+      "crt1.o"
+    ],
+    "static-pic-exe": [
+      "crt1.o"
+    ]
+  },
+  "relocation-model": "pic",
+  "target-family": [
+    "wasm",
+    "unix"
+  ],
+  "target-pointer-width": 32,
+  "tls-model": "local-exec"
+}

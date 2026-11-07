@@ -1,0 +1,10 @@
+# The rust add-on's defaults for cargo in the guest. At /.cargo/config.toml: cargo reads the
+# .cargo/config.toml of the current directory and of every directory above it, so these hold for
+# every project (and give way to the project's own, CARGO_HOME's, and the environment's). build.sh
+# appends a [patch.crates-io] for the crates that get this platform's ABI wrong on crates.io (libc,
+# rustix, linux-raw-sys), from /usr/lib/rustlib/src/crates.
+[env]
+# The cc crate's sysroot for wasm32 Linux (the C library and headers: /usr, with the llvm add-on's
+# cc); newer cc crates stop without it.
+WASM_MUSL_SYSROOT = { value = "/usr", force = false }
+

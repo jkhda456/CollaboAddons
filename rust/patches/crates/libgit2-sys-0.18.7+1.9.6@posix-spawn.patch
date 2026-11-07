@@ -1,0 +1,94 @@
+libgit2 without fork on WebAssembly Linux (the guest): its process API (ssh exec, credential
+helpers) starts a program with posix_spawn there.
+
+--- a/libgit2/src/util/unix/process.c
++++ b/libgit2/src/util/unix/process.c
+@@ -344,6 +344,80 @@
+ 	return error;
+ }
+ 
++#ifdef __wasm__
++#include <spawn.h>
++/* (musl declares it for _GNU_SOURCE only) */
++int posix_spawn_file_actions_addchdir_np(posix_spawn_file_actions_t *__restrict, const char *__restrict);
++
++/*
++ * WebAssembly Linux (tombl/linux) has no fork: posix_spawn does what the child half below does
++ * (the pipes, the working directory, execve), and reports a failed exec itself.
++ */
++int git_process_start(git_process *process)
++{
++	int in[2] = { -1, -1 }, out[2] = { -1, -1 }, err[2] = { -1, -1 };
++	posix_spawn_file_actions_t fa;
++	pid_t pid;
++	int error;
++
++	if ((error = resolve_path(process)) < 0)
++		goto on_error;
++
++	if ((process->capture_in && pipe(in) < 0) ||
++	    (process->capture_out && pipe(out) < 0) ||
++	    (process->capture_err && pipe(err) < 0)) {
++		git_error_set(GIT_ERROR_OS, "could not create pipe");
++		goto on_error;
++	}
++
++	posix_spawn_file_actions_init(&fa);
++	if (process->capture_in) {
++		posix_spawn_file_actions_addclose(&fa, in[1]);
++		posix_spawn_file_actions_adddup2(&fa, in[0], STDIN_FILENO);
++	}
++	if (process->capture_out) {
++		posix_spawn_file_actions_addclose(&fa, out[0]);
++		posix_spawn_file_actions_adddup2(&fa, out[1], STDOUT_FILENO);
++	}
++	if (process->capture_err) {
++		posix_spawn_file_actions_addclose(&fa, err[0]);
++		posix_spawn_file_actions_adddup2(&fa, err[1], STDERR_FILENO);
++	}
++	if (process->cwd)
++		posix_spawn_file_actions_addchdir_np(&fa, process->cwd);
++
++	error = posix_spawn(&pid, process->args[0], &fa, NULL,
++	                    process->args, process->env);
++	posix_spawn_file_actions_destroy(&fa);
++	if (error) {
++		errno = error;
++		git_error_set(GIT_ERROR_OS, "could not start '%s'", process->args[0]);
++		goto on_error;
++	}
++
++	if (process->capture_in) {
++		CLOSE_FD(in[0]);
++		process->child_in = in[1];
++	}
++	if (process->capture_out) {
++		CLOSE_FD(out[1]);
++		process->child_out = out[0];
++	}
++	if (process->capture_err) {
++		CLOSE_FD(err[1]);
++		process->child_err = err[0];
++	}
++
++	process->pid = pid;
++	return 0;
++
++on_error:
++	CLOSE_FD(in[0]);     CLOSE_FD(in[1]);
++	CLOSE_FD(out[0]);    CLOSE_FD(out[1]);
++	CLOSE_FD(err[0]);    CLOSE_FD(err[1]);
++	return -1;
++}
++#else
+ int git_process_start(git_process *process)
+ {
+ 	int in[2] = { -1, -1 }, out[2] = { -1, -1 },
+@@ -451,6 +523,7 @@
+ 	CLOSE_FD(status[0]); CLOSE_FD(status[1]);
+ 	return -1;
+ }
++#endif /* __wasm__ */
+ 
+ int git_process_id(p_pid_t *out, git_process *process)
+ {

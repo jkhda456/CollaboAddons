@@ -1,0 +1,21 @@
+Proc macros for wasm32 Linux with side modules (wasm32-unknown-linux-musl): rustc keeps proc-macro
+crates of wasm targets behind -Zwasm-proc-macros; on this target a proc macro is a WebAssembly side
+module the C library's dlopen loads into rustc (patches 0005, 0006), as a shared library on Linux.
+
+--- a/compiler/rustc_interface/src/passes.rs
++++ b/compiler/rustc_interface/src/passes.rs
+@@ -276,7 +276,13 @@
+         }
+     }
+ 
+-    if is_proc_macro_crate && sess.target.is_like_wasm && !sess.opts.unstable_opts.wasm_proc_macros
++    // (wasm32 Linux with side modules, wasm32-unknown-linux-musl: a proc macro is a shared library
++    // the C library's dlopen loads, as on other Linux targets)
++    let wasm_side_modules = sess.target.os == rustc_target::spec::Os::Linux && !sess.target.only_cdylib;
++    if is_proc_macro_crate
++        && sess.target.is_like_wasm
++        && !wasm_side_modules
++        && !sess.opts.unstable_opts.wasm_proc_macros
+     {
+         sess.dcx().emit_err(diagnostics::UnstableWasmProcMacro);
+     }

@@ -1,0 +1,26 @@
+--- a/src/path.rs
++++ b/src/path.rs
+@@ -51,12 +51,12 @@
+     /// or any other error occurred.
+     /// It can be used as `home_for_user` parameter in [`Path::interpolate()`][crate::Path::interpolate()].
+     #[cfg_attr(windows, allow(unused_variables))]
+-    #[cfg_attr(all(target_family = "wasm", not(target_os = "emscripten")), allow(unused_variables))]
++    #[cfg_attr(all(all(target_family = "wasm", not(target_os = "linux")), not(target_os = "emscripten")), allow(unused_variables))]
+     pub fn home_for_user(name: &str) -> Option<PathBuf> {
+         #[cfg(not(any(
+             target_os = "android",
+             target_os = "windows",
+-            all(target_family = "wasm", not(target_os = "emscripten"))
++            all(all(target_family = "wasm", not(target_os = "linux")), not(target_os = "emscripten"))
+         )))]
+         {
+             let cname = std::ffi::CString::new(name).ok()?;
+@@ -78,7 +78,7 @@
+         #[cfg(any(
+             target_os = "android",
+             target_os = "windows",
+-            all(target_family = "wasm", not(target_os = "emscripten"))
++            all(all(target_family = "wasm", not(target_os = "linux")), not(target_os = "emscripten"))
+         ))]
+         {
+             None

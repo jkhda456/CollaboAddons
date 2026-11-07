@@ -1,0 +1,15 @@
+rustc_driver as an rlib: rustc for the guest is one program. The guest links no shared libraries
+into a program at its start (dlopen loads side modules later), so the compiler cannot be a dylib
+the rustc binary depends on.
+
+--- a/compiler/rustc_driver/Cargo.toml
++++ b/compiler/rustc_driver/Cargo.toml
+@@ -4,7 +4,7 @@
+ edition = "2024"
+ 
+ [lib]
+-crate-type = ["dylib"]
++crate-type = ["rlib"]
+ 
+ [dependencies]
+ # tidy-alphabetical-start

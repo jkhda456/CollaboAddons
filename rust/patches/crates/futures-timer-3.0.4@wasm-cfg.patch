@@ -1,0 +1,36 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -54,12 +54,12 @@
+ [dev-dependencies.futures]
+ version = "0.3.1"
+ 
+-[target.'cfg(target_arch = "wasm32")'.dependencies.gloo-timers]
++[target.'cfg(all(target_arch = "wasm32", not(target_os = "linux")))'.dependencies.gloo-timers]
+ version = "0.4.0"
+ features = ["futures"]
+ optional = true
+ 
+-[target.'cfg(target_arch = "wasm32")'.dependencies.send_wrapper]
++[target.'cfg(all(target_arch = "wasm32", not(target_os = "linux")))'.dependencies.send_wrapper]
+ version = "0.6.0"
+ optional = true
+ 
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -16,12 +16,12 @@
+ #![deny(missing_docs)]
+ #![warn(missing_debug_implementations)]
+ 
+-#[cfg(not(all(target_arch = "wasm32", feature = "wasm-bindgen")))]
++#[cfg(not(all(all(target_arch = "wasm32", not(target_os = "linux")), feature = "wasm-bindgen")))]
+ mod native;
+-#[cfg(all(target_arch = "wasm32", feature = "wasm-bindgen"))]
++#[cfg(all(all(target_arch = "wasm32", not(target_os = "linux")), feature = "wasm-bindgen"))]
+ mod wasm;
+ 
+-#[cfg(not(all(target_arch = "wasm32", feature = "wasm-bindgen")))]
++#[cfg(not(all(all(target_arch = "wasm32", not(target_os = "linux")), feature = "wasm-bindgen")))]
+ pub use self::native::Delay;
+-#[cfg(all(target_arch = "wasm32", feature = "wasm-bindgen"))]
++#[cfg(all(all(target_arch = "wasm32", not(target_os = "linux")), feature = "wasm-bindgen"))]
+ pub use self::wasm::Delay;

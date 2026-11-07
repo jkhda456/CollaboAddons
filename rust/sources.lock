@@ -1,0 +1,18 @@
+# Pinned downloads (name sha256 url), read by build.sh. RUST_SRC itself is the GitHub archive of tag
+# 1.99.1 (commit 58cf8f9c35b355199727627d07ae34a4e2846d67); the official source tarball gives what it
+# leaves out (the submodules: llvm-project 1b9c0d5ff9bb, cargo 5f94df4789f0, backtrace d902726a1dcd).
+DOWNLOADS="
+rustc-1.99.1-src.tar.xz 6451598a99e77f07571960f6b21d577399d3a30f33e80cbd2e3a4aae6535d265 https://static.rust-lang.org/dist/rustc-1.99.1-src.tar.xz
+rust-1.99.1-aarch64-unknown-linux-gnu.tar.xz a48fb1e853be56ce9b8e2751f5464dbd5e16440cd81e237920f3a5e7e806333e https://static.rust-lang.org/dist/rust-1.99.1-aarch64-unknown-linux-gnu.tar.xz
+"
+# (patches/crates/ name the crates.io packages build.sh fetches: their checksums are the
+# Cargo.lock files')
+# The LLVM in src/llvm-project (rust-lang/llvm-project, branch rustc/23.1-2026-07-22)
+LLVM_REV=1b9c0d5ff9bbe7634aead059efe6b11a7eeba145
+
+# Crates for the guest's own builds only (its cargo's [patch], build.sh's cpio stage), with no entry in
+# the rust tree's lock files: name-version sha256 (crates.io's checksums)
+GUEST_CRATE_SUMS="
+rustix-0.38.44 fdb5bc1ae2baa591800df16c9ca78619bf65c0488b41b96ccec5d11220d8c154
+linux-raw-sys-0.4.15 d26c52dbd32dccf2d10cac7725f8eae5296885fb5703b261f7d0a0739ec807ab
+"

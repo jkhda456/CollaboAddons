@@ -1,0 +1,18 @@
+rustc finds its sysroot from the file that holds rustc_driver (dladdr). In the guest rustc is one
+statically linked program, and dladdr knows only what dlopen loaded: the program's own file then.
+
+--- a/compiler/rustc_session/src/filesearch.rs
++++ b/compiler/rustc_session/src/filesearch.rs
+@@ -158,6 +158,12 @@
+     unsafe {
+         let mut info = std::mem::zeroed();
+         if libc::dladdr(function, &mut info) == 0 {
++            // wasm32 Linux: rustc is one program, linked statically (no shared library holds
++            // rustc_driver, and the C library's dladdr knows only the libraries dlopen loaded):
++            // the function is in the program's own file.
++            if cfg!(target_arch = "wasm32") {
++                return std::env::current_exe().map_err(|e| e.to_string());
++            }
+             return Err("dladdr failed".into());
+         }
+         #[cfg(target_os = "cygwin")]

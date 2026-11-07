@@ -1,0 +1,9 @@
+#!/bin/sh
+# Runs build.sh from a copy of itself (editing build.sh while it runs would derail bash, which reads
+# a script as it goes), in the background-friendly way: the log is build/run.log, ending "exit N".
+#   tools/go [build.sh's arguments]      (FORCE=..., JOBS=... as for build.sh)
+A="$(cd "$(dirname "$0")/.." && pwd)"
+mkdir -p "$A/build"
+cp "$A/build.sh" "$A/build/.build.snapshot.sh"
+RUST_ADDON_DIR="$A" bash "$A/build/.build.snapshot.sh" "$@" > "$A/build/run.log" 2>&1
+echo "exit $?" >> "$A/build/run.log"

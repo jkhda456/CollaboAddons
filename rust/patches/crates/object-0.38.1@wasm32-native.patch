@@ -1,0 +1,21 @@
+The native file of wasm32 Linux is a WebAssembly module: object defined NativeFile twice there
+(ELF for unix, wasm for wasm32), which does not compile; the ELF ones leave wasm32 with "wasm" out.
+
+--- a/src/read/mod.rs	2026-10-31 17:12:07.246338780 +0000
++++ b/src/read/mod.rs	2026-10-31 17:12:07.263255050 +0000
+@@ -156,6 +156,7 @@
+ #[cfg(all(
+     unix,
+     not(target_os = "macos"),
++    not(all(target_arch = "wasm32", feature = "wasm")),
+     target_pointer_width = "32",
+     feature = "elf"
+ ))]
+@@ -165,6 +166,7 @@
+ #[cfg(all(
+     unix,
+     not(target_os = "macos"),
++    not(all(target_arch = "wasm32", feature = "wasm")),
+     target_pointer_width = "64",
+     feature = "elf"
+ ))]

@@ -1,0 +1,138 @@
+std: child processes on WebAssembly Linux (tombl/linux) without fork. The kernel cannot copy the
+memory of a process that has more than one thread, so the fork path of Command::spawn (taken for
+pre_exec closures, as the jobserver crate's, a changed PATH, setsid, uid/gid, ...) fails there. The
+child runs instead as posix_spawn's does: clone(CLONE_VM | CLONE_VFORK) on a stack of its own, in the
+parent's memory, the parent waiting until it has exec'd or exited; so it must not change the
+parent's globals (environ: execve with the environment, PATH searched in it; no always_abort).
+
+--- a/library/std/src/sys/process/unix/unix.rs
++++ b/library/std/src/sys/process/unix/unix.rs
+@@ -91,8 +91,16 @@
+         // The child calls `mem::forget` to leak the lock, which is crucial because
+         // releasing a lock is not async-signal-safe.
+         let env_lock = sys::env::env_read_lock();
++        // WebAssembly Linux (tombl/linux) cannot fork a process that has more than one thread
++        // (its memory cannot be copied while others run): the child runs on a stack of its own
++        // in the parent's memory, which waits until it has exec'd or exited (vfork), as the C
++        // library's posix_spawn does.
++        #[cfg(all(target_arch = "wasm32", target_os = "linux", not(target_vendor = "wali")))]
++        let pid = unsafe { self.do_vfork_exec(&theirs, envp.as_ref(), &output)? };
++        #[cfg(not(all(target_arch = "wasm32", target_os = "linux", not(target_vendor = "wali"))))]
+         let pid = unsafe { self.do_fork()? };
+ 
++        #[cfg(not(all(target_arch = "wasm32", target_os = "linux", not(target_vendor = "wali"))))]
+         if pid == 0 {
+             crate::panic::always_abort();
+             mem::forget(env_lock); // avoid non-async-signal-safe unlocking
+@@ -181,6 +189,61 @@
+         return Err(Self::ERR_APPLE_TV_WATCH_NO_FORK_EXEC);
+     }
+ 
++    /// The child half of `spawn` for WebAssembly Linux: `clone(CLONE_VM | CLONE_VFORK)` runs
++    /// `do_exec` on a stack of its own in this process's memory (and with this thread's
++    /// thread-local storage), and the parent resumes once the child has exec'd or exited. The
++    /// child changes nothing of the parent's: no global state (`do_exec` passes the environment
++    /// to `execvpe` instead of setting `environ`, `panic::always_abort` is not called), and its
++    /// file descriptors are its own.
++    #[cfg(all(target_arch = "wasm32", target_os = "linux", not(target_vendor = "wali")))]
++    unsafe fn do_vfork_exec(
++        &mut self,
++        stdio: &ChildPipes,
++        maybe_envp: Option<&CStringArray>,
++        output: &crate::sys::net::Socket,
++    ) -> io::Result<pid_t> {
++        use crate::ffi::c_void;
++
++        struct Child<'a> {
++            cmd: *mut Command,
++            stdio: *const ChildPipes,
++            envp: Option<&'a CStringArray>,
++            output: *const crate::sys::net::Socket,
++        }
++
++        extern "C" fn child(arg: *mut c_void) -> libc::c_int {
++            unsafe {
++                let c = &*(arg as *const Child<'_>);
++                let cmd = &mut *c.cmd;
++                if cmd.get_create_pidfd() {
++                    cmd.send_pidfd(&*c.output);
++                }
++                // The child never returns: a copy of the parent's pipes, closed (if at all) in
++                // the child's own descriptor table.
++                let Err(err) = cmd.do_exec(crate::ptr::read(c.stdio), c.envp);
++                let errno = (err.raw_os_error().unwrap_or(libc::EINVAL) as u32).to_be_bytes();
++                let bytes = [errno[0], errno[1], errno[2], errno[3], b'N', b'O', b'E', b'X'];
++                let _ = (*c.output).write(&bytes);
++                libc::_exit(1)
++            }
++        }
++
++        const STACK: usize = 256 * 1024;
++        let mut stack: crate::vec::Vec<u8> = crate::vec::Vec::with_capacity(STACK);
++        let top = unsafe { stack.as_mut_ptr().add(STACK) } as *mut c_void;
++        let arg = Child { cmd: self, stdio, envp: maybe_envp, output };
++        let pid = cvt(unsafe {
++            libc::clone(
++                child,
++                top,
++                libc::CLONE_VM | libc::CLONE_VFORK | libc::SIGCHLD,
++                &arg as *const Child<'_> as *mut c_void,
++            )
++        })?;
++        drop(stack);
++        Ok(pid)
++    }
++
+     // Attempts to fork the process. If successful, returns Ok((0, -1))
+     // in the child, and Ok((child_pid, -1)) in the parent.
+     #[cfg(not(any(
+@@ -394,6 +457,49 @@
+         // want to be sure to restore the global environment back to what it
+         // once was, ensuring that our temporary override, when free'd, doesn't
+         // corrupt our process's environment.
++        // WebAssembly Linux: the child shares the parent's memory (do_vfork_exec), whose
++        // `environ` it must leave alone: execve with the environment, and execvp's search of PATH
++        // done here, in the PATH of that environment (as execvp after setting `environ` would).
++        // No allocation: a buffer on the child's stack.
++        #[cfg(all(target_arch = "wasm32", target_os = "linux", not(target_vendor = "wali")))]
++        if let Some(envp) = maybe_envp {
++            let prog = self.get_program_cstr().to_bytes();
++            let argv = self.get_argv().as_ptr();
++            if prog.contains(&b'/') {
++                libc::execve(self.get_program_cstr().as_ptr(), argv, envp.as_ptr());
++                return Err(io::Error::last_os_error());
++            }
++            let mut path: &[u8] = b"/usr/local/bin:/bin:/usr/bin";
++            let mut e = envp.as_ptr();
++            while !(*e).is_null() {
++                if let Some(v) = crate::ffi::CStr::from_ptr(*e).to_bytes().strip_prefix(b"PATH=") {
++                    path = v;
++                    break;
++                }
++                e = e.add(1);
++            }
++            let mut buf = [0u8; 4096];
++            let mut err = libc::ENOENT;
++            for dir in path.split(|&c| c == b':') {
++                let dir: &[u8] = if dir.is_empty() { b"." } else { dir };
++                if dir.len() + prog.len() + 2 > buf.len() {
++                    continue;
++                }
++                buf[..dir.len()].copy_from_slice(dir);
++                buf[dir.len()] = b'/';
++                buf[dir.len() + 1..dir.len() + 1 + prog.len()].copy_from_slice(prog);
++                buf[dir.len() + 1 + prog.len()] = 0;
++                libc::execve(buf.as_ptr().cast(), argv, envp.as_ptr());
++                match io::Error::last_os_error().raw_os_error() {
++                    Some(libc::EACCES) => err = libc::EACCES,
++                    Some(libc::ENOENT | libc::ENOTDIR) => {}
++                    Some(other) => return Err(io::Error::from_raw_os_error(other)),
++                    None => {}
++                }
++            }
++            return Err(io::Error::from_raw_os_error(err));
++        }
++
+         let mut _reset = None;
+         if let Some(envp) = maybe_envp {
+             struct Reset(*const *const libc::c_char);

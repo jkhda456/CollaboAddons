@@ -1,0 +1,34 @@
+diff -ruN -x .cargo-checksum.json -x .cargo_vcs_info.json -x .cargo-ok -x target a/src/backend/libc/c.rs b/src/backend/libc/c.rs
+--- a/src/backend/libc/c.rs
++++ b/src/backend/libc/c.rs
+@@ -482,7 +482,7 @@
+     not(any(
+         target_os = "emscripten",
+         target_env = "gnu",
+-        all(target_arch = "loongarch64", target_env = "musl")
++        all(any(target_arch = "loongarch64", target_arch = "wasm32"), target_env = "musl")
+     ))
+ ))]
+ mod statx_flags {
+@@ -506,7 +506,7 @@
+         target_os = "android",
+         target_os = "emscripten",
+         target_env = "gnu",
+-        all(target_arch = "loongarch64", target_env = "musl")
++        all(any(target_arch = "loongarch64", target_arch = "wasm32"), target_env = "musl")
+     ))
+ ))]
+ pub(crate) use statx_flags::*;
+diff -ruN -x .cargo-checksum.json -x .cargo_vcs_info.json -x .cargo-ok -x target a/src/ioctl/linux.rs b/src/ioctl/linux.rs
+--- a/src/ioctl/linux.rs
++++ b/src/ioctl/linux.rs
+@@ -51,7 +51,8 @@
+     target_arch = "riscv32",
+     target_arch = "riscv64",
+     target_arch = "loongarch64",
+-    target_arch = "csky"
++    target_arch = "csky",
++    target_arch = "wasm32"
+ ))]
+ mod consts {
+     use super::Opcode;

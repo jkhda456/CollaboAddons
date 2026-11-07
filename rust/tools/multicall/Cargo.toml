@@ -1,0 +1,31 @@
+# The guest's rustc, which is also rustdoc, clippy-driver and rustfmt (by the name it is run as):
+# one copy of the compiler instead of four. A member of the rust tree's workspace (build.sh puts it
+# at src/tools/collabo-multicall), built as bootstrap builds rustc's tools: after compiler/rustc,
+# with a sysroot that holds the compiler's rlibs (rustc-dev), which `extern crate rustc_driver` here
+# and the tools' `extern crate rustc_*` take.
+[package]
+name = "collabo-rustc"
+version = "0.1.99"
+edition = "2024"
+publish = false
+build = "build.rs"
+
+[[bin]]
+name = "rustc"
+path = "src/main.rs"
+
+[dependencies]
+rustdoc = { path = "../../librustdoc" }
+rustfmt-nightly = { path = "../rustfmt" }
+clippy_config = { path = "../clippy/clippy_config" }
+clippy_lints = { path = "../clippy/clippy_lints" }
+clippy_utils = { path = "../clippy/clippy_utils" }
+declare_clippy_lint = { path = "../clippy/declare_clippy_lint" }
+rustc_tools_util = { path = "../clippy/rustc_tools_util" }
+anstream = "0.6.18"
+color-print = "0.3.4"
+anyhow = "1.0"
+thiserror = "1.0.40"
+getopts = "0.2"
+term = "1.1"
+tracing-subscriber = { version = "0.3.17", features = ["env-filter"] }

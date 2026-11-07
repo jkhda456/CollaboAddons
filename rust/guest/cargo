@@ -1,0 +1,14 @@
+#!/bin/sh
+# cargo (the program is /usr/lib/rustlib/wasm32-unknown-linux-musl/bin/cargo), with the guest's CA
+# certificates: cargo's curl wants a file of its own, and where the bundle is depends on the images
+# the machine booted with (python's: certs/ca-certificates.crt, the tools': cert.pem). Unless
+# CARGO_HTTP_CAINFO (or SSL_CERT_FILE) names one.
+if [ -z "${CARGO_HTTP_CAINFO:-}" ]; then
+  for f in "${SSL_CERT_FILE:-}" /etc/ssl/certs/ca-certificates.crt /etc/ssl/cert.pem; do
+    if [ -n "$f" ] && [ -r "$f" ]; then
+      CARGO_HTTP_CAINFO="$f"; export CARGO_HTTP_CAINFO
+      break
+    fi
+  done
+fi
+exec /usr/lib/rustlib/wasm32-unknown-linux-musl/bin/cargo "$@"

@@ -1,0 +1,111 @@
+rustc's wasm-ld linker for wasm32 Linux with side modules (wasm32-unknown-linux-musl): a program is
+linked as the guest's C compiler links one (table base 3, exported table, 8 MiB stack, compiler-rt);
+a dylib, cdylib or proc macro is a WebAssembly side module (dylink.0) that the C library's dlopen
+loads: position-independent, bound to itself, importing what it does not define, without a C
+library of its own, its unwinder its own (libgcc_s, which there is not, means libunwind.a).
+
+diff -ruN a/compiler/rustc_codegen_ssa/src/back/linker.rs b/compiler/rustc_codegen_ssa/src/back/linker.rs
+--- a/compiler/rustc_codegen_ssa/src/back/linker.rs
++++ b/compiler/rustc_codegen_ssa/src/back/linker.rs
+@@ -1322,11 +1322,20 @@
+ struct WasmLd<'a> {
+     cmd: Command,
+     sess: &'a Session,
++    /// A WebAssembly side module (`dylink.0`) is being linked: see `wasm_linux`.
++    side_module: bool,
+ }
+ 
+ impl<'a> WasmLd<'a> {
+     fn new(cmd: Command, sess: &'a Session) -> WasmLd<'a> {
+-        WasmLd { cmd, sess }
++        WasmLd { cmd, sess, side_module: false }
++    }
++
++    /// WebAssembly Linux with shared libraries (`wasm32-unknown-linux-musl`, not WALI): programs
++    /// as the guest's C compiler links them, `dylib`s, `cdylib`s and proc macros as side modules
++    /// the C library's `dlopen` loads.
++    fn wasm_linux(&self) -> bool {
++        self.sess.target.os == Os::Linux && !self.sess.target.only_cdylib
+     }
+ }
+ 
+@@ -1345,9 +1354,36 @@
+             LinkOutputKind::DynamicNoPicExe
+             | LinkOutputKind::DynamicPicExe
+             | LinkOutputKind::StaticNoPicExe
+-            | LinkOutputKind::StaticPicExe => {}
++            | LinkOutputKind::StaticPicExe => {
++                if self.wasm_linux() {
++                    // Function pointers 1 and 2 are SIG_IGN and SIG_HOLD; the kernel calls
++                    // signal handlers through the exported table; an 8 MiB stack.
++                    self.link_args(&["--table-base=3", "--export-table", "-z", "stack-size=8388608"]);
++                    self.link_or_cc_args(&["-l", "clang_rt.builtins"]);
++                }
++            }
+             LinkOutputKind::DynamicDylib | LinkOutputKind::StaticDylib => {
+                 self.link_arg("--no-entry");
++                if self.wasm_linux() {
++                    // A side module: its own symbols bound to itself, what it does not define
++                    // imported from the program (or the modules loaded before it), its
++                    // constructors and thread-local storage set up by the loader (for each
++                    // thread). compiler-rt without `__c_longjmp`: the tag the C library's
++                    // longjmp throws is the program's.
++                    self.side_module = true;
++                    self.link_args(&[
++                        "--experimental-pic",
++                        "-shared",
++                        "-Bsymbolic",
++                        "--unresolved-symbols=import-dynamic",
++                        "--export-if-defined=__wasm_call_ctors",
++                        "--export-if-defined=__wasm_init_tls",
++                        "--export-if-defined=__tls_size",
++                        "--export-if-defined=__tls_align",
++                        "--export-if-defined=__tls_base",
++                    ]);
++                    self.link_or_cc_args(&["-l", "clang_rt.builtins-shared"]);
++                }
+             }
+             LinkOutputKind::WasiReactorExe => {
+                 self.link_args(&["--entry", "_initialize"]);
+@@ -1356,6 +1392,16 @@
+     }
+ 
+     fn link_dylib_by_name(&mut self, name: &str, _verbatim: bool, _as_needed: bool) {
++        // A side module uses the program's C library.
++        if self.side_module && name == "c" {
++            return;
++        }
++        // Without crt-static (always so for proc macros) the unwind crate asks for libgcc_s:
++        // there is no shared unwinder, each module has its own (libunwind.a).
++        if self.wasm_linux() && name == "gcc_s" {
++            self.link_or_cc_args(&["-l", "unwind"]);
++            return;
++        }
+         self.link_or_cc_args(&["-l", name]);
+     }
+ 
+@@ -1364,6 +1410,9 @@
+     }
+ 
+     fn link_staticlib_by_name(&mut self, name: &str, _verbatim: bool, whole_archive: bool) {
++        if self.side_module && name == "c" {
++            return;
++        }
+         if !whole_archive {
+             self.link_or_cc_args(&["-l", name]);
+         } else {
+@@ -1428,7 +1477,13 @@
+ 
+     fn no_default_libraries(&mut self) {}
+ 
+-    fn export_symbols(&mut self, _tmpdir: &Path, _crate_type: CrateType, symbols: &[SymbolExport]) {
++    fn export_symbols(&mut self, _tmpdir: &Path, crate_type: CrateType, symbols: &[SymbolExport]) {
++        // (called before the libraries are added, set_output_kind after them)
++        if self.wasm_linux()
++            && matches!(crate_type, CrateType::Dylib | CrateType::Cdylib | CrateType::ProcMacro)
++        {
++            self.side_module = true;
++        }
+         for sym in symbols {
+             self.link_args(&["--export", &sym.name]);
+         }

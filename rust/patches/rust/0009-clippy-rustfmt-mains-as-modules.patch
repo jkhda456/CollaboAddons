@@ -1,0 +1,68 @@
+clippy-driver and rustfmt as modules of another program (the add-on's multicall rustc, which is
+also rustdoc, clippy-driver and rustfmt: one copy of the compiler in the guest instead of four).
+Their mains become pub; the allocator override and the crate-level feature stay with their own
+binaries (cfg collabo_multicall, which only the multicall crate sets); rustfmt takes its version from
+COLLABO_RUSTFMT_VERSION there (the multicall crate's own is clippy's). No change to either tool.
+
+--- a/src/tools/clippy/src/driver.rs
++++ b/src/tools/clippy/src/driver.rs
+@@ -1,4 +1,4 @@
+-#![feature(rustc_private)]
++#![cfg_attr(not(collabo_multicall), feature(rustc_private))]
+ #![warn(
+     // warn on lints, that are included in `rust-lang/rust`s bootstrap
+     rust_2018_idioms, unused_lifetimes,
+@@ -13,6 +13,7 @@
+ extern crate rustc_span;
+ 
+ // Override the C allocator in the same way that the `rustc` binary would do.
++#[cfg(not(collabo_multicall))]
+ rustc_driver::override_c_allocator_in_binary!();
+ 
+ use clippy_utils::sym;
+@@ -193,7 +194,7 @@
+ 
+ const BUG_REPORT_URL: &str = "https://github.com/rust-lang/rust-clippy/issues/new?template=ice.yml";
+ 
+-fn main() -> ExitCode {
++pub fn main() -> ExitCode {
+     let early_dcx = EarlyDiagCtxt::new(ErrorOutputType::default());
+ 
+     rustc_driver::init_rustc_env_logger(&early_dcx);
+--- a/src/tools/rustfmt/src/bin/main.rs
++++ b/src/tools/rustfmt/src/bin/main.rs
+@@ -1,4 +1,4 @@
+-#![feature(rustc_private)]
++#![cfg_attr(not(collabo_multicall), feature(rustc_private))]
+ 
+ use anyhow::{Result, format_err};
+ 
+@@ -17,7 +17,7 @@
+ 
+ use getopts::{Matches, Options};
+ 
+-use crate::rustfmt::{
++use self::rustfmt::{
+     CliOptions, Color, Config, Edition, EmitMode, FileLines, FileName,
+     FormatReportFormatterBuilder, Input, Session, StyleEdition, Verbosity, Version, load_config,
+ };
+@@ -27,7 +27,7 @@
+ // N.B. these crates are loaded from the sysroot, so they need extern crate.
+ extern crate rustc_driver;
+ 
+-fn main() {
++pub fn main() {
+     rustc_driver::install_ice_hook(BUG_REPORT_URL, |_| ());
+ 
+     tracing_subscriber::fmt()
+@@ -456,7 +456,9 @@
+ }
+ 
+ fn print_version() {
+-    let version_number = option_env!("CARGO_PKG_VERSION").unwrap_or("unknown");
++    let version_number = option_env!("COLLABO_RUSTFMT_VERSION")
++        .or(option_env!("CARGO_PKG_VERSION"))
++        .unwrap_or("unknown");
+     let commit_info = include_str!(concat!(env!("OUT_DIR"), "/commit-info.txt"));
+ 
+     if commit_info.is_empty() {

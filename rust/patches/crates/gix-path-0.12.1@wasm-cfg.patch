@@ -1,0 +1,20 @@
+--- a/src/env/mod.rs
++++ b/src/env/mod.rs
+@@ -193,7 +193,7 @@
+ }
+ 
+ /// Returns `$HOME` or `None` if it cannot be found.
+-#[cfg(target_family = "wasm")]
++#[cfg(all(target_family = "wasm", not(target_os = "linux")))]
+ pub fn home_dir() -> Option<PathBuf> {
+     std::env::var("HOME").map(PathBuf::from).ok()
+ }
+@@ -205,7 +205,7 @@
+ /// The reason `HOME` is tried first is to allow Windows users to have a custom location for their
+ /// linux-style home, as otherwise they would have to accumulate dot files in a directory these are
+ /// inconvenient and perceived as clutter.
+-#[cfg(not(target_family = "wasm"))]
++#[cfg(not(all(target_family = "wasm", not(target_os = "linux"))))]
+ pub fn home_dir() -> Option<PathBuf> {
+     std::env::var_os("HOME").map(Into::into).or_else(std::env::home_dir)
+ }
