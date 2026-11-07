@@ -1,0 +1,64 @@
+glib_compat: g_tree_new, g_list_sort and g_slist_sort call their GCompareFunc as its type.
+
+They stored it as a GCompareDataFunc and called it with a third argument, the data: natively
+unnoticed, a trap on WebAssembly, where every call through a pointer is checked against the
+function's type (tcg_tb_lookup's g_tree_lookup, at the first memory access a TB restores state
+for). A wrapper of that type calls it with the two keys.
+
+diff --git a/src/glib_compat/glib_compat.c b/src/glib_compat/glib_compat.c
+index 2bb7182..60d7126 100644
+--- a/src/glib_compat/glib_compat.c
++++ b/src/glib_compat/glib_compat.c
+@@ -276,9 +276,17 @@ static GList *g_list_sort_real(GList *list,
+  * value comes before the second, 0 if they are equal, or a positive
+  * integer if the first value comes after the second.
+  **/
++/* A GCompareFunc called as the GCompareDataFunc the sorts call (with the data, func): with its
++   two arguments alone, as the type it has. Natively the third argument goes unnoticed; on
++   WebAssembly a call through a pointer is checked against the function's type, and traps. */
++static gint g_compare_func_data (gconstpointer a, gconstpointer b, gpointer func)
++{
++    return ((GCompareFunc) func) (a, b);
++}
++
+ GList *g_list_sort (GList *list, GCompareFunc  compare_func)
+ {
+-    return g_list_sort_real (list, (GFunc) compare_func, NULL);
++    return g_list_sort_real (list, (GFunc) g_compare_func_data, (gpointer) compare_func);
+ }
+ 
+ /* END of g_list related functions */
+@@ -400,7 +408,7 @@ static GSList *g_slist_sort_real (GSList *list,
+ GSList *g_slist_sort (GSList *list,
+         GCompareFunc  compare_func)
+ {
+-    return g_slist_sort_real (list, (GFunc) compare_func, NULL);
++    return g_slist_sort_real (list, (GFunc) g_compare_func_data, (gpointer) compare_func);
+ }
+ 
+ /* END of g_slist related functions */
+diff --git a/src/glib_compat/gtree.c b/src/glib_compat/gtree.c
+index b2617a3..2eaa310 100644
+--- a/src/glib_compat/gtree.c
++++ b/src/glib_compat/gtree.c
+@@ -156,11 +156,19 @@ static GTreeNode *g_tree_node_new (gpointer key, gpointer value)
+  * 
+  * Returns: a newly allocated #GTree
+  */
++/* The comparison of a tree g_tree_new made: its function called with the two keys alone, as
++   the type it has (calling it as a GCompareDataFunc passes a third argument, which natively goes
++   unnoticed, but traps on WebAssembly, where a call through a pointer is checked) */
++static gint g_tree_compare_func (gconstpointer a, gconstpointer b, gpointer func)
++{
++    return ((GCompareFunc) func) (a, b);
++}
++
+ GTree *g_tree_new (GCompareFunc key_compare_func)
+ {
+     g_return_val_if_fail (key_compare_func != NULL, NULL);
+ 
+-    return g_tree_new_full ((GCompareDataFunc) key_compare_func, NULL,
++    return g_tree_new_full (g_tree_compare_func, (gpointer) key_compare_func,
+             NULL, NULL);
+ }
+ 

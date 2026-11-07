@@ -1,0 +1,3246 @@
+Unicorn 1 on a WebAssembly host: TCG's interpreter (TCI) for the translated code.
+
+Unicorn 1 is QEMU 2.2.1's TCG with a code generator for each host CPU it runs on; WebAssembly can
+have none (no memory is executable). QEMU's interpreter, which Unicorn left out, runs the
+translated code instead: tci.c and tcg/tci/ as QEMU 2.2.1 has them (tci.c GPL-2.0-or-later,
+tcg/tci/tcg-target.* MIT; Stefan Weil), on Unicorn 1's TCG — the backend's register sets and op
+definitions are the TCGContext's (s->tcg_target_available_regs, tcg_add_target_add_op_defs(s, ...)),
+the interpreter one per guest architecture (tcg_qemu_tb_exec and tci_tb_ptr glued to
+UNICORN_ARCH_POSTFIX, which qemu/<arch>.h, and header_gen.py that writes them, now define as
+Unicorn 2's do), its registers its own (a local array, not one static set: a helper may start
+another run, uc_emu_start from a hook), tci_tb_ptr per thread.
+
+And its helper calls: QEMU 2.2's TCI calls every helper as one type with ten arguments, which
+natively goes unnoticed; a WebAssembly host checks the type of every call through a pointer. The
+call now carries the helper's type, from its sizemask (tcg.c, tci_call_sig: each parameter and the
+result a 32-bit or 64-bit integer, at most five parameters), and tci_call (tcg/tci-call.inc.c,
+written by packages/unicorn/tci-call-gen.py, as for Unicorn 2) calls the helper as that type.
+GETPC() is where the interpreter is in the translated code (tci_tb_ptr), as QEMU's TCI has it.
+
+The host: configure takes __wasm32__ for a host CPU with the interpreter (tcg/tci in the include
+path, CONFIG_TCG_INTERPRETER); tci.o is built for every target (empty without the interpreter).
+
+diff --git a/src/qemu/Makefile.target b/src/qemu/Makefile.target
+index 356ce1c..92bd734 100644
+--- a/src/qemu/Makefile.target
++++ b/src/qemu/Makefile.target
+@@ -22,6 +22,8 @@ all: $(QEMU_PROG)
+ # cpu emulator library
+ obj-y = exec.o translate-all.o cpu-exec.o
+ obj-y += tcg/tcg.o tcg/optimize.o
++# TCG's interpreter, on a host without a code generator (empty on the others: tci.c)
++obj-y += tci.o
+ obj-y += fpu/softfloat.o
+ obj-y += target-$(TARGET_BASE_ARCH)/
+ 
+diff --git a/src/qemu/aarch64.h b/src/qemu/aarch64.h
+index 470a62d..26a935f 100644
+--- a/src/qemu/aarch64.h
++++ b/src/qemu/aarch64.h
+@@ -1,6 +1,9 @@
+ /* Autogen header for Unicorn Engine - DONOT MODIFY */
+ #ifndef UNICORN_AUTOGEN_AARCH64_H
+ #define UNICORN_AUTOGEN_AARCH64_H
++#ifndef UNICORN_ARCH_POSTFIX
++#define UNICORN_ARCH_POSTFIX _aarch64
++#endif
+ #define arm_release arm_release_aarch64
+ #define aarch64_tb_set_jmp_target aarch64_tb_set_jmp_target_aarch64
+ #define ppc_tb_set_jmp_target ppc_tb_set_jmp_target_aarch64
+diff --git a/src/qemu/aarch64eb.h b/src/qemu/aarch64eb.h
+index fbdb37a..dbb87bc 100644
+--- a/src/qemu/aarch64eb.h
++++ b/src/qemu/aarch64eb.h
+@@ -1,6 +1,9 @@
+ /* Autogen header for Unicorn Engine - DONOT MODIFY */
+ #ifndef UNICORN_AUTOGEN_AARCH64EB_H
+ #define UNICORN_AUTOGEN_AARCH64EB_H
++#ifndef UNICORN_ARCH_POSTFIX
++#define UNICORN_ARCH_POSTFIX _aarch64eb
++#endif
+ #define arm_release arm_release_aarch64eb
+ #define aarch64_tb_set_jmp_target aarch64_tb_set_jmp_target_aarch64eb
+ #define ppc_tb_set_jmp_target ppc_tb_set_jmp_target_aarch64eb
+diff --git a/src/qemu/arm.h b/src/qemu/arm.h
+index 87d0203..6f116f2 100644
+--- a/src/qemu/arm.h
++++ b/src/qemu/arm.h
+@@ -1,6 +1,9 @@
+ /* Autogen header for Unicorn Engine - DONOT MODIFY */
+ #ifndef UNICORN_AUTOGEN_ARM_H
+ #define UNICORN_AUTOGEN_ARM_H
++#ifndef UNICORN_ARCH_POSTFIX
++#define UNICORN_ARCH_POSTFIX _arm
++#endif
+ #define arm_release arm_release_arm
+ #define aarch64_tb_set_jmp_target aarch64_tb_set_jmp_target_arm
+ #define ppc_tb_set_jmp_target ppc_tb_set_jmp_target_arm
+diff --git a/src/qemu/armeb.h b/src/qemu/armeb.h
+index 30b771b..d1669b2 100644
+--- a/src/qemu/armeb.h
++++ b/src/qemu/armeb.h
+@@ -1,6 +1,9 @@
+ /* Autogen header for Unicorn Engine - DONOT MODIFY */
+ #ifndef UNICORN_AUTOGEN_ARMEB_H
+ #define UNICORN_AUTOGEN_ARMEB_H
++#ifndef UNICORN_ARCH_POSTFIX
++#define UNICORN_ARCH_POSTFIX _armeb
++#endif
+ #define arm_release arm_release_armeb
+ #define aarch64_tb_set_jmp_target aarch64_tb_set_jmp_target_armeb
+ #define ppc_tb_set_jmp_target ppc_tb_set_jmp_target_armeb
+diff --git a/src/qemu/configure b/src/qemu/configure
+index b5d52d7..6094032 100755
+--- a/src/qemu/configure
++++ b/src/qemu/configure
+@@ -327,6 +327,8 @@ elif check_define __aarch64__ ; then
+   cpu="aarch64"
+ elif check_define __hppa__ ; then
+   cpu="hppa"
++elif check_define __wasm32__ ; then
++  cpu="wasm32"
+ else
+   cpu=`uname -m`
+ fi
+@@ -356,6 +358,10 @@ case "$cpu" in
+   sparc|sun4[cdmuv])
+     cpu="sparc"
+   ;;
++  wasm32)
++    # no code generator: TCG's interpreter (tcg/tci, tci.c)
++    tcg_interpreter="yes"
++  ;;
+   *)
+     # This will result in either an error or falling back to TCI later
+     ARCH=unknown
+@@ -1148,7 +1154,10 @@ if test "$int128" = "yes" ; then
+   echo "CONFIG_INT128=y" >> $config_host_mak
+ fi
+ 
+-if test "$ARCH" = "sparc64" ; then
++if test "$tcg_interpreter" = "yes" ; then
++  QEMU_INCLUDES="-I\$(SRC_PATH)/tcg/tci $QEMU_INCLUDES"
++  echo "CONFIG_TCG_INTERPRETER=y" >> $config_host_mak
++elif test "$ARCH" = "sparc64" ; then
+   QEMU_INCLUDES="-I\$(SRC_PATH)/tcg/sparc $QEMU_INCLUDES"
+ elif test "$ARCH" = "s390x" ; then
+   QEMU_INCLUDES="-I\$(SRC_PATH)/tcg/s390 $QEMU_INCLUDES"
+diff --git a/src/qemu/header_gen.py b/src/qemu/header_gen.py
+index 253bd3e..02d4ea8 100644
+--- a/src/qemu/header_gen.py
++++ b/src/qemu/header_gen.py
+@@ -4061,6 +4061,9 @@ if __name__ == '__main__':
+   print("/* Autogen header for Unicorn Engine - DONOT MODIFY */")
+   print("#ifndef UNICORN_AUTOGEN_%s_H" %arch.upper())
+   print("#define UNICORN_AUTOGEN_%s_H" %arch.upper())
++  print("#ifndef UNICORN_ARCH_POSTFIX")
++  print("#define UNICORN_ARCH_POSTFIX _%s" %arch)
++  print("#endif")
+ 
+   for s in symbols:
+       print("#define %s %s_%s" %(s, s, arch))
+diff --git a/src/qemu/include/exec/exec-all.h b/src/qemu/include/exec/exec-all.h
+index e839825..14ff2c6 100644
+--- a/src/qemu/include/exec/exec-all.h
++++ b/src/qemu/include/exec/exec-all.h
+@@ -304,7 +304,11 @@ static inline void tb_add_jump(TranslationBlock *tb, int n,
+ /* GETRA is the true target of the return instruction that we'll execute,
+    defined here for simplicity of defining the follow-up macros.  */
+ #if defined(CONFIG_TCG_INTERPRETER)
+-extern uintptr_t tci_tb_ptr;
++/* TCG's interpreter (tci.c): where in the translated code the helper was called from (the
++   interpreter sets it before each operation). One per thread, as a helper's return address
++   would be (each thread runs code of its own), and per guest architecture, as all of TCG is. */
++#define tci_tb_ptr glue(tci_tb_ptr, UNICORN_ARCH_POSTFIX)
++extern __thread uintptr_t tci_tb_ptr;
+ # define GETRA() tci_tb_ptr
+ #elif defined(_MSC_VER)
+ #include <intrin.h>
+diff --git a/src/qemu/m68k.h b/src/qemu/m68k.h
+index dffdf7e..c83a62c 100644
+--- a/src/qemu/m68k.h
++++ b/src/qemu/m68k.h
+@@ -1,6 +1,9 @@
+ /* Autogen header for Unicorn Engine - DONOT MODIFY */
+ #ifndef UNICORN_AUTOGEN_M68K_H
+ #define UNICORN_AUTOGEN_M68K_H
++#ifndef UNICORN_ARCH_POSTFIX
++#define UNICORN_ARCH_POSTFIX _m68k
++#endif
+ #define arm_release arm_release_m68k
+ #define aarch64_tb_set_jmp_target aarch64_tb_set_jmp_target_m68k
+ #define ppc_tb_set_jmp_target ppc_tb_set_jmp_target_m68k
+diff --git a/src/qemu/mips.h b/src/qemu/mips.h
+index 36ad9a4..9b84253 100644
+--- a/src/qemu/mips.h
++++ b/src/qemu/mips.h
+@@ -1,6 +1,9 @@
+ /* Autogen header for Unicorn Engine - DONOT MODIFY */
+ #ifndef UNICORN_AUTOGEN_MIPS_H
+ #define UNICORN_AUTOGEN_MIPS_H
++#ifndef UNICORN_ARCH_POSTFIX
++#define UNICORN_ARCH_POSTFIX _mips
++#endif
+ #define arm_release arm_release_mips
+ #define aarch64_tb_set_jmp_target aarch64_tb_set_jmp_target_mips
+ #define ppc_tb_set_jmp_target ppc_tb_set_jmp_target_mips
+diff --git a/src/qemu/mips64.h b/src/qemu/mips64.h
+index e464d4b..2cf2644 100644
+--- a/src/qemu/mips64.h
++++ b/src/qemu/mips64.h
+@@ -1,6 +1,9 @@
+ /* Autogen header for Unicorn Engine - DONOT MODIFY */
+ #ifndef UNICORN_AUTOGEN_MIPS64_H
+ #define UNICORN_AUTOGEN_MIPS64_H
++#ifndef UNICORN_ARCH_POSTFIX
++#define UNICORN_ARCH_POSTFIX _mips64
++#endif
+ #define arm_release arm_release_mips64
+ #define aarch64_tb_set_jmp_target aarch64_tb_set_jmp_target_mips64
+ #define ppc_tb_set_jmp_target ppc_tb_set_jmp_target_mips64
+diff --git a/src/qemu/mips64el.h b/src/qemu/mips64el.h
+index afe0d47..91f8624 100644
+--- a/src/qemu/mips64el.h
++++ b/src/qemu/mips64el.h
+@@ -1,6 +1,9 @@
+ /* Autogen header for Unicorn Engine - DONOT MODIFY */
+ #ifndef UNICORN_AUTOGEN_MIPS64EL_H
+ #define UNICORN_AUTOGEN_MIPS64EL_H
++#ifndef UNICORN_ARCH_POSTFIX
++#define UNICORN_ARCH_POSTFIX _mips64el
++#endif
+ #define arm_release arm_release_mips64el
+ #define aarch64_tb_set_jmp_target aarch64_tb_set_jmp_target_mips64el
+ #define ppc_tb_set_jmp_target ppc_tb_set_jmp_target_mips64el
+diff --git a/src/qemu/mipsel.h b/src/qemu/mipsel.h
+index a04123e..33bad5d 100644
+--- a/src/qemu/mipsel.h
++++ b/src/qemu/mipsel.h
+@@ -1,6 +1,9 @@
+ /* Autogen header for Unicorn Engine - DONOT MODIFY */
+ #ifndef UNICORN_AUTOGEN_MIPSEL_H
+ #define UNICORN_AUTOGEN_MIPSEL_H
++#ifndef UNICORN_ARCH_POSTFIX
++#define UNICORN_ARCH_POSTFIX _mipsel
++#endif
+ #define arm_release arm_release_mipsel
+ #define aarch64_tb_set_jmp_target aarch64_tb_set_jmp_target_mipsel
+ #define ppc_tb_set_jmp_target ppc_tb_set_jmp_target_mipsel
+diff --git a/src/qemu/sparc.h b/src/qemu/sparc.h
+index 4fbf55e..758e557 100644
+--- a/src/qemu/sparc.h
++++ b/src/qemu/sparc.h
+@@ -1,6 +1,9 @@
+ /* Autogen header for Unicorn Engine - DONOT MODIFY */
+ #ifndef UNICORN_AUTOGEN_SPARC_H
+ #define UNICORN_AUTOGEN_SPARC_H
++#ifndef UNICORN_ARCH_POSTFIX
++#define UNICORN_ARCH_POSTFIX _sparc
++#endif
+ #define arm_release arm_release_sparc
+ #define aarch64_tb_set_jmp_target aarch64_tb_set_jmp_target_sparc
+ #define ppc_tb_set_jmp_target ppc_tb_set_jmp_target_sparc
+diff --git a/src/qemu/sparc64.h b/src/qemu/sparc64.h
+index f389522..6289b76 100644
+--- a/src/qemu/sparc64.h
++++ b/src/qemu/sparc64.h
+@@ -1,6 +1,9 @@
+ /* Autogen header for Unicorn Engine - DONOT MODIFY */
+ #ifndef UNICORN_AUTOGEN_SPARC64_H
+ #define UNICORN_AUTOGEN_SPARC64_H
++#ifndef UNICORN_ARCH_POSTFIX
++#define UNICORN_ARCH_POSTFIX _sparc64
++#endif
+ #define arm_release arm_release_sparc64
+ #define aarch64_tb_set_jmp_target aarch64_tb_set_jmp_target_sparc64
+ #define ppc_tb_set_jmp_target ppc_tb_set_jmp_target_sparc64
+diff --git a/src/qemu/tcg/tcg.c b/src/qemu/tcg/tcg.c
+index 679836a..24e6ff3 100644
+--- a/src/qemu/tcg/tcg.c
++++ b/src/qemu/tcg/tcg.c
+@@ -104,6 +104,9 @@ static void tcg_out_op(TCGContext *s, TCGOpcode opc, const TCGArg *args,
+ static void tcg_out_st(TCGContext *s, TCGType type, TCGReg arg, TCGReg arg1,
+                        intptr_t arg2);
+ static void tcg_out_call(TCGContext *s, tcg_insn_unit *target);
++#ifdef TCG_TARGET_INTERPRETER
++static void tcg_out_call_tci(TCGContext *s, tcg_insn_unit *target, unsigned sig);
++#endif
+ static int tcg_target_const_match(tcg_target_long val, TCGType type,
+                                   const TCGArgConstraint *arg_ct);
+ static void tcg_out_tb_init(TCGContext *s);
+@@ -2355,6 +2358,43 @@ static void tcg_reg_alloc_op(TCGContext *s,
+ #define STACK_DIR(x) (x)
+ #endif
+ 
++#ifdef TCG_TARGET_INTERPRETER
++/*
++ * The type of a helper, for TCG's interpreter (tci.c, tci_call): a WebAssembly host checks
++ * the type of every call through a pointer, so the interpreter must call each helper as the
++ * type it has, not as one type for all (natively, the extra arguments go unnoticed). A helper's
++ * parameters and result are each a 32-bit or a 64-bit integer (pointers, softfloat's types,
++ * target_ulong), as its sizemask says; on a 32-bit host a 64-bit one takes two argument
++ * registers (and its result two output registers). Encoded as tci_call takes it: bits 0-1 the
++ * result (0 none, 1 32-bit, 2 64-bit), bits 2-4 the number of parameters, bit 5 + i the i-th
++ * parameter is 64-bit.
++ */
++static unsigned tci_call_sig(TCGContext *s, void *func, int nb_oargs, int nb_iargs)
++{
++    TCGHelperInfo *info = g_hash_table_lookup(s->helpers, func);
++    unsigned sig, nargs = 0;
++    int slots = 0;
++
++    if (info == NULL) {
++        tcg_abort();
++    }
++    sig = nb_oargs == 0 ? 0 : (info->sizemask & 1) ? 2 : 1;
++    while (slots < nb_iargs) {
++        if (info->sizemask & (1 << (nargs + 1) * 2)) {
++            sig |= 1u << (5 + nargs);
++            slots += TCG_TARGET_REG_BITS == 32 ? 2 : 1;
++        } else {
++            slots += 1;
++        }
++        nargs++;
++    }
++    if (slots != nb_iargs || nargs > MAX_OPC_PARAM_IARGS) {
++        tcg_abort();
++    }
++    return sig | nargs << 2;
++}
++#endif
++
+ static int tcg_reg_alloc_call(TCGContext *s, const TCGOpDef *def,
+                               TCGOpcode opc, const TCGArg *args,
+                               uint16_t dead_args, uint8_t sync_args)
+@@ -2478,7 +2518,11 @@ static int tcg_reg_alloc_call(TCGContext *s, const TCGOpDef *def,
+         save_globals(s, allocated_regs);
+     }
+ 
++#ifdef TCG_TARGET_INTERPRETER
++    tcg_out_call_tci(s, func_addr, tci_call_sig(s, func_addr, nb_oargs, nb_iargs));
++#else
+     tcg_out_call(s, func_addr);
++#endif
+ 
+     /* assign output registers and emit moves if needed */
+     for(i = 0; i < nb_oargs; i++) {
+diff --git a/src/qemu/tcg/tci-call.inc.c b/src/qemu/tcg/tci-call.inc.c
+new file mode 100644
+index 0000000..d56867b
+--- /dev/null
++++ b/src/qemu/tcg/tci-call.inc.c
+@@ -0,0 +1,399 @@
++/* Generated by tci-call-gen.py: tci_call(), a TCG helper called as the type it has (tci.c). */
++
++#if TCG_TARGET_REG_BITS != 32
++# error tci_call is for 32-bit hosts
++#endif
++
++#define A32(k) ((uint32_t)a[k])
++#define A64(k) ((uint64_t)(uint32_t)a[k] | (uint64_t)(uint32_t)a[(k) + 1] << 32)
++
++static uint64_t tci_call(tcg_target_ulong f, unsigned sig, const tcg_target_ulong *a)
++{
++    switch (sig) {
++    case 0x0000: ((void (*)(void))f)(); return 0;
++    case 0x0001: return ((uint32_t (*)(void))f)();
++    case 0x0002: return ((uint64_t (*)(void))f)();
++    case 0x0004: ((void (*)(uint32_t))f)(A32(0)); return 0;
++    case 0x0005: return ((uint32_t (*)(uint32_t))f)(A32(0));
++    case 0x0006: return ((uint64_t (*)(uint32_t))f)(A32(0));
++    case 0x0024: ((void (*)(uint64_t))f)(A64(0)); return 0;
++    case 0x0025: return ((uint32_t (*)(uint64_t))f)(A64(0));
++    case 0x0026: return ((uint64_t (*)(uint64_t))f)(A64(0));
++    case 0x0008: ((void (*)(uint32_t, uint32_t))f)(A32(0), A32(1)); return 0;
++    case 0x0009: return ((uint32_t (*)(uint32_t, uint32_t))f)(A32(0), A32(1));
++    case 0x000a: return ((uint64_t (*)(uint32_t, uint32_t))f)(A32(0), A32(1));
++    case 0x0028: ((void (*)(uint64_t, uint32_t))f)(A64(0), A32(2)); return 0;
++    case 0x0029: return ((uint32_t (*)(uint64_t, uint32_t))f)(A64(0), A32(2));
++    case 0x002a: return ((uint64_t (*)(uint64_t, uint32_t))f)(A64(0), A32(2));
++    case 0x0048: ((void (*)(uint32_t, uint64_t))f)(A32(0), A64(1)); return 0;
++    case 0x0049: return ((uint32_t (*)(uint32_t, uint64_t))f)(A32(0), A64(1));
++    case 0x004a: return ((uint64_t (*)(uint32_t, uint64_t))f)(A32(0), A64(1));
++    case 0x0068: ((void (*)(uint64_t, uint64_t))f)(A64(0), A64(2)); return 0;
++    case 0x0069: return ((uint32_t (*)(uint64_t, uint64_t))f)(A64(0), A64(2));
++    case 0x006a: return ((uint64_t (*)(uint64_t, uint64_t))f)(A64(0), A64(2));
++    case 0x000c: ((void (*)(uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2)); return 0;
++    case 0x000d: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2));
++    case 0x000e: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2));
++    case 0x002c: ((void (*)(uint64_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3)); return 0;
++    case 0x002d: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3));
++    case 0x002e: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3));
++    case 0x004c: ((void (*)(uint32_t, uint64_t, uint32_t))f)(A32(0), A64(1), A32(3)); return 0;
++    case 0x004d: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t))f)(A32(0), A64(1), A32(3));
++    case 0x004e: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t))f)(A32(0), A64(1), A32(3));
++    case 0x006c: ((void (*)(uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A32(4)); return 0;
++    case 0x006d: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A32(4));
++    case 0x006e: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A32(4));
++    case 0x008c: ((void (*)(uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A64(2)); return 0;
++    case 0x008d: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A64(2));
++    case 0x008e: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A64(2));
++    case 0x00ac: ((void (*)(uint64_t, uint32_t, uint64_t))f)(A64(0), A32(2), A64(3)); return 0;
++    case 0x00ad: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t))f)(A64(0), A32(2), A64(3));
++    case 0x00ae: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t))f)(A64(0), A32(2), A64(3));
++    case 0x00cc: ((void (*)(uint32_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3)); return 0;
++    case 0x00cd: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3));
++    case 0x00ce: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3));
++    case 0x00ec: ((void (*)(uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4)); return 0;
++    case 0x00ed: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4));
++    case 0x00ee: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4));
++    case 0x0010: ((void (*)(uint32_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2), A32(3)); return 0;
++    case 0x0011: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2), A32(3));
++    case 0x0012: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2), A32(3));
++    case 0x0030: ((void (*)(uint64_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3), A32(4)); return 0;
++    case 0x0031: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3), A32(4));
++    case 0x0032: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3), A32(4));
++    case 0x0050: ((void (*)(uint32_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A64(1), A32(3), A32(4)); return 0;
++    case 0x0051: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A64(1), A32(3), A32(4));
++    case 0x0052: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A64(1), A32(3), A32(4));
++    case 0x0070: ((void (*)(uint64_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A64(2), A32(4), A32(5)); return 0;
++    case 0x0071: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A64(2), A32(4), A32(5));
++    case 0x0072: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A64(2), A32(4), A32(5));
++    case 0x0090: ((void (*)(uint32_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A32(1), A64(2), A32(4)); return 0;
++    case 0x0091: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A32(1), A64(2), A32(4));
++    case 0x0092: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A32(1), A64(2), A32(4));
++    case 0x00b0: ((void (*)(uint64_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A32(2), A64(3), A32(5)); return 0;
++    case 0x00b1: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A32(2), A64(3), A32(5));
++    case 0x00b2: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A32(2), A64(3), A32(5));
++    case 0x00d0: ((void (*)(uint32_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A64(1), A64(3), A32(5)); return 0;
++    case 0x00d1: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A64(1), A64(3), A32(5));
++    case 0x00d2: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A64(1), A64(3), A32(5));
++    case 0x00f0: ((void (*)(uint64_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A64(4), A32(6)); return 0;
++    case 0x00f1: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A64(4), A32(6));
++    case 0x00f2: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A64(4), A32(6));
++    case 0x0110: ((void (*)(uint32_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A32(2), A64(3)); return 0;
++    case 0x0111: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A32(2), A64(3));
++    case 0x0112: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A32(2), A64(3));
++    case 0x0130: ((void (*)(uint64_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A32(2), A32(3), A64(4)); return 0;
++    case 0x0131: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A32(2), A32(3), A64(4));
++    case 0x0132: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A32(2), A32(3), A64(4));
++    case 0x0150: ((void (*)(uint32_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A64(1), A32(3), A64(4)); return 0;
++    case 0x0151: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A64(1), A32(3), A64(4));
++    case 0x0152: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A64(1), A32(3), A64(4));
++    case 0x0170: ((void (*)(uint64_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A64(2), A32(4), A64(5)); return 0;
++    case 0x0171: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A64(2), A32(4), A64(5));
++    case 0x0172: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A64(2), A32(4), A64(5));
++    case 0x0190: ((void (*)(uint32_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A32(1), A64(2), A64(4)); return 0;
++    case 0x0191: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A32(1), A64(2), A64(4));
++    case 0x0192: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A32(1), A64(2), A64(4));
++    case 0x01b0: ((void (*)(uint64_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A32(2), A64(3), A64(5)); return 0;
++    case 0x01b1: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A32(2), A64(3), A64(5));
++    case 0x01b2: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A32(2), A64(3), A64(5));
++    case 0x01d0: ((void (*)(uint32_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3), A64(5)); return 0;
++    case 0x01d1: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3), A64(5));
++    case 0x01d2: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3), A64(5));
++    case 0x01f0: ((void (*)(uint64_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4), A64(6)); return 0;
++    case 0x01f1: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4), A64(6));
++    case 0x01f2: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4), A64(6));
++    case 0x0014: ((void (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2), A32(3), A32(4)); return 0;
++    case 0x0015: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2), A32(3), A32(4));
++    case 0x0016: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2), A32(3), A32(4));
++    case 0x0034: ((void (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3), A32(4), A32(5)); return 0;
++    case 0x0035: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3), A32(4), A32(5));
++    case 0x0036: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3), A32(4), A32(5));
++    case 0x0054: ((void (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A64(1), A32(3), A32(4), A32(5)); return 0;
++    case 0x0055: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A64(1), A32(3), A32(4), A32(5));
++    case 0x0056: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A64(1), A32(3), A32(4), A32(5));
++    case 0x0074: ((void (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A64(2), A32(4), A32(5), A32(6)); return 0;
++    case 0x0075: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A64(2), A32(4), A32(5), A32(6));
++    case 0x0076: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A64(2), A32(4), A32(5), A32(6));
++    case 0x0094: ((void (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A32(1), A64(2), A32(4), A32(5)); return 0;
++    case 0x0095: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A32(1), A64(2), A32(4), A32(5));
++    case 0x0096: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A32(1), A64(2), A32(4), A32(5));
++    case 0x00b4: ((void (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A32(2), A64(3), A32(5), A32(6)); return 0;
++    case 0x00b5: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A32(2), A64(3), A32(5), A32(6));
++    case 0x00b6: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A32(2), A64(3), A32(5), A32(6));
++    case 0x00d4: ((void (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A64(1), A64(3), A32(5), A32(6)); return 0;
++    case 0x00d5: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A64(1), A64(3), A32(5), A32(6));
++    case 0x00d6: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A64(1), A64(3), A32(5), A32(6));
++    case 0x00f4: ((void (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A64(2), A64(4), A32(6), A32(7)); return 0;
++    case 0x00f5: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A64(2), A64(4), A32(6), A32(7));
++    case 0x00f6: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A64(2), A64(4), A32(6), A32(7));
++    case 0x0114: ((void (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A32(1), A32(2), A64(3), A32(5)); return 0;
++    case 0x0115: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A32(1), A32(2), A64(3), A32(5));
++    case 0x0116: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A32(1), A32(2), A64(3), A32(5));
++    case 0x0134: ((void (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A32(2), A32(3), A64(4), A32(6)); return 0;
++    case 0x0135: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A32(2), A32(3), A64(4), A32(6));
++    case 0x0136: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A32(2), A32(3), A64(4), A32(6));
++    case 0x0154: ((void (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A64(1), A32(3), A64(4), A32(6)); return 0;
++    case 0x0155: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A64(1), A32(3), A64(4), A32(6));
++    case 0x0156: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A64(1), A32(3), A64(4), A32(6));
++    case 0x0174: ((void (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A64(2), A32(4), A64(5), A32(7)); return 0;
++    case 0x0175: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A64(2), A32(4), A64(5), A32(7));
++    case 0x0176: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A64(2), A32(4), A64(5), A32(7));
++    case 0x0194: ((void (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A32(1), A64(2), A64(4), A32(6)); return 0;
++    case 0x0195: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A32(1), A64(2), A64(4), A32(6));
++    case 0x0196: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A32(1), A64(2), A64(4), A32(6));
++    case 0x01b4: ((void (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A32(2), A64(3), A64(5), A32(7)); return 0;
++    case 0x01b5: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A32(2), A64(3), A64(5), A32(7));
++    case 0x01b6: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A32(2), A64(3), A64(5), A32(7));
++    case 0x01d4: ((void (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A64(1), A64(3), A64(5), A32(7)); return 0;
++    case 0x01d5: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A64(1), A64(3), A64(5), A32(7));
++    case 0x01d6: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A64(1), A64(3), A64(5), A32(7));
++    case 0x01f4: ((void (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A64(4), A64(6), A32(8)); return 0;
++    case 0x01f5: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A64(4), A64(6), A32(8));
++    case 0x01f6: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A64(4), A64(6), A32(8));
++    case 0x0214: ((void (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A32(2), A32(3), A64(4)); return 0;
++    case 0x0215: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A32(2), A32(3), A64(4));
++    case 0x0216: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A32(2), A32(3), A64(4));
++    case 0x0234: ((void (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A32(2), A32(3), A32(4), A64(5)); return 0;
++    case 0x0235: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A32(2), A32(3), A32(4), A64(5));
++    case 0x0236: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A32(2), A32(3), A32(4), A64(5));
++    case 0x0254: ((void (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A64(1), A32(3), A32(4), A64(5)); return 0;
++    case 0x0255: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A64(1), A32(3), A32(4), A64(5));
++    case 0x0256: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A64(1), A32(3), A32(4), A64(5));
++    case 0x0274: ((void (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A64(2), A32(4), A32(5), A64(6)); return 0;
++    case 0x0275: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A64(2), A32(4), A32(5), A64(6));
++    case 0x0276: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A64(2), A32(4), A32(5), A64(6));
++    case 0x0294: ((void (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A32(1), A64(2), A32(4), A64(5)); return 0;
++    case 0x0295: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A32(1), A64(2), A32(4), A64(5));
++    case 0x0296: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A32(1), A64(2), A32(4), A64(5));
++    case 0x02b4: ((void (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A32(2), A64(3), A32(5), A64(6)); return 0;
++    case 0x02b5: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A32(2), A64(3), A32(5), A64(6));
++    case 0x02b6: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A32(2), A64(3), A32(5), A64(6));
++    case 0x02d4: ((void (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A64(1), A64(3), A32(5), A64(6)); return 0;
++    case 0x02d5: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A64(1), A64(3), A32(5), A64(6));
++    case 0x02d6: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A64(1), A64(3), A32(5), A64(6));
++    case 0x02f4: ((void (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A64(2), A64(4), A32(6), A64(7)); return 0;
++    case 0x02f5: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A64(2), A64(4), A32(6), A64(7));
++    case 0x02f6: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A64(2), A64(4), A32(6), A64(7));
++    case 0x0314: ((void (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A32(1), A32(2), A64(3), A64(5)); return 0;
++    case 0x0315: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A32(1), A32(2), A64(3), A64(5));
++    case 0x0316: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A32(1), A32(2), A64(3), A64(5));
++    case 0x0334: ((void (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A32(2), A32(3), A64(4), A64(6)); return 0;
++    case 0x0335: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A32(2), A32(3), A64(4), A64(6));
++    case 0x0336: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A32(2), A32(3), A64(4), A64(6));
++    case 0x0354: ((void (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A64(1), A32(3), A64(4), A64(6)); return 0;
++    case 0x0355: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A64(1), A32(3), A64(4), A64(6));
++    case 0x0356: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A64(1), A32(3), A64(4), A64(6));
++    case 0x0374: ((void (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A64(2), A32(4), A64(5), A64(7)); return 0;
++    case 0x0375: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A64(2), A32(4), A64(5), A64(7));
++    case 0x0376: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A64(2), A32(4), A64(5), A64(7));
++    case 0x0394: ((void (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A32(1), A64(2), A64(4), A64(6)); return 0;
++    case 0x0395: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A32(1), A64(2), A64(4), A64(6));
++    case 0x0396: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A32(1), A64(2), A64(4), A64(6));
++    case 0x03b4: ((void (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A32(2), A64(3), A64(5), A64(7)); return 0;
++    case 0x03b5: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A32(2), A64(3), A64(5), A64(7));
++    case 0x03b6: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A32(2), A64(3), A64(5), A64(7));
++    case 0x03d4: ((void (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3), A64(5), A64(7)); return 0;
++    case 0x03d5: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3), A64(5), A64(7));
++    case 0x03d6: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3), A64(5), A64(7));
++    case 0x03f4: ((void (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4), A64(6), A64(8)); return 0;
++    case 0x03f5: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4), A64(6), A64(8));
++    case 0x03f6: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4), A64(6), A64(8));
++    case 0x0018: ((void (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2), A32(3), A32(4), A32(5)); return 0;
++    case 0x0019: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2), A32(3), A32(4), A32(5));
++    case 0x001a: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2), A32(3), A32(4), A32(5));
++    case 0x0038: ((void (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3), A32(4), A32(5), A32(6)); return 0;
++    case 0x0039: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3), A32(4), A32(5), A32(6));
++    case 0x003a: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3), A32(4), A32(5), A32(6));
++    case 0x0058: ((void (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A64(1), A32(3), A32(4), A32(5), A32(6)); return 0;
++    case 0x0059: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A64(1), A32(3), A32(4), A32(5), A32(6));
++    case 0x005a: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A64(1), A32(3), A32(4), A32(5), A32(6));
++    case 0x0078: ((void (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A64(2), A32(4), A32(5), A32(6), A32(7)); return 0;
++    case 0x0079: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A64(2), A32(4), A32(5), A32(6), A32(7));
++    case 0x007a: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A64(2), A32(4), A32(5), A32(6), A32(7));
++    case 0x0098: ((void (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A64(2), A32(4), A32(5), A32(6)); return 0;
++    case 0x0099: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A64(2), A32(4), A32(5), A32(6));
++    case 0x009a: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A32(1), A64(2), A32(4), A32(5), A32(6));
++    case 0x00b8: ((void (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A32(2), A64(3), A32(5), A32(6), A32(7)); return 0;
++    case 0x00b9: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A32(2), A64(3), A32(5), A32(6), A32(7));
++    case 0x00ba: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A32(2), A64(3), A32(5), A32(6), A32(7));
++    case 0x00d8: ((void (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A64(1), A64(3), A32(5), A32(6), A32(7)); return 0;
++    case 0x00d9: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A64(1), A64(3), A32(5), A32(6), A32(7));
++    case 0x00da: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A32(0), A64(1), A64(3), A32(5), A32(6), A32(7));
++    case 0x00f8: ((void (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A64(2), A64(4), A32(6), A32(7), A32(8)); return 0;
++    case 0x00f9: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A64(2), A64(4), A32(6), A32(7), A32(8));
++    case 0x00fa: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, uint32_t))f)(A64(0), A64(2), A64(4), A32(6), A32(7), A32(8));
++    case 0x0118: ((void (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2), A64(3), A32(5), A32(6)); return 0;
++    case 0x0119: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2), A64(3), A32(5), A32(6));
++    case 0x011a: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A32(1), A32(2), A64(3), A32(5), A32(6));
++    case 0x0138: ((void (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3), A64(4), A32(6), A32(7)); return 0;
++    case 0x0139: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3), A64(4), A32(6), A32(7));
++    case 0x013a: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A32(2), A32(3), A64(4), A32(6), A32(7));
++    case 0x0158: ((void (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A64(1), A32(3), A64(4), A32(6), A32(7)); return 0;
++    case 0x0159: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A64(1), A32(3), A64(4), A32(6), A32(7));
++    case 0x015a: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A64(1), A32(3), A64(4), A32(6), A32(7));
++    case 0x0178: ((void (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A64(2), A32(4), A64(5), A32(7), A32(8)); return 0;
++    case 0x0179: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A64(2), A32(4), A64(5), A32(7), A32(8));
++    case 0x017a: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A64(2), A32(4), A64(5), A32(7), A32(8));
++    case 0x0198: ((void (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A32(1), A64(2), A64(4), A32(6), A32(7)); return 0;
++    case 0x0199: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A32(1), A64(2), A64(4), A32(6), A32(7));
++    case 0x019a: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A32(1), A64(2), A64(4), A32(6), A32(7));
++    case 0x01b8: ((void (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A32(2), A64(3), A64(5), A32(7), A32(8)); return 0;
++    case 0x01b9: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A32(2), A64(3), A64(5), A32(7), A32(8));
++    case 0x01ba: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A32(2), A64(3), A64(5), A32(7), A32(8));
++    case 0x01d8: ((void (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A64(1), A64(3), A64(5), A32(7), A32(8)); return 0;
++    case 0x01d9: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A64(1), A64(3), A64(5), A32(7), A32(8));
++    case 0x01da: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A32(0), A64(1), A64(3), A64(5), A32(7), A32(8));
++    case 0x01f8: ((void (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A64(2), A64(4), A64(6), A32(8), A32(9)); return 0;
++    case 0x01f9: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A64(2), A64(4), A64(6), A32(8), A32(9));
++    case 0x01fa: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint32_t, uint32_t))f)(A64(0), A64(2), A64(4), A64(6), A32(8), A32(9));
++    case 0x0218: ((void (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A32(1), A32(2), A32(3), A64(4), A32(6)); return 0;
++    case 0x0219: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A32(1), A32(2), A32(3), A64(4), A32(6));
++    case 0x021a: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A32(1), A32(2), A32(3), A64(4), A32(6));
++    case 0x0238: ((void (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A32(2), A32(3), A32(4), A64(5), A32(7)); return 0;
++    case 0x0239: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A32(2), A32(3), A32(4), A64(5), A32(7));
++    case 0x023a: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A32(2), A32(3), A32(4), A64(5), A32(7));
++    case 0x0258: ((void (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A64(1), A32(3), A32(4), A64(5), A32(7)); return 0;
++    case 0x0259: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A64(1), A32(3), A32(4), A64(5), A32(7));
++    case 0x025a: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A64(1), A32(3), A32(4), A64(5), A32(7));
++    case 0x0278: ((void (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A64(2), A32(4), A32(5), A64(6), A32(8)); return 0;
++    case 0x0279: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A64(2), A32(4), A32(5), A64(6), A32(8));
++    case 0x027a: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A64(2), A32(4), A32(5), A64(6), A32(8));
++    case 0x0298: ((void (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A32(1), A64(2), A32(4), A64(5), A32(7)); return 0;
++    case 0x0299: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A32(1), A64(2), A32(4), A64(5), A32(7));
++    case 0x029a: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A32(1), A64(2), A32(4), A64(5), A32(7));
++    case 0x02b8: ((void (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A32(2), A64(3), A32(5), A64(6), A32(8)); return 0;
++    case 0x02b9: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A32(2), A64(3), A32(5), A64(6), A32(8));
++    case 0x02ba: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A32(2), A64(3), A32(5), A64(6), A32(8));
++    case 0x02d8: ((void (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A64(1), A64(3), A32(5), A64(6), A32(8)); return 0;
++    case 0x02d9: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A64(1), A64(3), A32(5), A64(6), A32(8));
++    case 0x02da: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A32(0), A64(1), A64(3), A32(5), A64(6), A32(8));
++    case 0x02f8: ((void (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A64(2), A64(4), A32(6), A64(7), A32(9)); return 0;
++    case 0x02f9: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A64(2), A64(4), A32(6), A64(7), A32(9));
++    case 0x02fa: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint64_t, uint32_t))f)(A64(0), A64(2), A64(4), A32(6), A64(7), A32(9));
++    case 0x0318: ((void (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A32(1), A32(2), A64(3), A64(5), A32(7)); return 0;
++    case 0x0319: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A32(1), A32(2), A64(3), A64(5), A32(7));
++    case 0x031a: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A32(1), A32(2), A64(3), A64(5), A32(7));
++    case 0x0338: ((void (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A32(2), A32(3), A64(4), A64(6), A32(8)); return 0;
++    case 0x0339: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A32(2), A32(3), A64(4), A64(6), A32(8));
++    case 0x033a: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A32(2), A32(3), A64(4), A64(6), A32(8));
++    case 0x0358: ((void (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A64(1), A32(3), A64(4), A64(6), A32(8)); return 0;
++    case 0x0359: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A64(1), A32(3), A64(4), A64(6), A32(8));
++    case 0x035a: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A64(1), A32(3), A64(4), A64(6), A32(8));
++    case 0x0378: ((void (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A32(4), A64(5), A64(7), A32(9)); return 0;
++    case 0x0379: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A32(4), A64(5), A64(7), A32(9));
++    case 0x037a: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A32(4), A64(5), A64(7), A32(9));
++    case 0x0398: ((void (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A32(1), A64(2), A64(4), A64(6), A32(8)); return 0;
++    case 0x0399: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A32(1), A64(2), A64(4), A64(6), A32(8));
++    case 0x039a: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A32(1), A64(2), A64(4), A64(6), A32(8));
++    case 0x03b8: ((void (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A32(2), A64(3), A64(5), A64(7), A32(9)); return 0;
++    case 0x03b9: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A32(2), A64(3), A64(5), A64(7), A32(9));
++    case 0x03ba: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A32(2), A64(3), A64(5), A64(7), A32(9));
++    case 0x03d8: ((void (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A64(1), A64(3), A64(5), A64(7), A32(9)); return 0;
++    case 0x03d9: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A64(1), A64(3), A64(5), A64(7), A32(9));
++    case 0x03da: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A32(0), A64(1), A64(3), A64(5), A64(7), A32(9));
++    case 0x03f8: ((void (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A64(4), A64(6), A64(8), A32(10)); return 0;
++    case 0x03f9: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A64(4), A64(6), A64(8), A32(10));
++    case 0x03fa: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint32_t))f)(A64(0), A64(2), A64(4), A64(6), A64(8), A32(10));
++    case 0x0418: ((void (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A32(2), A32(3), A32(4), A64(5)); return 0;
++    case 0x0419: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A32(2), A32(3), A32(4), A64(5));
++    case 0x041a: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A32(2), A32(3), A32(4), A64(5));
++    case 0x0438: ((void (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A32(2), A32(3), A32(4), A32(5), A64(6)); return 0;
++    case 0x0439: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A32(2), A32(3), A32(4), A32(5), A64(6));
++    case 0x043a: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A32(2), A32(3), A32(4), A32(5), A64(6));
++    case 0x0458: ((void (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A64(1), A32(3), A32(4), A32(5), A64(6)); return 0;
++    case 0x0459: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A64(1), A32(3), A32(4), A32(5), A64(6));
++    case 0x045a: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A64(1), A32(3), A32(4), A32(5), A64(6));
++    case 0x0478: ((void (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A64(2), A32(4), A32(5), A32(6), A64(7)); return 0;
++    case 0x0479: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A64(2), A32(4), A32(5), A32(6), A64(7));
++    case 0x047a: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A64(2), A32(4), A32(5), A32(6), A64(7));
++    case 0x0498: ((void (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A64(2), A32(4), A32(5), A64(6)); return 0;
++    case 0x0499: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A64(2), A32(4), A32(5), A64(6));
++    case 0x049a: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A32(1), A64(2), A32(4), A32(5), A64(6));
++    case 0x04b8: ((void (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A32(2), A64(3), A32(5), A32(6), A64(7)); return 0;
++    case 0x04b9: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A32(2), A64(3), A32(5), A32(6), A64(7));
++    case 0x04ba: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A32(2), A64(3), A32(5), A32(6), A64(7));
++    case 0x04d8: ((void (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A64(1), A64(3), A32(5), A32(6), A64(7)); return 0;
++    case 0x04d9: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A64(1), A64(3), A32(5), A32(6), A64(7));
++    case 0x04da: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A32(0), A64(1), A64(3), A32(5), A32(6), A64(7));
++    case 0x04f8: ((void (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A64(2), A64(4), A32(6), A32(7), A64(8)); return 0;
++    case 0x04f9: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A64(2), A64(4), A32(6), A32(7), A64(8));
++    case 0x04fa: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint32_t, uint64_t))f)(A64(0), A64(2), A64(4), A32(6), A32(7), A64(8));
++    case 0x0518: ((void (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A32(1), A32(2), A64(3), A32(5), A64(6)); return 0;
++    case 0x0519: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A32(1), A32(2), A64(3), A32(5), A64(6));
++    case 0x051a: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A32(1), A32(2), A64(3), A32(5), A64(6));
++    case 0x0538: ((void (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A32(2), A32(3), A64(4), A32(6), A64(7)); return 0;
++    case 0x0539: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A32(2), A32(3), A64(4), A32(6), A64(7));
++    case 0x053a: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A32(2), A32(3), A64(4), A32(6), A64(7));
++    case 0x0558: ((void (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A64(1), A32(3), A64(4), A32(6), A64(7)); return 0;
++    case 0x0559: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A64(1), A32(3), A64(4), A32(6), A64(7));
++    case 0x055a: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A64(1), A32(3), A64(4), A32(6), A64(7));
++    case 0x0578: ((void (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A64(2), A32(4), A64(5), A32(7), A64(8)); return 0;
++    case 0x0579: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A64(2), A32(4), A64(5), A32(7), A64(8));
++    case 0x057a: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A64(2), A32(4), A64(5), A32(7), A64(8));
++    case 0x0598: ((void (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A32(1), A64(2), A64(4), A32(6), A64(7)); return 0;
++    case 0x0599: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A32(1), A64(2), A64(4), A32(6), A64(7));
++    case 0x059a: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A32(1), A64(2), A64(4), A32(6), A64(7));
++    case 0x05b8: ((void (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A32(2), A64(3), A64(5), A32(7), A64(8)); return 0;
++    case 0x05b9: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A32(2), A64(3), A64(5), A32(7), A64(8));
++    case 0x05ba: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A32(2), A64(3), A64(5), A32(7), A64(8));
++    case 0x05d8: ((void (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A64(1), A64(3), A64(5), A32(7), A64(8)); return 0;
++    case 0x05d9: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A64(1), A64(3), A64(5), A32(7), A64(8));
++    case 0x05da: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A32(0), A64(1), A64(3), A64(5), A32(7), A64(8));
++    case 0x05f8: ((void (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A64(2), A64(4), A64(6), A32(8), A64(9)); return 0;
++    case 0x05f9: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A64(2), A64(4), A64(6), A32(8), A64(9));
++    case 0x05fa: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint32_t, uint64_t))f)(A64(0), A64(2), A64(4), A64(6), A32(8), A64(9));
++    case 0x0618: ((void (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A32(1), A32(2), A32(3), A64(4), A64(6)); return 0;
++    case 0x0619: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A32(1), A32(2), A32(3), A64(4), A64(6));
++    case 0x061a: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A32(1), A32(2), A32(3), A64(4), A64(6));
++    case 0x0638: ((void (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A32(2), A32(3), A32(4), A64(5), A64(7)); return 0;
++    case 0x0639: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A32(2), A32(3), A32(4), A64(5), A64(7));
++    case 0x063a: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A32(2), A32(3), A32(4), A64(5), A64(7));
++    case 0x0658: ((void (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A64(1), A32(3), A32(4), A64(5), A64(7)); return 0;
++    case 0x0659: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A64(1), A32(3), A32(4), A64(5), A64(7));
++    case 0x065a: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A64(1), A32(3), A32(4), A64(5), A64(7));
++    case 0x0678: ((void (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A64(2), A32(4), A32(5), A64(6), A64(8)); return 0;
++    case 0x0679: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A64(2), A32(4), A32(5), A64(6), A64(8));
++    case 0x067a: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A64(2), A32(4), A32(5), A64(6), A64(8));
++    case 0x0698: ((void (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A32(1), A64(2), A32(4), A64(5), A64(7)); return 0;
++    case 0x0699: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A32(1), A64(2), A32(4), A64(5), A64(7));
++    case 0x069a: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A32(1), A64(2), A32(4), A64(5), A64(7));
++    case 0x06b8: ((void (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A32(2), A64(3), A32(5), A64(6), A64(8)); return 0;
++    case 0x06b9: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A32(2), A64(3), A32(5), A64(6), A64(8));
++    case 0x06ba: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A32(2), A64(3), A32(5), A64(6), A64(8));
++    case 0x06d8: ((void (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3), A32(5), A64(6), A64(8)); return 0;
++    case 0x06d9: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3), A32(5), A64(6), A64(8));
++    case 0x06da: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3), A32(5), A64(6), A64(8));
++    case 0x06f8: ((void (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4), A32(6), A64(7), A64(9)); return 0;
++    case 0x06f9: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4), A32(6), A64(7), A64(9));
++    case 0x06fa: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint32_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4), A32(6), A64(7), A64(9));
++    case 0x0718: ((void (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A32(1), A32(2), A64(3), A64(5), A64(7)); return 0;
++    case 0x0719: return ((uint32_t (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A32(1), A32(2), A64(3), A64(5), A64(7));
++    case 0x071a: return ((uint64_t (*)(uint32_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A32(1), A32(2), A64(3), A64(5), A64(7));
++    case 0x0738: ((void (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A32(2), A32(3), A64(4), A64(6), A64(8)); return 0;
++    case 0x0739: return ((uint32_t (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A32(2), A32(3), A64(4), A64(6), A64(8));
++    case 0x073a: return ((uint64_t (*)(uint64_t, uint32_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A32(2), A32(3), A64(4), A64(6), A64(8));
++    case 0x0758: ((void (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A64(1), A32(3), A64(4), A64(6), A64(8)); return 0;
++    case 0x0759: return ((uint32_t (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A64(1), A32(3), A64(4), A64(6), A64(8));
++    case 0x075a: return ((uint64_t (*)(uint32_t, uint64_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A64(1), A32(3), A64(4), A64(6), A64(8));
++    case 0x0778: ((void (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A32(4), A64(5), A64(7), A64(9)); return 0;
++    case 0x0779: return ((uint32_t (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A32(4), A64(5), A64(7), A64(9));
++    case 0x077a: return ((uint64_t (*)(uint64_t, uint64_t, uint32_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A32(4), A64(5), A64(7), A64(9));
++    case 0x0798: ((void (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A32(1), A64(2), A64(4), A64(6), A64(8)); return 0;
++    case 0x0799: return ((uint32_t (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A32(1), A64(2), A64(4), A64(6), A64(8));
++    case 0x079a: return ((uint64_t (*)(uint32_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A32(1), A64(2), A64(4), A64(6), A64(8));
++    case 0x07b8: ((void (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A32(2), A64(3), A64(5), A64(7), A64(9)); return 0;
++    case 0x07b9: return ((uint32_t (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A32(2), A64(3), A64(5), A64(7), A64(9));
++    case 0x07ba: return ((uint64_t (*)(uint64_t, uint32_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A32(2), A64(3), A64(5), A64(7), A64(9));
++    case 0x07d8: ((void (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3), A64(5), A64(7), A64(9)); return 0;
++    case 0x07d9: return ((uint32_t (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3), A64(5), A64(7), A64(9));
++    case 0x07da: return ((uint64_t (*)(uint32_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A32(0), A64(1), A64(3), A64(5), A64(7), A64(9));
++    case 0x07f8: ((void (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4), A64(6), A64(8), A64(10)); return 0;
++    case 0x07f9: return ((uint32_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4), A64(6), A64(8), A64(10));
++    case 0x07fa: return ((uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t))f)(A64(0), A64(2), A64(4), A64(6), A64(8), A64(10));
++    }
++    tcg_abort();
++}
++
++#undef A32
++#undef A64
+diff --git a/src/qemu/tcg/tci/README b/src/qemu/tcg/tci/README
+new file mode 100644
+index 0000000..dc57f07
+--- /dev/null
++++ b/src/qemu/tcg/tci/README
+@@ -0,0 +1,130 @@
++TCG Interpreter (TCI) - Copyright (c) 2011 Stefan Weil.
++
++This file is released under the BSD license.
++
++1) Introduction
++
++TCG (Tiny Code Generator) is a code generator which translates
++code fragments ("basic blocks") from target code (any of the
++targets supported by QEMU) to a code representation which
++can be run on a host.
++
++QEMU can create native code for some hosts (arm, hppa, i386, ia64, ppc, ppc64,
++s390, sparc, x86_64). For others, unofficial host support was written.
++
++By adding a code generator for a virtual machine and using an
++interpreter for the generated bytecode, it is possible to
++support (almost) any host.
++
++This is what TCI (Tiny Code Interpreter) does.
++
++2) Implementation
++
++Like each TCG host frontend, TCI implements the code generator in
++tcg-target.c, tcg-target.h. Both files are in directory tcg/tci.
++
++The additional file tcg/tci.c adds the interpreter.
++
++The bytecode consists of opcodes (same numeric values as those used by
++TCG), command length and arguments of variable size and number.
++
++3) Usage
++
++For hosts without native TCG, the interpreter TCI must be enabled by
++
++        configure --enable-tcg-interpreter
++
++If configure is called without --enable-tcg-interpreter, it will
++suggest using this option. Setting it automatically would need
++additional code in configure which must be fixed when new native TCG
++implementations are added.
++
++System emulation should work on any 32 or 64 bit host.
++User mode emulation might work. Maybe a new linker script (*.ld)
++is needed. Byte order might be wrong (on big endian hosts)
++and need fixes in configure.
++
++For hosts with native TCG, the interpreter TCI can be enabled by
++
++        configure --enable-tcg-interpreter
++
++The only difference from running QEMU with TCI to running without TCI
++should be speed. Especially during development of TCI, it was very
++useful to compare runs with and without TCI. Create /tmp/qemu.log by
++
++        qemu-system-i386 -d in_asm,op_opt,cpu -D /tmp/qemu.log -singlestep
++
++once with interpreter and once without interpreter and compare the resulting
++qemu.log files. This is also useful to see the effects of additional
++registers or additional opcodes (it is easy to modify the virtual machine).
++It can also be used to verify native TCGs.
++
++Hosts with native TCG can also enable TCI by claiming to be unsupported:
++
++        configure --cpu=unknown --enable-tcg-interpreter
++
++configure then no longer uses the native linker script (*.ld) for
++user mode emulation.
++
++
++4) Status
++
++TCI needs special implementation for 32 and 64 bit host, 32 and 64 bit target,
++host and target with same or different endianness.
++
++            | host (le)                     host (be)
++            | 32             64             32             64
++------------+------------------------------------------------------------
++target (le) | s0, u0         s1, u1         s?, u?         s?, u?
++32 bit      |
++            |
++target (le) | sc, uc         s1, u1         s?, u?         s?, u?
++64 bit      |
++            |
++target (be) | sc, u0         sc, uc         s?, u?         s?, u?
++32 bit      |
++            |
++target (be) | sc, uc         sc, uc         s?, u?         s?, u?
++64 bit      |
++            |
++
++System emulation
++s? = untested
++sc = compiles
++s0 = bios works
++s1 = grub works
++s2 = Linux boots
++
++Linux user mode emulation
++u? = untested
++uc = compiles
++u0 = static hello works
++u1 = linux-user-test works
++
++5) Todo list
++
++* TCI is not widely tested. It was written and tested on a x86_64 host
++  running i386 and x86_64 system emulation and Linux user mode.
++  A cross compiled QEMU for i386 host also works with the same basic tests.
++  A cross compiled QEMU for mipsel host works, too. It is terribly slow
++  because I run it in a mips malta emulation, so it is an interpreted
++  emulation in an emulation.
++  A cross compiled QEMU for arm host works (tested with pc bios).
++  A cross compiled QEMU for ppc host works at least partially:
++  i386-linux-user/qemu-i386 can run a simple hello-world program
++  (tested in a ppc emulation).
++
++* Some TCG opcodes are either missing in the code generator and/or
++  in the interpreter. These opcodes raise a runtime exception, so it is
++  possible to see where code must be added.
++
++* The pseudo code is not optimized and still ugly. For hosts with special
++  alignment requirements, it needs some fixes (maybe aligned bytecode
++  would also improve speed for hosts which support byte alignment).
++
++* A better disassembler for the pseudo code would be nice (a very primitive
++  disassembler is included in tcg-target.c).
++
++* It might be useful to have a runtime option which selects the native TCG
++  or TCI, so QEMU would have to include two TCGs. Today, selecting TCI
++  is a configure option, so you need two compilations of QEMU.
+diff --git a/src/qemu/tcg/tci/tcg-target.c b/src/qemu/tcg/tci/tcg-target.c
+new file mode 100644
+index 0000000..16d8518
+--- /dev/null
++++ b/src/qemu/tcg/tci/tcg-target.c
+@@ -0,0 +1,898 @@
++/*
++ * Tiny Code Generator for QEMU
++ *
++ * Copyright (c) 2009, 2011 Stefan Weil
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++#include "tcg-be-null.h"
++
++/* TODO list:
++ * - See TODO comments in code.
++ */
++
++/* Marker for missing code. */
++#define TODO() \
++    do { \
++        fprintf(stderr, "TODO %s:%u: %s()\n", \
++                __FILE__, __LINE__, __func__); \
++        tcg_abort(); \
++    } while (0)
++
++/* Bitfield n...m (in 32 bit value). */
++#define BITS(n, m) (((0xffffffffU << (31 - n)) >> (31 - n + m)) << m)
++
++/* Macros used in tcg_target_op_defs. */
++#define R       "r"
++#define RI      "ri"
++#if TCG_TARGET_REG_BITS == 32
++# define R64    "r", "r"
++#else
++# define R64    "r"
++#endif
++#if TARGET_LONG_BITS > TCG_TARGET_REG_BITS
++# define L      "L", "L"
++# define S      "S", "S"
++#else
++# define L      "L"
++# define S      "S"
++#endif
++
++/* TODO: documentation. */
++static const TCGTargetOpDef tcg_target_op_defs[] = {
++    { INDEX_op_exit_tb, { NULL } },
++    { INDEX_op_goto_tb, { NULL } },
++    { INDEX_op_br, { NULL } },
++
++    { INDEX_op_ld8u_i32, { R, R } },
++    { INDEX_op_ld8s_i32, { R, R } },
++    { INDEX_op_ld16u_i32, { R, R } },
++    { INDEX_op_ld16s_i32, { R, R } },
++    { INDEX_op_ld_i32, { R, R } },
++    { INDEX_op_st8_i32, { R, R } },
++    { INDEX_op_st16_i32, { R, R } },
++    { INDEX_op_st_i32, { R, R } },
++
++    { INDEX_op_add_i32, { R, RI, RI } },
++    { INDEX_op_sub_i32, { R, RI, RI } },
++    { INDEX_op_mul_i32, { R, RI, RI } },
++#if TCG_TARGET_HAS_div_i32
++    { INDEX_op_div_i32, { R, R, R } },
++    { INDEX_op_divu_i32, { R, R, R } },
++    { INDEX_op_rem_i32, { R, R, R } },
++    { INDEX_op_remu_i32, { R, R, R } },
++#elif TCG_TARGET_HAS_div2_i32
++    { INDEX_op_div2_i32, { R, R, "0", "1", R } },
++    { INDEX_op_divu2_i32, { R, R, "0", "1", R } },
++#endif
++    /* TODO: Does R, RI, RI result in faster code than R, R, RI?
++       If both operands are constants, we can optimize. */
++    { INDEX_op_and_i32, { R, RI, RI } },
++#if TCG_TARGET_HAS_andc_i32
++    { INDEX_op_andc_i32, { R, RI, RI } },
++#endif
++#if TCG_TARGET_HAS_eqv_i32
++    { INDEX_op_eqv_i32, { R, RI, RI } },
++#endif
++#if TCG_TARGET_HAS_nand_i32
++    { INDEX_op_nand_i32, { R, RI, RI } },
++#endif
++#if TCG_TARGET_HAS_nor_i32
++    { INDEX_op_nor_i32, { R, RI, RI } },
++#endif
++    { INDEX_op_or_i32, { R, RI, RI } },
++#if TCG_TARGET_HAS_orc_i32
++    { INDEX_op_orc_i32, { R, RI, RI } },
++#endif
++    { INDEX_op_xor_i32, { R, RI, RI } },
++    { INDEX_op_shl_i32, { R, RI, RI } },
++    { INDEX_op_shr_i32, { R, RI, RI } },
++    { INDEX_op_sar_i32, { R, RI, RI } },
++#if TCG_TARGET_HAS_rot_i32
++    { INDEX_op_rotl_i32, { R, RI, RI } },
++    { INDEX_op_rotr_i32, { R, RI, RI } },
++#endif
++#if TCG_TARGET_HAS_deposit_i32
++    { INDEX_op_deposit_i32, { R, "0", R } },
++#endif
++
++    { INDEX_op_brcond_i32, { R, RI } },
++
++    { INDEX_op_setcond_i32, { R, R, RI } },
++#if TCG_TARGET_REG_BITS == 64
++    { INDEX_op_setcond_i64, { R, R, RI } },
++#endif /* TCG_TARGET_REG_BITS == 64 */
++
++#if TCG_TARGET_REG_BITS == 32
++    /* TODO: Support R, R, R, R, RI, RI? Will it be faster? */
++    { INDEX_op_add2_i32, { R, R, R, R, R, R } },
++    { INDEX_op_sub2_i32, { R, R, R, R, R, R } },
++    { INDEX_op_brcond2_i32, { R, R, RI, RI } },
++    { INDEX_op_mulu2_i32, { R, R, R, R } },
++    { INDEX_op_setcond2_i32, { R, R, R, RI, RI } },
++#endif
++
++#if TCG_TARGET_HAS_not_i32
++    { INDEX_op_not_i32, { R, R } },
++#endif
++#if TCG_TARGET_HAS_neg_i32
++    { INDEX_op_neg_i32, { R, R } },
++#endif
++
++#if TCG_TARGET_REG_BITS == 64
++    { INDEX_op_ld8u_i64, { R, R } },
++    { INDEX_op_ld8s_i64, { R, R } },
++    { INDEX_op_ld16u_i64, { R, R } },
++    { INDEX_op_ld16s_i64, { R, R } },
++    { INDEX_op_ld32u_i64, { R, R } },
++    { INDEX_op_ld32s_i64, { R, R } },
++    { INDEX_op_ld_i64, { R, R } },
++
++    { INDEX_op_st8_i64, { R, R } },
++    { INDEX_op_st16_i64, { R, R } },
++    { INDEX_op_st32_i64, { R, R } },
++    { INDEX_op_st_i64, { R, R } },
++
++    { INDEX_op_add_i64, { R, RI, RI } },
++    { INDEX_op_sub_i64, { R, RI, RI } },
++    { INDEX_op_mul_i64, { R, RI, RI } },
++#if TCG_TARGET_HAS_div_i64
++    { INDEX_op_div_i64, { R, R, R } },
++    { INDEX_op_divu_i64, { R, R, R } },
++    { INDEX_op_rem_i64, { R, R, R } },
++    { INDEX_op_remu_i64, { R, R, R } },
++#elif TCG_TARGET_HAS_div2_i64
++    { INDEX_op_div2_i64, { R, R, "0", "1", R } },
++    { INDEX_op_divu2_i64, { R, R, "0", "1", R } },
++#endif
++    { INDEX_op_and_i64, { R, RI, RI } },
++#if TCG_TARGET_HAS_andc_i64
++    { INDEX_op_andc_i64, { R, RI, RI } },
++#endif
++#if TCG_TARGET_HAS_eqv_i64
++    { INDEX_op_eqv_i64, { R, RI, RI } },
++#endif
++#if TCG_TARGET_HAS_nand_i64
++    { INDEX_op_nand_i64, { R, RI, RI } },
++#endif
++#if TCG_TARGET_HAS_nor_i64
++    { INDEX_op_nor_i64, { R, RI, RI } },
++#endif
++    { INDEX_op_or_i64, { R, RI, RI } },
++#if TCG_TARGET_HAS_orc_i64
++    { INDEX_op_orc_i64, { R, RI, RI } },
++#endif
++    { INDEX_op_xor_i64, { R, RI, RI } },
++    { INDEX_op_shl_i64, { R, RI, RI } },
++    { INDEX_op_shr_i64, { R, RI, RI } },
++    { INDEX_op_sar_i64, { R, RI, RI } },
++#if TCG_TARGET_HAS_rot_i64
++    { INDEX_op_rotl_i64, { R, RI, RI } },
++    { INDEX_op_rotr_i64, { R, RI, RI } },
++#endif
++#if TCG_TARGET_HAS_deposit_i64
++    { INDEX_op_deposit_i64, { R, "0", R } },
++#endif
++    { INDEX_op_brcond_i64, { R, RI } },
++
++#if TCG_TARGET_HAS_ext8s_i64
++    { INDEX_op_ext8s_i64, { R, R } },
++#endif
++#if TCG_TARGET_HAS_ext16s_i64
++    { INDEX_op_ext16s_i64, { R, R } },
++#endif
++#if TCG_TARGET_HAS_ext32s_i64
++    { INDEX_op_ext32s_i64, { R, R } },
++#endif
++#if TCG_TARGET_HAS_ext8u_i64
++    { INDEX_op_ext8u_i64, { R, R } },
++#endif
++#if TCG_TARGET_HAS_ext16u_i64
++    { INDEX_op_ext16u_i64, { R, R } },
++#endif
++#if TCG_TARGET_HAS_ext32u_i64
++    { INDEX_op_ext32u_i64, { R, R } },
++#endif
++#if TCG_TARGET_HAS_bswap16_i64
++    { INDEX_op_bswap16_i64, { R, R } },
++#endif
++#if TCG_TARGET_HAS_bswap32_i64
++    { INDEX_op_bswap32_i64, { R, R } },
++#endif
++#if TCG_TARGET_HAS_bswap64_i64
++    { INDEX_op_bswap64_i64, { R, R } },
++#endif
++#if TCG_TARGET_HAS_not_i64
++    { INDEX_op_not_i64, { R, R } },
++#endif
++#if TCG_TARGET_HAS_neg_i64
++    { INDEX_op_neg_i64, { R, R } },
++#endif
++#endif /* TCG_TARGET_REG_BITS == 64 */
++
++    { INDEX_op_qemu_ld_i32, { R, L } },
++    { INDEX_op_qemu_ld_i64, { R64, L } },
++
++    { INDEX_op_qemu_st_i32, { R, S } },
++    { INDEX_op_qemu_st_i64, { R64, S } },
++
++#if TCG_TARGET_HAS_ext8s_i32
++    { INDEX_op_ext8s_i32, { R, R } },
++#endif
++#if TCG_TARGET_HAS_ext16s_i32
++    { INDEX_op_ext16s_i32, { R, R } },
++#endif
++#if TCG_TARGET_HAS_ext8u_i32
++    { INDEX_op_ext8u_i32, { R, R } },
++#endif
++#if TCG_TARGET_HAS_ext16u_i32
++    { INDEX_op_ext16u_i32, { R, R } },
++#endif
++
++#if TCG_TARGET_HAS_bswap16_i32
++    { INDEX_op_bswap16_i32, { R, R } },
++#endif
++#if TCG_TARGET_HAS_bswap32_i32
++    { INDEX_op_bswap32_i32, { R, R } },
++#endif
++
++    { -1 },
++};
++
++static const int tcg_target_reg_alloc_order[] = {
++    TCG_REG_R0,
++    TCG_REG_R1,
++    TCG_REG_R2,
++    TCG_REG_R3,
++#if 0 /* used for TCG_REG_CALL_STACK */
++    TCG_REG_R4,
++#endif
++    TCG_REG_R5,
++    TCG_REG_R6,
++    TCG_REG_R7,
++#if TCG_TARGET_NB_REGS >= 16
++    TCG_REG_R8,
++    TCG_REG_R9,
++    TCG_REG_R10,
++    TCG_REG_R11,
++    TCG_REG_R12,
++    TCG_REG_R13,
++    TCG_REG_R14,
++    TCG_REG_R15,
++#endif
++};
++
++#if MAX_OPC_PARAM_IARGS != 5
++# error Fix needed, number of supported input arguments changed!
++#endif
++
++static const int tcg_target_call_iarg_regs[] = {
++    TCG_REG_R0,
++    TCG_REG_R1,
++    TCG_REG_R2,
++    TCG_REG_R3,
++#if 0 /* used for TCG_REG_CALL_STACK */
++    TCG_REG_R4,
++#endif
++    TCG_REG_R5,
++#if TCG_TARGET_REG_BITS == 32
++    /* 32 bit hosts need 2 * MAX_OPC_PARAM_IARGS registers. */
++    TCG_REG_R6,
++    TCG_REG_R7,
++#if TCG_TARGET_NB_REGS >= 16
++    TCG_REG_R8,
++    TCG_REG_R9,
++    TCG_REG_R10,
++#else
++# error Too few input registers available
++#endif
++#endif
++};
++
++static const int tcg_target_call_oarg_regs[] = {
++    TCG_REG_R0,
++#if TCG_TARGET_REG_BITS == 32
++    TCG_REG_R1
++#endif
++};
++
++#ifndef NDEBUG
++static const char *const tcg_target_reg_names[TCG_TARGET_NB_REGS] = {
++    "r00",
++    "r01",
++    "r02",
++    "r03",
++    "r04",
++    "r05",
++    "r06",
++    "r07",
++#if TCG_TARGET_NB_REGS >= 16
++    "r08",
++    "r09",
++    "r10",
++    "r11",
++    "r12",
++    "r13",
++    "r14",
++    "r15",
++#if TCG_TARGET_NB_REGS >= 32
++    "r16",
++    "r17",
++    "r18",
++    "r19",
++    "r20",
++    "r21",
++    "r22",
++    "r23",
++    "r24",
++    "r25",
++    "r26",
++    "r27",
++    "r28",
++    "r29",
++    "r30",
++    "r31"
++#endif
++#endif
++};
++#endif
++
++static void patch_reloc(tcg_insn_unit *code_ptr, int type,
++                        intptr_t value, intptr_t addend)
++{
++    /* tcg_out_reloc always uses the same type, addend. */
++    assert(type == sizeof(tcg_target_long));
++    assert(addend == 0);
++    assert(value != 0);
++    if (TCG_TARGET_REG_BITS == 32) {
++        tcg_patch32(code_ptr, value);
++    } else {
++        tcg_patch64(code_ptr, value);
++    }
++}
++
++/* Parse target specific constraints. */
++static int target_parse_constraint(TCGArgConstraint *ct, const char **pct_str)
++{
++    const char *ct_str = *pct_str;
++    switch (ct_str[0]) {
++    case 'r':
++    case 'L':                   /* qemu_ld constraint */
++    case 'S':                   /* qemu_st constraint */
++        ct->ct |= TCG_CT_REG;
++        tcg_regset_set32(ct->u.regs, 0, BIT(TCG_TARGET_NB_REGS) - 1);
++        break;
++    default:
++        return -1;
++    }
++    ct_str++;
++    *pct_str = ct_str;
++    return 0;
++}
++
++#if defined(CONFIG_DEBUG_TCG_INTERPRETER)
++/* Show current bytecode. Used by tcg interpreter. */
++void tci_disas(uint8_t opc)
++{
++    const TCGOpDef *def = &tcg_op_defs_org[opc];
++    fprintf(stderr, "TCG %s %u, %u, %u\n",
++            def->name, def->nb_oargs, def->nb_iargs, def->nb_cargs);
++}
++#endif
++
++/* Write value (native size). */
++static void tcg_out_i(TCGContext *s, tcg_target_ulong v)
++{
++    if (TCG_TARGET_REG_BITS == 32) {
++        tcg_out32(s, v);
++    } else {
++        tcg_out64(s, v);
++    }
++}
++
++/* Write opcode. */
++static void tcg_out_op_t(TCGContext *s, TCGOpcode op)
++{
++    tcg_out8(s, op);
++    tcg_out8(s, 0);
++}
++
++/* Write register. */
++static void tcg_out_r(TCGContext *s, TCGArg t0)
++{
++    assert(t0 < TCG_TARGET_NB_REGS);
++    tcg_out8(s, t0);
++}
++
++/* Write register or constant (native size). */
++static void tcg_out_ri(TCGContext *s, int const_arg, TCGArg arg)
++{
++    if (const_arg) {
++        assert(const_arg == 1);
++        tcg_out8(s, TCG_CONST);
++        tcg_out_i(s, arg);
++    } else {
++        tcg_out_r(s, arg);
++    }
++}
++
++/* Write register or constant (32 bit). */
++static void tcg_out_ri32(TCGContext *s, int const_arg, TCGArg arg)
++{
++    if (const_arg) {
++        assert(const_arg == 1);
++        tcg_out8(s, TCG_CONST);
++        tcg_out32(s, arg);
++    } else {
++        tcg_out_r(s, arg);
++    }
++}
++
++#if TCG_TARGET_REG_BITS == 64
++/* Write register or constant (64 bit). */
++static void tcg_out_ri64(TCGContext *s, int const_arg, TCGArg arg)
++{
++    if (const_arg) {
++        assert(const_arg == 1);
++        tcg_out8(s, TCG_CONST);
++        tcg_out64(s, arg);
++    } else {
++        tcg_out_r(s, arg);
++    }
++}
++#endif
++
++/* Write label. */
++static void tci_out_label(TCGContext *s, TCGArg arg)
++{
++    TCGLabel *label = &s->labels[arg];
++    if (label->has_value) {
++        tcg_out_i(s, label->u.value);
++        assert(label->u.value);
++    } else {
++        tcg_out_reloc(s, s->code_ptr, sizeof(tcg_target_ulong), arg, 0);
++        s->code_ptr += sizeof(tcg_target_ulong);
++    }
++}
++
++static void tcg_out_ld(TCGContext *s, TCGType type, TCGReg ret, TCGReg arg1,
++                       intptr_t arg2)
++{
++    uint8_t *old_code_ptr = s->code_ptr;
++    if (type == TCG_TYPE_I32) {
++        tcg_out_op_t(s, INDEX_op_ld_i32);
++        tcg_out_r(s, ret);
++        tcg_out_r(s, arg1);
++        tcg_out32(s, arg2);
++    } else {
++        assert(type == TCG_TYPE_I64);
++#if TCG_TARGET_REG_BITS == 64
++        tcg_out_op_t(s, INDEX_op_ld_i64);
++        tcg_out_r(s, ret);
++        tcg_out_r(s, arg1);
++        assert(arg2 == (int32_t)arg2);
++        tcg_out32(s, arg2);
++#else
++        TODO();
++#endif
++    }
++    old_code_ptr[1] = s->code_ptr - old_code_ptr;
++}
++
++static void tcg_out_mov(TCGContext *s, TCGType type, TCGReg ret, TCGReg arg)
++{
++    uint8_t *old_code_ptr = s->code_ptr;
++    assert(ret != arg);
++#if TCG_TARGET_REG_BITS == 32
++    tcg_out_op_t(s, INDEX_op_mov_i32);
++#else
++    tcg_out_op_t(s, INDEX_op_mov_i64);
++#endif
++    tcg_out_r(s, ret);
++    tcg_out_r(s, arg);
++    old_code_ptr[1] = s->code_ptr - old_code_ptr;
++}
++
++static void tcg_out_movi(TCGContext *s, TCGType type,
++                         TCGReg t0, tcg_target_long arg)
++{
++    uint8_t *old_code_ptr = s->code_ptr;
++    uint32_t arg32 = arg;
++    if (type == TCG_TYPE_I32 || arg == arg32) {
++        tcg_out_op_t(s, INDEX_op_movi_i32);
++        tcg_out_r(s, t0);
++        tcg_out32(s, arg32);
++    } else {
++        assert(type == TCG_TYPE_I64);
++#if TCG_TARGET_REG_BITS == 64
++        tcg_out_op_t(s, INDEX_op_movi_i64);
++        tcg_out_r(s, t0);
++        tcg_out64(s, arg);
++#else
++        TODO();
++#endif
++    }
++    old_code_ptr[1] = s->code_ptr - old_code_ptr;
++}
++
++static inline void tcg_out_call(TCGContext *s, tcg_insn_unit *arg)
++{
++    uint8_t *old_code_ptr = s->code_ptr;
++    tcg_out_op_t(s, INDEX_op_call);
++    tcg_out_ri(s, 1, (uintptr_t)arg);
++    old_code_ptr[1] = s->code_ptr - old_code_ptr;
++}
++
++/* A call with the helper's type (tcg.c, tci_call_sig), which the interpreter calls it as. */
++static void tcg_out_call_tci(TCGContext *s, tcg_insn_unit *arg, unsigned sig)
++{
++    uint8_t *old_code_ptr = s->code_ptr;
++    tcg_out_op_t(s, INDEX_op_call);
++    tcg_out_ri(s, 1, (uintptr_t)arg);
++    tcg_out16(s, sig);
++    old_code_ptr[1] = s->code_ptr - old_code_ptr;
++}
++
++static void tcg_out_op(TCGContext *s, TCGOpcode opc, const TCGArg *args,
++                       const int *const_args)
++{
++    uint8_t *old_code_ptr = s->code_ptr;
++
++    tcg_out_op_t(s, opc);
++
++    switch (opc) {
++    case INDEX_op_exit_tb:
++        tcg_out64(s, args[0]);
++        break;
++    case INDEX_op_goto_tb:
++        if (s->tb_jmp_offset) {
++            /* Direct jump method. */
++            assert(args[0] < ARRAY_SIZE(s->tb_jmp_offset));
++            s->tb_jmp_offset[args[0]] = tcg_current_code_size(s);
++            tcg_out32(s, 0);
++        } else {
++            /* Indirect jump method. */
++            TODO();
++        }
++        assert(args[0] < ARRAY_SIZE(s->tb_next_offset));
++        s->tb_next_offset[args[0]] = tcg_current_code_size(s);
++        break;
++    case INDEX_op_br:
++        tci_out_label(s, args[0]);
++        break;
++    case INDEX_op_setcond_i32:
++        tcg_out_r(s, args[0]);
++        tcg_out_r(s, args[1]);
++        tcg_out_ri32(s, const_args[2], args[2]);
++        tcg_out8(s, args[3]);   /* condition */
++        break;
++#if TCG_TARGET_REG_BITS == 32
++    case INDEX_op_setcond2_i32:
++        /* setcond2_i32 cond, t0, t1_low, t1_high, t2_low, t2_high */
++        tcg_out_r(s, args[0]);
++        tcg_out_r(s, args[1]);
++        tcg_out_r(s, args[2]);
++        tcg_out_ri32(s, const_args[3], args[3]);
++        tcg_out_ri32(s, const_args[4], args[4]);
++        tcg_out8(s, args[5]);   /* condition */
++        break;
++#elif TCG_TARGET_REG_BITS == 64
++    case INDEX_op_setcond_i64:
++        tcg_out_r(s, args[0]);
++        tcg_out_r(s, args[1]);
++        tcg_out_ri64(s, const_args[2], args[2]);
++        tcg_out8(s, args[3]);   /* condition */
++        break;
++#endif
++    case INDEX_op_ld8u_i32:
++    case INDEX_op_ld8s_i32:
++    case INDEX_op_ld16u_i32:
++    case INDEX_op_ld16s_i32:
++    case INDEX_op_ld_i32:
++    case INDEX_op_st8_i32:
++    case INDEX_op_st16_i32:
++    case INDEX_op_st_i32:
++    case INDEX_op_ld8u_i64:
++    case INDEX_op_ld8s_i64:
++    case INDEX_op_ld16u_i64:
++    case INDEX_op_ld16s_i64:
++    case INDEX_op_ld32u_i64:
++    case INDEX_op_ld32s_i64:
++    case INDEX_op_ld_i64:
++    case INDEX_op_st8_i64:
++    case INDEX_op_st16_i64:
++    case INDEX_op_st32_i64:
++    case INDEX_op_st_i64:
++        tcg_out_r(s, args[0]);
++        tcg_out_r(s, args[1]);
++        assert(args[2] == (int32_t)args[2]);
++        tcg_out32(s, args[2]);
++        break;
++    case INDEX_op_add_i32:
++    case INDEX_op_sub_i32:
++    case INDEX_op_mul_i32:
++    case INDEX_op_and_i32:
++    case INDEX_op_andc_i32:     /* Optional (TCG_TARGET_HAS_andc_i32). */
++    case INDEX_op_eqv_i32:      /* Optional (TCG_TARGET_HAS_eqv_i32). */
++    case INDEX_op_nand_i32:     /* Optional (TCG_TARGET_HAS_nand_i32). */
++    case INDEX_op_nor_i32:      /* Optional (TCG_TARGET_HAS_nor_i32). */
++    case INDEX_op_or_i32:
++    case INDEX_op_orc_i32:      /* Optional (TCG_TARGET_HAS_orc_i32). */
++    case INDEX_op_xor_i32:
++    case INDEX_op_shl_i32:
++    case INDEX_op_shr_i32:
++    case INDEX_op_sar_i32:
++    case INDEX_op_rotl_i32:     /* Optional (TCG_TARGET_HAS_rot_i32). */
++    case INDEX_op_rotr_i32:     /* Optional (TCG_TARGET_HAS_rot_i32). */
++        tcg_out_r(s, args[0]);
++        tcg_out_ri32(s, const_args[1], args[1]);
++        tcg_out_ri32(s, const_args[2], args[2]);
++        break;
++    case INDEX_op_deposit_i32:  /* Optional (TCG_TARGET_HAS_deposit_i32). */
++        tcg_out_r(s, args[0]);
++        tcg_out_r(s, args[1]);
++        tcg_out_r(s, args[2]);
++        assert(args[3] <= UINT8_MAX);
++        tcg_out8(s, args[3]);
++        assert(args[4] <= UINT8_MAX);
++        tcg_out8(s, args[4]);
++        break;
++
++#if TCG_TARGET_REG_BITS == 64
++    case INDEX_op_add_i64:
++    case INDEX_op_sub_i64:
++    case INDEX_op_mul_i64:
++    case INDEX_op_and_i64:
++    case INDEX_op_andc_i64:     /* Optional (TCG_TARGET_HAS_andc_i64). */
++    case INDEX_op_eqv_i64:      /* Optional (TCG_TARGET_HAS_eqv_i64). */
++    case INDEX_op_nand_i64:     /* Optional (TCG_TARGET_HAS_nand_i64). */
++    case INDEX_op_nor_i64:      /* Optional (TCG_TARGET_HAS_nor_i64). */
++    case INDEX_op_or_i64:
++    case INDEX_op_orc_i64:      /* Optional (TCG_TARGET_HAS_orc_i64). */
++    case INDEX_op_xor_i64:
++    case INDEX_op_shl_i64:
++    case INDEX_op_shr_i64:
++    case INDEX_op_sar_i64:
++    case INDEX_op_rotl_i64:     /* Optional (TCG_TARGET_HAS_rot_i64). */
++    case INDEX_op_rotr_i64:     /* Optional (TCG_TARGET_HAS_rot_i64). */
++        tcg_out_r(s, args[0]);
++        tcg_out_ri64(s, const_args[1], args[1]);
++        tcg_out_ri64(s, const_args[2], args[2]);
++        break;
++    case INDEX_op_deposit_i64:  /* Optional (TCG_TARGET_HAS_deposit_i64). */
++        tcg_out_r(s, args[0]);
++        tcg_out_r(s, args[1]);
++        tcg_out_r(s, args[2]);
++        assert(args[3] <= UINT8_MAX);
++        tcg_out8(s, args[3]);
++        assert(args[4] <= UINT8_MAX);
++        tcg_out8(s, args[4]);
++        break;
++    case INDEX_op_div_i64:      /* Optional (TCG_TARGET_HAS_div_i64). */
++    case INDEX_op_divu_i64:     /* Optional (TCG_TARGET_HAS_div_i64). */
++    case INDEX_op_rem_i64:      /* Optional (TCG_TARGET_HAS_div_i64). */
++    case INDEX_op_remu_i64:     /* Optional (TCG_TARGET_HAS_div_i64). */
++        TODO();
++        break;
++    case INDEX_op_div2_i64:     /* Optional (TCG_TARGET_HAS_div2_i64). */
++    case INDEX_op_divu2_i64:    /* Optional (TCG_TARGET_HAS_div2_i64). */
++        TODO();
++        break;
++    case INDEX_op_brcond_i64:
++        tcg_out_r(s, args[0]);
++        tcg_out_ri64(s, const_args[1], args[1]);
++        tcg_out8(s, args[2]);           /* condition */
++        tci_out_label(s, args[3]);
++        break;
++    case INDEX_op_bswap16_i64:  /* Optional (TCG_TARGET_HAS_bswap16_i64). */
++    case INDEX_op_bswap32_i64:  /* Optional (TCG_TARGET_HAS_bswap32_i64). */
++    case INDEX_op_bswap64_i64:  /* Optional (TCG_TARGET_HAS_bswap64_i64). */
++    case INDEX_op_not_i64:      /* Optional (TCG_TARGET_HAS_not_i64). */
++    case INDEX_op_neg_i64:      /* Optional (TCG_TARGET_HAS_neg_i64). */
++    case INDEX_op_ext8s_i64:    /* Optional (TCG_TARGET_HAS_ext8s_i64). */
++    case INDEX_op_ext8u_i64:    /* Optional (TCG_TARGET_HAS_ext8u_i64). */
++    case INDEX_op_ext16s_i64:   /* Optional (TCG_TARGET_HAS_ext16s_i64). */
++    case INDEX_op_ext16u_i64:   /* Optional (TCG_TARGET_HAS_ext16u_i64). */
++    case INDEX_op_ext32s_i64:   /* Optional (TCG_TARGET_HAS_ext32s_i64). */
++    case INDEX_op_ext32u_i64:   /* Optional (TCG_TARGET_HAS_ext32u_i64). */
++#endif /* TCG_TARGET_REG_BITS == 64 */
++    case INDEX_op_neg_i32:      /* Optional (TCG_TARGET_HAS_neg_i32). */
++    case INDEX_op_not_i32:      /* Optional (TCG_TARGET_HAS_not_i32). */
++    case INDEX_op_ext8s_i32:    /* Optional (TCG_TARGET_HAS_ext8s_i32). */
++    case INDEX_op_ext16s_i32:   /* Optional (TCG_TARGET_HAS_ext16s_i32). */
++    case INDEX_op_ext8u_i32:    /* Optional (TCG_TARGET_HAS_ext8u_i32). */
++    case INDEX_op_ext16u_i32:   /* Optional (TCG_TARGET_HAS_ext16u_i32). */
++    case INDEX_op_bswap16_i32:  /* Optional (TCG_TARGET_HAS_bswap16_i32). */
++    case INDEX_op_bswap32_i32:  /* Optional (TCG_TARGET_HAS_bswap32_i32). */
++        tcg_out_r(s, args[0]);
++        tcg_out_r(s, args[1]);
++        break;
++    case INDEX_op_div_i32:      /* Optional (TCG_TARGET_HAS_div_i32). */
++    case INDEX_op_divu_i32:     /* Optional (TCG_TARGET_HAS_div_i32). */
++    case INDEX_op_rem_i32:      /* Optional (TCG_TARGET_HAS_div_i32). */
++    case INDEX_op_remu_i32:     /* Optional (TCG_TARGET_HAS_div_i32). */
++        tcg_out_r(s, args[0]);
++        tcg_out_ri32(s, const_args[1], args[1]);
++        tcg_out_ri32(s, const_args[2], args[2]);
++        break;
++    case INDEX_op_div2_i32:     /* Optional (TCG_TARGET_HAS_div2_i32). */
++    case INDEX_op_divu2_i32:    /* Optional (TCG_TARGET_HAS_div2_i32). */
++        TODO();
++        break;
++#if TCG_TARGET_REG_BITS == 32
++    case INDEX_op_add2_i32:
++    case INDEX_op_sub2_i32:
++        tcg_out_r(s, args[0]);
++        tcg_out_r(s, args[1]);
++        tcg_out_r(s, args[2]);
++        tcg_out_r(s, args[3]);
++        tcg_out_r(s, args[4]);
++        tcg_out_r(s, args[5]);
++        break;
++    case INDEX_op_brcond2_i32:
++        tcg_out_r(s, args[0]);
++        tcg_out_r(s, args[1]);
++        tcg_out_ri32(s, const_args[2], args[2]);
++        tcg_out_ri32(s, const_args[3], args[3]);
++        tcg_out8(s, args[4]);           /* condition */
++        tci_out_label(s, args[5]);
++        break;
++    case INDEX_op_mulu2_i32:
++        tcg_out_r(s, args[0]);
++        tcg_out_r(s, args[1]);
++        tcg_out_r(s, args[2]);
++        tcg_out_r(s, args[3]);
++        break;
++#endif
++    case INDEX_op_brcond_i32:
++        tcg_out_r(s, args[0]);
++        tcg_out_ri32(s, const_args[1], args[1]);
++        tcg_out8(s, args[2]);           /* condition */
++        tci_out_label(s, args[3]);
++        break;
++    case INDEX_op_qemu_ld_i32:
++        tcg_out_r(s, *args++);
++        tcg_out_r(s, *args++);
++        if (TARGET_LONG_BITS > TCG_TARGET_REG_BITS) {
++            tcg_out_r(s, *args++);
++        }
++        tcg_out_i(s, *args++);
++#ifdef CONFIG_SOFTMMU
++        tcg_out_i(s, *args);
++#endif
++        break;
++    case INDEX_op_qemu_ld_i64:
++        tcg_out_r(s, *args++);
++        if (TCG_TARGET_REG_BITS == 32) {
++            tcg_out_r(s, *args++);
++        }
++        tcg_out_r(s, *args++);
++        if (TARGET_LONG_BITS > TCG_TARGET_REG_BITS) {
++            tcg_out_r(s, *args++);
++        }
++        tcg_out_i(s, *args++);
++#ifdef CONFIG_SOFTMMU
++        tcg_out_i(s, *args);
++#endif
++        break;
++    case INDEX_op_qemu_st_i32:
++        tcg_out_r(s, *args++);
++        tcg_out_r(s, *args++);
++        if (TARGET_LONG_BITS > TCG_TARGET_REG_BITS) {
++            tcg_out_r(s, *args++);
++        }
++        tcg_out_i(s, *args++);
++#ifdef CONFIG_SOFTMMU
++        tcg_out_i(s, *args);
++#endif
++        break;
++    case INDEX_op_qemu_st_i64:
++        tcg_out_r(s, *args++);
++        if (TCG_TARGET_REG_BITS == 32) {
++            tcg_out_r(s, *args++);
++        }
++        tcg_out_r(s, *args++);
++        if (TARGET_LONG_BITS > TCG_TARGET_REG_BITS) {
++            tcg_out_r(s, *args++);
++        }
++        tcg_out_i(s, *args++);
++#ifdef CONFIG_SOFTMMU
++        tcg_out_i(s, *args);
++#endif
++        break;
++    case INDEX_op_mov_i32:  /* Always emitted via tcg_out_mov.  */
++    case INDEX_op_mov_i64:
++    case INDEX_op_movi_i32: /* Always emitted via tcg_out_movi.  */
++    case INDEX_op_movi_i64:
++    case INDEX_op_call:     /* Always emitted via tcg_out_call.  */
++    default:
++        tcg_abort();
++    }
++    old_code_ptr[1] = s->code_ptr - old_code_ptr;
++}
++
++static void tcg_out_st(TCGContext *s, TCGType type, TCGReg arg, TCGReg arg1,
++                       intptr_t arg2)
++{
++    uint8_t *old_code_ptr = s->code_ptr;
++    if (type == TCG_TYPE_I32) {
++        tcg_out_op_t(s, INDEX_op_st_i32);
++        tcg_out_r(s, arg);
++        tcg_out_r(s, arg1);
++        tcg_out32(s, arg2);
++    } else {
++        assert(type == TCG_TYPE_I64);
++#if TCG_TARGET_REG_BITS == 64
++        tcg_out_op_t(s, INDEX_op_st_i64);
++        tcg_out_r(s, arg);
++        tcg_out_r(s, arg1);
++        tcg_out32(s, arg2);
++#else
++        TODO();
++#endif
++    }
++    old_code_ptr[1] = s->code_ptr - old_code_ptr;
++}
++
++/* Test if a constant matches the constraint. */
++static int tcg_target_const_match(tcg_target_long val, TCGType type,
++                                  const TCGArgConstraint *arg_ct)
++{
++    /* No need to return 0 or 1, 0 or != 0 is good enough. */
++    return arg_ct->ct & TCG_CT_CONST;
++}
++
++static void tcg_target_init(TCGContext *s)
++{
++#if defined(CONFIG_DEBUG_TCG_INTERPRETER)
++    const char *envval = getenv("DEBUG_TCG");
++    if (envval) {
++        qemu_set_log(strtol(envval, NULL, 0));
++    }
++#endif
++
++    /* The current code uses uint8_t for tcg operations. */
++    assert(ARRAY_SIZE(tcg_op_defs_org) <= UINT8_MAX);
++
++    /* Registers available for 32 bit operations. */
++    tcg_regset_set32(s->tcg_target_available_regs[TCG_TYPE_I32], 0,
++                     BIT(TCG_TARGET_NB_REGS) - 1);
++    /* Registers available for 64 bit operations. */
++    tcg_regset_set32(s->tcg_target_available_regs[TCG_TYPE_I64], 0,
++                     BIT(TCG_TARGET_NB_REGS) - 1);
++    /* TODO: Which registers should be set here? */
++    tcg_regset_set32(s->tcg_target_call_clobber_regs, 0,
++                     BIT(TCG_TARGET_NB_REGS) - 1);
++
++    tcg_regset_clear(s->reserved_regs);
++    tcg_regset_set_reg(s->reserved_regs, TCG_REG_CALL_STACK);
++    tcg_add_target_add_op_defs(s, tcg_target_op_defs);
++
++    /* We use negative offsets from "sp" so that we can distinguish
++       stores that might pretend to be call arguments.  */
++    tcg_set_frame(s, TCG_REG_CALL_STACK,
++                  -CPU_TEMP_BUF_NLONGS * sizeof(long),
++                  CPU_TEMP_BUF_NLONGS * sizeof(long));
++}
++
++/* Generate global QEMU prologue and epilogue code. */
++static inline void tcg_target_qemu_prologue(TCGContext *s)
++{
++}
+diff --git a/src/qemu/tcg/tci/tcg-target.h b/src/qemu/tcg/tci/tcg-target.h
+new file mode 100644
+index 0000000..00bb02c
+--- /dev/null
++++ b/src/qemu/tcg/tci/tcg-target.h
+@@ -0,0 +1,186 @@
++/*
++ * Tiny Code Generator for QEMU
++ *
++ * Copyright (c) 2009, 2011 Stefan Weil
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy
++ * of this software and associated documentation files (the "Software"), to deal
++ * in the Software without restriction, including without limitation the rights
++ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
++ * copies of the Software, and to permit persons to whom the Software is
++ * furnished to do so, subject to the following conditions:
++ *
++ * The above copyright notice and this permission notice shall be included in
++ * all copies or substantial portions of the Software.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
++ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
++ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
++ * THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
++ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
++ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
++ * THE SOFTWARE.
++ */
++
++/*
++ * This code implements a TCG which does not generate machine code for some
++ * real target machine but which generates virtual machine code for an
++ * interpreter. Interpreted pseudo code is slow, but it works on any host.
++ *
++ * Some remarks might help in understanding the code:
++ *
++ * "target" or "TCG target" is the machine which runs the generated code.
++ * This is different to the usual meaning in QEMU where "target" is the
++ * emulated machine. So normally QEMU host is identical to TCG target.
++ * Here the TCG target is a virtual machine, but this virtual machine must
++ * use the same word size like the real machine.
++ * Therefore, we need both 32 and 64 bit virtual machines (interpreter).
++ */
++
++#if !defined(TCG_TARGET_H)
++#define TCG_TARGET_H
++
++#include "config-host.h"
++
++#define TCG_TARGET_INTERPRETER 1
++#define TCG_TARGET_INSN_UNIT_SIZE 1
++
++#if UINTPTR_MAX == UINT32_MAX
++# define TCG_TARGET_REG_BITS 32
++#elif UINTPTR_MAX == UINT64_MAX
++# define TCG_TARGET_REG_BITS 64
++#else
++# error Unknown pointer size for tci target
++#endif
++
++#ifdef CONFIG_DEBUG_TCG
++/* Enable debug output. */
++#define CONFIG_DEBUG_TCG_INTERPRETER
++#endif
++
++/* Optional instructions. */
++
++#define TCG_TARGET_HAS_bswap16_i32      1
++#define TCG_TARGET_HAS_bswap32_i32      1
++#define TCG_TARGET_HAS_div_i32          1
++#define TCG_TARGET_HAS_rem_i32          1
++#define TCG_TARGET_HAS_ext8s_i32        1
++#define TCG_TARGET_HAS_ext16s_i32       1
++#define TCG_TARGET_HAS_ext8u_i32        1
++#define TCG_TARGET_HAS_ext16u_i32       1
++#define TCG_TARGET_HAS_andc_i32         0
++#define TCG_TARGET_HAS_deposit_i32      1
++#define TCG_TARGET_HAS_eqv_i32          0
++#define TCG_TARGET_HAS_nand_i32         0
++#define TCG_TARGET_HAS_nor_i32          0
++#define TCG_TARGET_HAS_neg_i32          1
++#define TCG_TARGET_HAS_not_i32          1
++#define TCG_TARGET_HAS_orc_i32          0
++#define TCG_TARGET_HAS_rot_i32          1
++#define TCG_TARGET_HAS_movcond_i32      0
++#define TCG_TARGET_HAS_muls2_i32        0
++#define TCG_TARGET_HAS_muluh_i32        0
++#define TCG_TARGET_HAS_mulsh_i32        0
++
++#if TCG_TARGET_REG_BITS == 64
++#define TCG_TARGET_HAS_trunc_shr_i32    0
++#define TCG_TARGET_HAS_bswap16_i64      1
++#define TCG_TARGET_HAS_bswap32_i64      1
++#define TCG_TARGET_HAS_bswap64_i64      1
++#define TCG_TARGET_HAS_deposit_i64      1
++#define TCG_TARGET_HAS_div_i64          0
++#define TCG_TARGET_HAS_rem_i64          0
++#define TCG_TARGET_HAS_ext8s_i64        1
++#define TCG_TARGET_HAS_ext16s_i64       1
++#define TCG_TARGET_HAS_ext32s_i64       1
++#define TCG_TARGET_HAS_ext8u_i64        1
++#define TCG_TARGET_HAS_ext16u_i64       1
++#define TCG_TARGET_HAS_ext32u_i64       1
++#define TCG_TARGET_HAS_andc_i64         0
++#define TCG_TARGET_HAS_eqv_i64          0
++#define TCG_TARGET_HAS_nand_i64         0
++#define TCG_TARGET_HAS_nor_i64          0
++#define TCG_TARGET_HAS_neg_i64          1
++#define TCG_TARGET_HAS_not_i64          1
++#define TCG_TARGET_HAS_orc_i64          0
++#define TCG_TARGET_HAS_rot_i64          1
++#define TCG_TARGET_HAS_movcond_i64      0
++#define TCG_TARGET_HAS_muls2_i64        0
++#define TCG_TARGET_HAS_add2_i32         0
++#define TCG_TARGET_HAS_sub2_i32         0
++#define TCG_TARGET_HAS_mulu2_i32        0
++#define TCG_TARGET_HAS_add2_i64         0
++#define TCG_TARGET_HAS_sub2_i64         0
++#define TCG_TARGET_HAS_mulu2_i64        0
++#define TCG_TARGET_HAS_muluh_i64        0
++#define TCG_TARGET_HAS_mulsh_i64        0
++#else
++#define TCG_TARGET_HAS_mulu2_i32        1
++#endif /* TCG_TARGET_REG_BITS == 64 */
++
++/* Number of registers available.
++   For 32 bit hosts, we need more than 8 registers (call arguments). */
++/* #define TCG_TARGET_NB_REGS 8 */
++#define TCG_TARGET_NB_REGS 16
++/* #define TCG_TARGET_NB_REGS 32 */
++
++/* List of registers which are used by TCG. */
++typedef enum {
++    TCG_REG_R0 = 0,
++    TCG_REG_R1,
++    TCG_REG_R2,
++    TCG_REG_R3,
++    TCG_REG_R4,
++    TCG_REG_R5,
++    TCG_REG_R6,
++    TCG_REG_R7,
++#if TCG_TARGET_NB_REGS >= 16
++    TCG_REG_R8,
++    TCG_REG_R9,
++    TCG_REG_R10,
++    TCG_REG_R11,
++    TCG_REG_R12,
++    TCG_REG_R13,
++    TCG_REG_R14,
++    TCG_REG_R15,
++#if TCG_TARGET_NB_REGS >= 32
++    TCG_REG_R16,
++    TCG_REG_R17,
++    TCG_REG_R18,
++    TCG_REG_R19,
++    TCG_REG_R20,
++    TCG_REG_R21,
++    TCG_REG_R22,
++    TCG_REG_R23,
++    TCG_REG_R24,
++    TCG_REG_R25,
++    TCG_REG_R26,
++    TCG_REG_R27,
++    TCG_REG_R28,
++    TCG_REG_R29,
++    TCG_REG_R30,
++    TCG_REG_R31,
++#endif
++#endif
++    /* Special value UINT8_MAX is used by TCI to encode constant values. */
++    TCG_CONST = UINT8_MAX
++} TCGReg;
++
++#define TCG_AREG0                       (TCG_TARGET_NB_REGS - 2)
++
++/* Used for function call generation. */
++#define TCG_REG_CALL_STACK              (TCG_TARGET_NB_REGS - 1)
++#define TCG_TARGET_CALL_STACK_OFFSET    0
++#define TCG_TARGET_STACK_ALIGN          16
++
++void tci_disas(uint8_t opc);
++
++/* (one per guest architecture, as all of TCG is in Unicorn: UNICORN_ARCH_POSTFIX, qemu/<arch>.h) */
++#define tcg_qemu_tb_exec glue(tcg_qemu_tb_exec, UNICORN_ARCH_POSTFIX)
++uintptr_t tcg_qemu_tb_exec(CPUArchState *env, uint8_t *tb_ptr);
++
++static inline void flush_icache_range(uintptr_t start, uintptr_t stop)
++{
++}
++
++#endif /* TCG_TARGET_H */
+diff --git a/src/qemu/tci.c b/src/qemu/tci.c
+new file mode 100644
+index 0000000..00350e4
+--- /dev/null
++++ b/src/qemu/tci.c
+@@ -0,0 +1,1263 @@
++/*
++ * Tiny Code Interpreter for QEMU
++ *
++ * Copyright (c) 2009, 2011 Stefan Weil
++ *
++ * This program is free software: you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License as published by
++ * the Free Software Foundation, either version 2 of the License, or
++ * (at your option) any later version.
++ *
++ * This program is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
++ * GNU General Public License for more details.
++ *
++ * You should have received a copy of the GNU General Public License
++ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
++ */
++
++#include "config.h"
++
++/* TCG's interpreter: a host without a code generator (tcg/tci, CONFIG_TCG_INTERPRETER, which
++   configure takes for wasm32); for any other, this file is empty. */
++#if defined(CONFIG_TCG_INTERPRETER)
++
++/* Defining NDEBUG disables assertions (which makes the code faster). */
++#if !defined(CONFIG_DEBUG_TCG) && !defined(NDEBUG)
++# define NDEBUG
++#endif
++
++#include "qemu-common.h"
++#include "exec/exec-all.h"           /* MAX_OPC_PARAM_IARGS */
++#include "exec/cpu_ldst.h"
++#include "tcg-op.h"
++
++/* Marker for missing code. */
++#define TODO() \
++    do { \
++        fprintf(stderr, "TODO %s:%u: %s()\n", \
++                __FILE__, __LINE__, __func__); \
++        tcg_abort(); \
++    } while (0)
++
++#if MAX_OPC_PARAM_IARGS != 5
++# error Fix needed, number of supported input arguments changed!
++#endif
++
++/* tci_call(): a helper called as the type it has, which the call carries (tcg.c, tci_call_sig).
++   A WebAssembly host checks the type of every call through a pointer: QEMU's way of calling
++   every helper as one type with the most arguments traps there. */
++#include "tcg/tci-call.inc.c"
++
++/* Targets which don't use GETPC also don't need tci_tb_ptr
++   which makes them a little faster. One per thread, as a helper's return address would be
++   (exec-all.h). */
++#if defined(GETPC)
++__thread uintptr_t tci_tb_ptr;
++#endif
++
++static tcg_target_ulong tci_read_reg(tcg_target_ulong *regs, TCGReg index)
++{
++    assert(index < TCG_TARGET_NB_REGS);
++    return regs[index];
++}
++
++#if TCG_TARGET_HAS_ext8s_i32 || TCG_TARGET_HAS_ext8s_i64
++static int8_t tci_read_reg8s(tcg_target_ulong *regs, TCGReg index)
++{
++    return (int8_t)tci_read_reg(regs, index);
++}
++#endif
++
++#if TCG_TARGET_HAS_ext16s_i32 || TCG_TARGET_HAS_ext16s_i64
++static int16_t tci_read_reg16s(tcg_target_ulong *regs, TCGReg index)
++{
++    return (int16_t)tci_read_reg(regs, index);
++}
++#endif
++
++#if TCG_TARGET_REG_BITS == 64
++static int32_t tci_read_reg32s(tcg_target_ulong *regs, TCGReg index)
++{
++    return (int32_t)tci_read_reg(regs, index);
++}
++#endif
++
++static uint8_t tci_read_reg8(tcg_target_ulong *regs, TCGReg index)
++{
++    return (uint8_t)tci_read_reg(regs, index);
++}
++
++static uint16_t tci_read_reg16(tcg_target_ulong *regs, TCGReg index)
++{
++    return (uint16_t)tci_read_reg(regs, index);
++}
++
++static uint32_t tci_read_reg32(tcg_target_ulong *regs, TCGReg index)
++{
++    return (uint32_t)tci_read_reg(regs, index);
++}
++
++#if TCG_TARGET_REG_BITS == 64
++static uint64_t tci_read_reg64(tcg_target_ulong *regs, TCGReg index)
++{
++    return tci_read_reg(regs, index);
++}
++#endif
++
++static void tci_write_reg(tcg_target_ulong *regs, TCGReg index, tcg_target_ulong value)
++{
++    assert(index < TCG_TARGET_NB_REGS);
++    assert(index != TCG_AREG0);
++    assert(index != TCG_REG_CALL_STACK);
++    regs[index] = value;
++}
++
++#if TCG_TARGET_REG_BITS == 64
++static void tci_write_reg32s(tcg_target_ulong *regs, TCGReg index, int32_t value)
++{
++    tci_write_reg(regs, index, value);
++}
++#endif
++
++static void tci_write_reg8(tcg_target_ulong *regs, TCGReg index, uint8_t value)
++{
++    tci_write_reg(regs, index, value);
++}
++
++static void tci_write_reg32(tcg_target_ulong *regs, TCGReg index, uint32_t value)
++{
++    tci_write_reg(regs, index, value);
++}
++
++#if TCG_TARGET_REG_BITS == 32
++static void tci_write_reg64(tcg_target_ulong *regs, uint32_t high_index, uint32_t low_index,
++                            uint64_t value)
++{
++    tci_write_reg(regs, low_index, value);
++    tci_write_reg(regs, high_index, value >> 32);
++}
++#elif TCG_TARGET_REG_BITS == 64
++static void tci_write_reg64(tcg_target_ulong *regs, TCGReg index, uint64_t value)
++{
++    tci_write_reg(regs, index, value);
++}
++#endif
++
++#if TCG_TARGET_REG_BITS == 32
++/* Create a 64 bit value from two 32 bit values. */
++static uint64_t tci_uint64(uint32_t high, uint32_t low)
++{
++    return ((uint64_t)high << 32) + low;
++}
++#endif
++
++/* Read constant (native size) from bytecode. */
++static tcg_target_ulong tci_read_i(uint8_t **tb_ptr)
++{
++    tcg_target_ulong value = *(tcg_target_ulong *)(*tb_ptr);
++    *tb_ptr += sizeof(value);
++    return value;
++}
++
++/* Read unsigned constant (32 bit) from bytecode. */
++static uint32_t tci_read_i32(uint8_t **tb_ptr)
++{
++    uint32_t value = *(uint32_t *)(*tb_ptr);
++    *tb_ptr += sizeof(value);
++    return value;
++}
++
++/* Read signed constant (32 bit) from bytecode. */
++static int32_t tci_read_s32(uint8_t **tb_ptr)
++{
++    int32_t value = *(int32_t *)(*tb_ptr);
++    *tb_ptr += sizeof(value);
++    return value;
++}
++
++#if TCG_TARGET_REG_BITS == 64
++/* Read constant (64 bit) from bytecode. */
++static uint64_t tci_read_i64(uint8_t **tb_ptr)
++{
++    uint64_t value = *(uint64_t *)(*tb_ptr);
++    *tb_ptr += sizeof(value);
++    return value;
++}
++#endif
++
++/* Read indexed register (native size) from bytecode. */
++static tcg_target_ulong tci_read_r(tcg_target_ulong *regs, uint8_t **tb_ptr)
++{
++    tcg_target_ulong value = tci_read_reg(regs, **tb_ptr);
++    *tb_ptr += 1;
++    return value;
++}
++
++/* Read indexed register (8 bit) from bytecode. */
++static uint8_t tci_read_r8(tcg_target_ulong *regs, uint8_t **tb_ptr)
++{
++    uint8_t value = tci_read_reg8(regs, **tb_ptr);
++    *tb_ptr += 1;
++    return value;
++}
++
++#if TCG_TARGET_HAS_ext8s_i32 || TCG_TARGET_HAS_ext8s_i64
++/* Read indexed register (8 bit signed) from bytecode. */
++static int8_t tci_read_r8s(tcg_target_ulong *regs, uint8_t **tb_ptr)
++{
++    int8_t value = tci_read_reg8s(regs, **tb_ptr);
++    *tb_ptr += 1;
++    return value;
++}
++#endif
++
++/* Read indexed register (16 bit) from bytecode. */
++static uint16_t tci_read_r16(tcg_target_ulong *regs, uint8_t **tb_ptr)
++{
++    uint16_t value = tci_read_reg16(regs, **tb_ptr);
++    *tb_ptr += 1;
++    return value;
++}
++
++#if TCG_TARGET_HAS_ext16s_i32 || TCG_TARGET_HAS_ext16s_i64
++/* Read indexed register (16 bit signed) from bytecode. */
++static int16_t tci_read_r16s(tcg_target_ulong *regs, uint8_t **tb_ptr)
++{
++    int16_t value = tci_read_reg16s(regs, **tb_ptr);
++    *tb_ptr += 1;
++    return value;
++}
++#endif
++
++/* Read indexed register (32 bit) from bytecode. */
++static uint32_t tci_read_r32(tcg_target_ulong *regs, uint8_t **tb_ptr)
++{
++    uint32_t value = tci_read_reg32(regs, **tb_ptr);
++    *tb_ptr += 1;
++    return value;
++}
++
++#if TCG_TARGET_REG_BITS == 32
++/* Read two indexed registers (2 * 32 bit) from bytecode. */
++static uint64_t tci_read_r64(tcg_target_ulong *regs, uint8_t **tb_ptr)
++{
++    uint32_t low = tci_read_r32(regs, tb_ptr);
++    return tci_uint64(tci_read_r32(regs, tb_ptr), low);
++}
++#elif TCG_TARGET_REG_BITS == 64
++/* Read indexed register (32 bit signed) from bytecode. */
++static int32_t tci_read_r32s(tcg_target_ulong *regs, uint8_t **tb_ptr)
++{
++    int32_t value = tci_read_reg32s(regs, **tb_ptr);
++    *tb_ptr += 1;
++    return value;
++}
++
++/* Read indexed register (64 bit) from bytecode. */
++static uint64_t tci_read_r64(tcg_target_ulong *regs, uint8_t **tb_ptr)
++{
++    uint64_t value = tci_read_reg64(regs, **tb_ptr);
++    *tb_ptr += 1;
++    return value;
++}
++#endif
++
++/* Read indexed register(s) with target address from bytecode. */
++static target_ulong tci_read_ulong(tcg_target_ulong *regs, uint8_t **tb_ptr)
++{
++    target_ulong taddr = tci_read_r(regs, tb_ptr);
++#if TARGET_LONG_BITS > TCG_TARGET_REG_BITS
++    taddr += (uint64_t)tci_read_r(regs, tb_ptr) << 32;
++#endif
++    return taddr;
++}
++
++/* Read indexed register or constant (native size) from bytecode. */
++static tcg_target_ulong tci_read_ri(tcg_target_ulong *regs, uint8_t **tb_ptr)
++{
++    tcg_target_ulong value;
++    TCGReg r = **tb_ptr;
++    *tb_ptr += 1;
++    if (r == TCG_CONST) {
++        value = tci_read_i(tb_ptr);
++    } else {
++        value = tci_read_reg(regs, r);
++    }
++    return value;
++}
++
++/* Read indexed register or constant (32 bit) from bytecode. */
++static uint32_t tci_read_ri32(tcg_target_ulong *regs, uint8_t **tb_ptr)
++{
++    uint32_t value;
++    TCGReg r = **tb_ptr;
++    *tb_ptr += 1;
++    if (r == TCG_CONST) {
++        value = tci_read_i32(tb_ptr);
++    } else {
++        value = tci_read_reg32(regs, r);
++    }
++    return value;
++}
++
++#if TCG_TARGET_REG_BITS == 32
++/* Read two indexed registers or constants (2 * 32 bit) from bytecode. */
++static uint64_t tci_read_ri64(tcg_target_ulong *regs, uint8_t **tb_ptr)
++{
++    uint32_t low = tci_read_ri32(regs, tb_ptr);
++    return tci_uint64(tci_read_ri32(regs, tb_ptr), low);
++}
++#elif TCG_TARGET_REG_BITS == 64
++/* Read indexed register or constant (64 bit) from bytecode. */
++static uint64_t tci_read_ri64(tcg_target_ulong *regs, uint8_t **tb_ptr)
++{
++    uint64_t value;
++    TCGReg r = **tb_ptr;
++    *tb_ptr += 1;
++    if (r == TCG_CONST) {
++        value = tci_read_i64(tb_ptr);
++    } else {
++        value = tci_read_reg64(regs, r);
++    }
++    return value;
++}
++#endif
++
++static tcg_target_ulong tci_read_label(uint8_t **tb_ptr)
++{
++    tcg_target_ulong label = tci_read_i(tb_ptr);
++    assert(label != 0);
++    return label;
++}
++
++static bool tci_compare32(uint32_t u0, uint32_t u1, TCGCond condition)
++{
++    bool result = false;
++    int32_t i0 = u0;
++    int32_t i1 = u1;
++    switch (condition) {
++    case TCG_COND_EQ:
++        result = (u0 == u1);
++        break;
++    case TCG_COND_NE:
++        result = (u0 != u1);
++        break;
++    case TCG_COND_LT:
++        result = (i0 < i1);
++        break;
++    case TCG_COND_GE:
++        result = (i0 >= i1);
++        break;
++    case TCG_COND_LE:
++        result = (i0 <= i1);
++        break;
++    case TCG_COND_GT:
++        result = (i0 > i1);
++        break;
++    case TCG_COND_LTU:
++        result = (u0 < u1);
++        break;
++    case TCG_COND_GEU:
++        result = (u0 >= u1);
++        break;
++    case TCG_COND_LEU:
++        result = (u0 <= u1);
++        break;
++    case TCG_COND_GTU:
++        result = (u0 > u1);
++        break;
++    default:
++        TODO();
++    }
++    return result;
++}
++
++static bool tci_compare64(uint64_t u0, uint64_t u1, TCGCond condition)
++{
++    bool result = false;
++    int64_t i0 = u0;
++    int64_t i1 = u1;
++    switch (condition) {
++    case TCG_COND_EQ:
++        result = (u0 == u1);
++        break;
++    case TCG_COND_NE:
++        result = (u0 != u1);
++        break;
++    case TCG_COND_LT:
++        result = (i0 < i1);
++        break;
++    case TCG_COND_GE:
++        result = (i0 >= i1);
++        break;
++    case TCG_COND_LE:
++        result = (i0 <= i1);
++        break;
++    case TCG_COND_GT:
++        result = (i0 > i1);
++        break;
++    case TCG_COND_LTU:
++        result = (u0 < u1);
++        break;
++    case TCG_COND_GEU:
++        result = (u0 >= u1);
++        break;
++    case TCG_COND_LEU:
++        result = (u0 <= u1);
++        break;
++    case TCG_COND_GTU:
++        result = (u0 > u1);
++        break;
++    default:
++        TODO();
++    }
++    return result;
++}
++
++#ifdef CONFIG_SOFTMMU
++# define mmuidx          tci_read_i(&tb_ptr)
++# define qemu_ld_ub \
++    helper_ret_ldub_mmu(env, taddr, mmuidx, (uintptr_t)tb_ptr)
++# define qemu_ld_leuw \
++    helper_le_lduw_mmu(env, taddr, mmuidx, (uintptr_t)tb_ptr)
++# define qemu_ld_leul \
++    helper_le_ldul_mmu(env, taddr, mmuidx, (uintptr_t)tb_ptr)
++# define qemu_ld_leq \
++    helper_le_ldq_mmu(env, taddr, mmuidx, (uintptr_t)tb_ptr)
++# define qemu_ld_beuw \
++    helper_be_lduw_mmu(env, taddr, mmuidx, (uintptr_t)tb_ptr)
++# define qemu_ld_beul \
++    helper_be_ldul_mmu(env, taddr, mmuidx, (uintptr_t)tb_ptr)
++# define qemu_ld_beq \
++    helper_be_ldq_mmu(env, taddr, mmuidx, (uintptr_t)tb_ptr)
++# define qemu_st_b(X) \
++    helper_ret_stb_mmu(env, taddr, X, mmuidx, (uintptr_t)tb_ptr)
++# define qemu_st_lew(X) \
++    helper_le_stw_mmu(env, taddr, X, mmuidx, (uintptr_t)tb_ptr)
++# define qemu_st_lel(X) \
++    helper_le_stl_mmu(env, taddr, X, mmuidx, (uintptr_t)tb_ptr)
++# define qemu_st_leq(X) \
++    helper_le_stq_mmu(env, taddr, X, mmuidx, (uintptr_t)tb_ptr)
++# define qemu_st_bew(X) \
++    helper_be_stw_mmu(env, taddr, X, mmuidx, (uintptr_t)tb_ptr)
++# define qemu_st_bel(X) \
++    helper_be_stl_mmu(env, taddr, X, mmuidx, (uintptr_t)tb_ptr)
++# define qemu_st_beq(X) \
++    helper_be_stq_mmu(env, taddr, X, mmuidx, (uintptr_t)tb_ptr)
++#else
++# define qemu_ld_ub      ldub_p(g2h(taddr))
++# define qemu_ld_leuw    lduw_le_p(g2h(taddr))
++# define qemu_ld_leul    (uint32_t)ldl_le_p(g2h(taddr))
++# define qemu_ld_leq     ldq_le_p(g2h(taddr))
++# define qemu_ld_beuw    lduw_be_p(g2h(taddr))
++# define qemu_ld_beul    (uint32_t)ldl_be_p(g2h(taddr))
++# define qemu_ld_beq     ldq_be_p(g2h(taddr))
++# define qemu_st_b(X)    stb_p(g2h(taddr), X)
++# define qemu_st_lew(X)  stw_le_p(g2h(taddr), X)
++# define qemu_st_lel(X)  stl_le_p(g2h(taddr), X)
++# define qemu_st_leq(X)  stq_le_p(g2h(taddr), X)
++# define qemu_st_bew(X)  stw_be_p(g2h(taddr), X)
++# define qemu_st_bel(X)  stl_be_p(g2h(taddr), X)
++# define qemu_st_beq(X)  stq_be_p(g2h(taddr), X)
++#endif
++
++/* Interpret pseudo code in tb. */
++uintptr_t tcg_qemu_tb_exec(CPUArchState *env, uint8_t *tb_ptr)
++{
++    long tcg_temps[CPU_TEMP_BUF_NLONGS];
++    uintptr_t sp_value = (uintptr_t)(tcg_temps + CPU_TEMP_BUF_NLONGS);
++    uintptr_t next_tb = 0;
++    /* the registers, the interpreter's own (a helper may run another TB: uc_emu_start in a hook) */
++    tcg_target_ulong regs[TCG_TARGET_NB_REGS];
++
++    regs[TCG_AREG0] = (tcg_target_ulong)env;
++    regs[TCG_REG_CALL_STACK] = sp_value;
++    assert(tb_ptr);
++
++    for (;;) {
++        TCGOpcode opc = tb_ptr[0];
++#if !defined(NDEBUG)
++        uint8_t op_size = tb_ptr[1];
++        uint8_t *old_code_ptr = tb_ptr;
++#endif
++        tcg_target_ulong t0;
++        tcg_target_ulong t1;
++        tcg_target_ulong t2;
++        tcg_target_ulong label;
++        TCGCond condition;
++        target_ulong taddr;
++        uint8_t tmp8;
++        uint16_t tmp16;
++        uint32_t tmp32;
++        uint64_t tmp64;
++#if TCG_TARGET_REG_BITS == 32
++        uint64_t v64;
++#endif
++        TCGMemOp memop;
++
++#if defined(GETPC)
++        tci_tb_ptr = (uintptr_t)tb_ptr;
++#endif
++
++        /* Skip opcode and size entry. */
++        tb_ptr += 2;
++
++        switch (opc) {
++        case INDEX_op_end:
++        case INDEX_op_nop:
++            break;
++        case INDEX_op_nop1:
++        case INDEX_op_nop2:
++        case INDEX_op_nop3:
++        case INDEX_op_nopn:
++        case INDEX_op_discard:
++            TODO();
++            break;
++        case INDEX_op_set_label:
++            TODO();
++            break;
++        case INDEX_op_call:
++            t0 = tci_read_ri(regs, &tb_ptr);
++            {
++                /* the argument registers, in order (tcg_target_call_iarg_regs); tci_call
++                   reads as many as the helper's parameters take (2 * MAX_OPC_PARAM_IARGS at
++                   most: the last two are for tci-call.inc.c's six-parameter types, never used) */
++                const tcg_target_ulong args[] = {
++                    regs[TCG_REG_R0], regs[TCG_REG_R1], regs[TCG_REG_R2], regs[TCG_REG_R3],
++                    regs[TCG_REG_R5], regs[TCG_REG_R6], regs[TCG_REG_R7], regs[TCG_REG_R8],
++                    regs[TCG_REG_R9], regs[TCG_REG_R10], 0, 0,
++                };
++                unsigned sig = *(uint16_t *)tb_ptr;
++                tb_ptr += 2;
++                tmp64 = tci_call(t0, sig, args);
++            }
++            tci_write_reg(regs, TCG_REG_R0, tmp64);
++            tci_write_reg(regs, TCG_REG_R1, tmp64 >> 32);
++            break;
++        case INDEX_op_br:
++            label = tci_read_label(&tb_ptr);
++            assert(tb_ptr == old_code_ptr + op_size);
++            tb_ptr = (uint8_t *)label;
++            continue;
++        case INDEX_op_setcond_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            condition = *tb_ptr++;
++            tci_write_reg32(regs, t0, tci_compare32(t1, t2, condition));
++            break;
++#if TCG_TARGET_REG_BITS == 32
++        case INDEX_op_setcond2_i32:
++            t0 = *tb_ptr++;
++            tmp64 = tci_read_r64(regs, &tb_ptr);
++            v64 = tci_read_ri64(regs, &tb_ptr);
++            condition = *tb_ptr++;
++            tci_write_reg32(regs, t0, tci_compare64(tmp64, v64, condition));
++            break;
++#elif TCG_TARGET_REG_BITS == 64
++        case INDEX_op_setcond_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r64(regs, &tb_ptr);
++            t2 = tci_read_ri64(regs, &tb_ptr);
++            condition = *tb_ptr++;
++            tci_write_reg64(regs, t0, tci_compare64(t1, t2, condition));
++            break;
++#endif
++        case INDEX_op_mov_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1);
++            break;
++        case INDEX_op_movi_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_i32(&tb_ptr);
++            tci_write_reg32(regs, t0, t1);
++            break;
++
++            /* Load/store operations (32 bit). */
++
++        case INDEX_op_ld8u_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r(regs, &tb_ptr);
++            t2 = tci_read_s32(&tb_ptr);
++            tci_write_reg8(regs, t0, *(uint8_t *)(t1 + t2));
++            break;
++        case INDEX_op_ld8s_i32:
++        case INDEX_op_ld16u_i32:
++            TODO();
++            break;
++        case INDEX_op_ld16s_i32:
++            TODO();
++            break;
++        case INDEX_op_ld_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r(regs, &tb_ptr);
++            t2 = tci_read_s32(&tb_ptr);
++            tci_write_reg32(regs, t0, *(uint32_t *)(t1 + t2));
++            break;
++        case INDEX_op_st8_i32:
++            t0 = tci_read_r8(regs, &tb_ptr);
++            t1 = tci_read_r(regs, &tb_ptr);
++            t2 = tci_read_s32(&tb_ptr);
++            *(uint8_t *)(t1 + t2) = t0;
++            break;
++        case INDEX_op_st16_i32:
++            t0 = tci_read_r16(regs, &tb_ptr);
++            t1 = tci_read_r(regs, &tb_ptr);
++            t2 = tci_read_s32(&tb_ptr);
++            *(uint16_t *)(t1 + t2) = t0;
++            break;
++        case INDEX_op_st_i32:
++            t0 = tci_read_r32(regs, &tb_ptr);
++            t1 = tci_read_r(regs, &tb_ptr);
++            t2 = tci_read_s32(&tb_ptr);
++            assert(t1 != sp_value || (int32_t)t2 < 0);
++            *(uint32_t *)(t1 + t2) = t0;
++            break;
++
++            /* Arithmetic operations (32 bit). */
++
++        case INDEX_op_add_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1 + t2);
++            break;
++        case INDEX_op_sub_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1 - t2);
++            break;
++        case INDEX_op_mul_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1 * t2);
++            break;
++#if TCG_TARGET_HAS_div_i32
++        case INDEX_op_div_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, (int32_t)t1 / (int32_t)t2);
++            break;
++        case INDEX_op_divu_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1 / t2);
++            break;
++        case INDEX_op_rem_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, (int32_t)t1 % (int32_t)t2);
++            break;
++        case INDEX_op_remu_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1 % t2);
++            break;
++#elif TCG_TARGET_HAS_div2_i32
++        case INDEX_op_div2_i32:
++        case INDEX_op_divu2_i32:
++            TODO();
++            break;
++#endif
++        case INDEX_op_and_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1 & t2);
++            break;
++        case INDEX_op_or_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1 | t2);
++            break;
++        case INDEX_op_xor_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1 ^ t2);
++            break;
++
++            /* Shift/rotate operations (32 bit). */
++
++        case INDEX_op_shl_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1 << (t2 & 31));
++            break;
++        case INDEX_op_shr_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1 >> (t2 & 31));
++            break;
++        case INDEX_op_sar_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, ((int32_t)t1 >> (t2 & 31)));
++            break;
++#if TCG_TARGET_HAS_rot_i32
++        case INDEX_op_rotl_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, rol32(t1, t2 & 31));
++            break;
++        case INDEX_op_rotr_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            t2 = tci_read_ri32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, ror32(t1, t2 & 31));
++            break;
++#endif
++#if TCG_TARGET_HAS_deposit_i32
++        case INDEX_op_deposit_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r32(regs, &tb_ptr);
++            t2 = tci_read_r32(regs, &tb_ptr);
++            tmp16 = *tb_ptr++;
++            tmp8 = *tb_ptr++;
++            tmp32 = (((1 << tmp8) - 1) << tmp16);
++            tci_write_reg32(regs, t0, (t1 & ~tmp32) | ((t2 << tmp16) & tmp32));
++            break;
++#endif
++        case INDEX_op_brcond_i32:
++            t0 = tci_read_r32(regs, &tb_ptr);
++            t1 = tci_read_ri32(regs, &tb_ptr);
++            condition = *tb_ptr++;
++            label = tci_read_label(&tb_ptr);
++            if (tci_compare32(t0, t1, condition)) {
++                assert(tb_ptr == old_code_ptr + op_size);
++                tb_ptr = (uint8_t *)label;
++                continue;
++            }
++            break;
++#if TCG_TARGET_REG_BITS == 32
++        case INDEX_op_add2_i32:
++            t0 = *tb_ptr++;
++            t1 = *tb_ptr++;
++            tmp64 = tci_read_r64(regs, &tb_ptr);
++            tmp64 += tci_read_r64(regs, &tb_ptr);
++            tci_write_reg64(regs, t1, t0, tmp64);
++            break;
++        case INDEX_op_sub2_i32:
++            t0 = *tb_ptr++;
++            t1 = *tb_ptr++;
++            tmp64 = tci_read_r64(regs, &tb_ptr);
++            tmp64 -= tci_read_r64(regs, &tb_ptr);
++            tci_write_reg64(regs, t1, t0, tmp64);
++            break;
++        case INDEX_op_brcond2_i32:
++            tmp64 = tci_read_r64(regs, &tb_ptr);
++            v64 = tci_read_ri64(regs, &tb_ptr);
++            condition = *tb_ptr++;
++            label = tci_read_label(&tb_ptr);
++            if (tci_compare64(tmp64, v64, condition)) {
++                assert(tb_ptr == old_code_ptr + op_size);
++                tb_ptr = (uint8_t *)label;
++                continue;
++            }
++            break;
++        case INDEX_op_mulu2_i32:
++            t0 = *tb_ptr++;
++            t1 = *tb_ptr++;
++            t2 = tci_read_r32(regs, &tb_ptr);
++            tmp64 = tci_read_r32(regs, &tb_ptr);
++            tci_write_reg64(regs, t1, t0, t2 * tmp64);
++            break;
++#endif /* TCG_TARGET_REG_BITS == 32 */
++#if TCG_TARGET_HAS_ext8s_i32
++        case INDEX_op_ext8s_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r8s(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1);
++            break;
++#endif
++#if TCG_TARGET_HAS_ext16s_i32
++        case INDEX_op_ext16s_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r16s(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1);
++            break;
++#endif
++#if TCG_TARGET_HAS_ext8u_i32
++        case INDEX_op_ext8u_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r8(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1);
++            break;
++#endif
++#if TCG_TARGET_HAS_ext16u_i32
++        case INDEX_op_ext16u_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r16(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, t1);
++            break;
++#endif
++#if TCG_TARGET_HAS_bswap16_i32
++        case INDEX_op_bswap16_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r16(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, bswap16(t1));
++            break;
++#endif
++#if TCG_TARGET_HAS_bswap32_i32
++        case INDEX_op_bswap32_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, bswap32(t1));
++            break;
++#endif
++#if TCG_TARGET_HAS_not_i32
++        case INDEX_op_not_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, ~t1);
++            break;
++#endif
++#if TCG_TARGET_HAS_neg_i32
++        case INDEX_op_neg_i32:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r32(regs, &tb_ptr);
++            tci_write_reg32(regs, t0, -t1);
++            break;
++#endif
++#if TCG_TARGET_REG_BITS == 64
++        case INDEX_op_mov_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1);
++            break;
++        case INDEX_op_movi_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_i64(&tb_ptr);
++            tci_write_reg64(regs, t0, t1);
++            break;
++
++            /* Load/store operations (64 bit). */
++
++        case INDEX_op_ld8u_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r(regs, &tb_ptr);
++            t2 = tci_read_s32(&tb_ptr);
++            tci_write_reg8(regs, t0, *(uint8_t *)(t1 + t2));
++            break;
++        case INDEX_op_ld8s_i64:
++        case INDEX_op_ld16u_i64:
++        case INDEX_op_ld16s_i64:
++            TODO();
++            break;
++        case INDEX_op_ld32u_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r(regs, &tb_ptr);
++            t2 = tci_read_s32(&tb_ptr);
++            tci_write_reg32(regs, t0, *(uint32_t *)(t1 + t2));
++            break;
++        case INDEX_op_ld32s_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r(regs, &tb_ptr);
++            t2 = tci_read_s32(&tb_ptr);
++            tci_write_reg32s(regs, t0, *(int32_t *)(t1 + t2));
++            break;
++        case INDEX_op_ld_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r(regs, &tb_ptr);
++            t2 = tci_read_s32(&tb_ptr);
++            tci_write_reg64(regs, t0, *(uint64_t *)(t1 + t2));
++            break;
++        case INDEX_op_st8_i64:
++            t0 = tci_read_r8(regs, &tb_ptr);
++            t1 = tci_read_r(regs, &tb_ptr);
++            t2 = tci_read_s32(&tb_ptr);
++            *(uint8_t *)(t1 + t2) = t0;
++            break;
++        case INDEX_op_st16_i64:
++            t0 = tci_read_r16(regs, &tb_ptr);
++            t1 = tci_read_r(regs, &tb_ptr);
++            t2 = tci_read_s32(&tb_ptr);
++            *(uint16_t *)(t1 + t2) = t0;
++            break;
++        case INDEX_op_st32_i64:
++            t0 = tci_read_r32(regs, &tb_ptr);
++            t1 = tci_read_r(regs, &tb_ptr);
++            t2 = tci_read_s32(&tb_ptr);
++            *(uint32_t *)(t1 + t2) = t0;
++            break;
++        case INDEX_op_st_i64:
++            t0 = tci_read_r64(regs, &tb_ptr);
++            t1 = tci_read_r(regs, &tb_ptr);
++            t2 = tci_read_s32(&tb_ptr);
++            assert(t1 != sp_value || (int32_t)t2 < 0);
++            *(uint64_t *)(t1 + t2) = t0;
++            break;
++
++            /* Arithmetic operations (64 bit). */
++
++        case INDEX_op_add_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri64(regs, &tb_ptr);
++            t2 = tci_read_ri64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1 + t2);
++            break;
++        case INDEX_op_sub_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri64(regs, &tb_ptr);
++            t2 = tci_read_ri64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1 - t2);
++            break;
++        case INDEX_op_mul_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri64(regs, &tb_ptr);
++            t2 = tci_read_ri64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1 * t2);
++            break;
++#if TCG_TARGET_HAS_div_i64
++        case INDEX_op_div_i64:
++        case INDEX_op_divu_i64:
++        case INDEX_op_rem_i64:
++        case INDEX_op_remu_i64:
++            TODO();
++            break;
++#elif TCG_TARGET_HAS_div2_i64
++        case INDEX_op_div2_i64:
++        case INDEX_op_divu2_i64:
++            TODO();
++            break;
++#endif
++        case INDEX_op_and_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri64(regs, &tb_ptr);
++            t2 = tci_read_ri64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1 & t2);
++            break;
++        case INDEX_op_or_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri64(regs, &tb_ptr);
++            t2 = tci_read_ri64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1 | t2);
++            break;
++        case INDEX_op_xor_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri64(regs, &tb_ptr);
++            t2 = tci_read_ri64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1 ^ t2);
++            break;
++
++            /* Shift/rotate operations (64 bit). */
++
++        case INDEX_op_shl_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri64(regs, &tb_ptr);
++            t2 = tci_read_ri64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1 << (t2 & 63));
++            break;
++        case INDEX_op_shr_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri64(regs, &tb_ptr);
++            t2 = tci_read_ri64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1 >> (t2 & 63));
++            break;
++        case INDEX_op_sar_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri64(regs, &tb_ptr);
++            t2 = tci_read_ri64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, ((int64_t)t1 >> (t2 & 63)));
++            break;
++#if TCG_TARGET_HAS_rot_i64
++        case INDEX_op_rotl_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri64(regs, &tb_ptr);
++            t2 = tci_read_ri64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, rol64(t1, t2 & 63));
++            break;
++        case INDEX_op_rotr_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_ri64(regs, &tb_ptr);
++            t2 = tci_read_ri64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, ror64(t1, t2 & 63));
++            break;
++#endif
++#if TCG_TARGET_HAS_deposit_i64
++        case INDEX_op_deposit_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r64(regs, &tb_ptr);
++            t2 = tci_read_r64(regs, &tb_ptr);
++            tmp16 = *tb_ptr++;
++            tmp8 = *tb_ptr++;
++            tmp64 = (((1ULL << tmp8) - 1) << tmp16);
++            tci_write_reg64(regs, t0, (t1 & ~tmp64) | ((t2 << tmp16) & tmp64));
++            break;
++#endif
++        case INDEX_op_brcond_i64:
++            t0 = tci_read_r64(regs, &tb_ptr);
++            t1 = tci_read_ri64(regs, &tb_ptr);
++            condition = *tb_ptr++;
++            label = tci_read_label(&tb_ptr);
++            if (tci_compare64(t0, t1, condition)) {
++                assert(tb_ptr == old_code_ptr + op_size);
++                tb_ptr = (uint8_t *)label;
++                continue;
++            }
++            break;
++#if TCG_TARGET_HAS_ext8u_i64
++        case INDEX_op_ext8u_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r8(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1);
++            break;
++#endif
++#if TCG_TARGET_HAS_ext8s_i64
++        case INDEX_op_ext8s_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r8s(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1);
++            break;
++#endif
++#if TCG_TARGET_HAS_ext16s_i64
++        case INDEX_op_ext16s_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r16s(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1);
++            break;
++#endif
++#if TCG_TARGET_HAS_ext16u_i64
++        case INDEX_op_ext16u_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r16(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1);
++            break;
++#endif
++#if TCG_TARGET_HAS_ext32s_i64
++        case INDEX_op_ext32s_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r32s(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1);
++            break;
++#endif
++#if TCG_TARGET_HAS_ext32u_i64
++        case INDEX_op_ext32u_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r32(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, t1);
++            break;
++#endif
++#if TCG_TARGET_HAS_bswap16_i64
++        case INDEX_op_bswap16_i64:
++            TODO();
++            t0 = *tb_ptr++;
++            t1 = tci_read_r16(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, bswap16(t1));
++            break;
++#endif
++#if TCG_TARGET_HAS_bswap32_i64
++        case INDEX_op_bswap32_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r32(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, bswap32(t1));
++            break;
++#endif
++#if TCG_TARGET_HAS_bswap64_i64
++        case INDEX_op_bswap64_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, bswap64(t1));
++            break;
++#endif
++#if TCG_TARGET_HAS_not_i64
++        case INDEX_op_not_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, ~t1);
++            break;
++#endif
++#if TCG_TARGET_HAS_neg_i64
++        case INDEX_op_neg_i64:
++            t0 = *tb_ptr++;
++            t1 = tci_read_r64(regs, &tb_ptr);
++            tci_write_reg64(regs, t0, -t1);
++            break;
++#endif
++#endif /* TCG_TARGET_REG_BITS == 64 */
++
++            /* QEMU specific operations. */
++
++#if TARGET_LONG_BITS > TCG_TARGET_REG_BITS
++        case INDEX_op_debug_insn_start:
++            TODO();
++            break;
++#else
++        case INDEX_op_debug_insn_start:
++            TODO();
++            break;
++#endif
++        case INDEX_op_exit_tb:
++            next_tb = *(uint64_t *)tb_ptr;
++            goto exit;
++            break;
++        case INDEX_op_goto_tb:
++            t0 = tci_read_i32(&tb_ptr);
++            assert(tb_ptr == old_code_ptr + op_size);
++            tb_ptr += (int32_t)t0;
++            continue;
++        case INDEX_op_qemu_ld_i32:
++            t0 = *tb_ptr++;
++            taddr = tci_read_ulong(regs, &tb_ptr);
++            memop = tci_read_i(&tb_ptr);
++            switch (memop) {
++            case MO_UB:
++                tmp32 = qemu_ld_ub;
++                break;
++            case MO_SB:
++                tmp32 = (int8_t)qemu_ld_ub;
++                break;
++            case MO_LEUW:
++                tmp32 = qemu_ld_leuw;
++                break;
++            case MO_LESW:
++                tmp32 = (int16_t)qemu_ld_leuw;
++                break;
++            case MO_LEUL:
++                tmp32 = qemu_ld_leul;
++                break;
++            case MO_BEUW:
++                tmp32 = qemu_ld_beuw;
++                break;
++            case MO_BESW:
++                tmp32 = (int16_t)qemu_ld_beuw;
++                break;
++            case MO_BEUL:
++                tmp32 = qemu_ld_beul;
++                break;
++            default:
++                tcg_abort();
++            }
++            tci_write_reg(regs, t0, tmp32);
++            break;
++        case INDEX_op_qemu_ld_i64:
++            t0 = *tb_ptr++;
++            if (TCG_TARGET_REG_BITS == 32) {
++                t1 = *tb_ptr++;
++            }
++            taddr = tci_read_ulong(regs, &tb_ptr);
++            memop = tci_read_i(&tb_ptr);
++            switch (memop) {
++            case MO_UB:
++                tmp64 = qemu_ld_ub;
++                break;
++            case MO_SB:
++                tmp64 = (int8_t)qemu_ld_ub;
++                break;
++            case MO_LEUW:
++                tmp64 = qemu_ld_leuw;
++                break;
++            case MO_LESW:
++                tmp64 = (int16_t)qemu_ld_leuw;
++                break;
++            case MO_LEUL:
++                tmp64 = qemu_ld_leul;
++                break;
++            case MO_LESL:
++                tmp64 = (int32_t)qemu_ld_leul;
++                break;
++            case MO_LEQ:
++                tmp64 = qemu_ld_leq;
++                break;
++            case MO_BEUW:
++                tmp64 = qemu_ld_beuw;
++                break;
++            case MO_BESW:
++                tmp64 = (int16_t)qemu_ld_beuw;
++                break;
++            case MO_BEUL:
++                tmp64 = qemu_ld_beul;
++                break;
++            case MO_BESL:
++                tmp64 = (int32_t)qemu_ld_beul;
++                break;
++            case MO_BEQ:
++                tmp64 = qemu_ld_beq;
++                break;
++            default:
++                tcg_abort();
++            }
++            tci_write_reg(regs, t0, tmp64);
++            if (TCG_TARGET_REG_BITS == 32) {
++                tci_write_reg(regs, t1, tmp64 >> 32);
++            }
++            break;
++        case INDEX_op_qemu_st_i32:
++            t0 = tci_read_r(regs, &tb_ptr);
++            taddr = tci_read_ulong(regs, &tb_ptr);
++            memop = tci_read_i(&tb_ptr);
++            switch (memop) {
++            case MO_UB:
++                qemu_st_b(t0);
++                break;
++            case MO_LEUW:
++                qemu_st_lew(t0);
++                break;
++            case MO_LEUL:
++                qemu_st_lel(t0);
++                break;
++            case MO_BEUW:
++                qemu_st_bew(t0);
++                break;
++            case MO_BEUL:
++                qemu_st_bel(t0);
++                break;
++            default:
++                tcg_abort();
++            }
++            break;
++        case INDEX_op_qemu_st_i64:
++            tmp64 = tci_read_r64(regs, &tb_ptr);
++            taddr = tci_read_ulong(regs, &tb_ptr);
++            memop = tci_read_i(&tb_ptr);
++            switch (memop) {
++            case MO_UB:
++                qemu_st_b(tmp64);
++                break;
++            case MO_LEUW:
++                qemu_st_lew(tmp64);
++                break;
++            case MO_LEUL:
++                qemu_st_lel(tmp64);
++                break;
++            case MO_LEQ:
++                qemu_st_leq(tmp64);
++                break;
++            case MO_BEUW:
++                qemu_st_bew(tmp64);
++                break;
++            case MO_BEUL:
++                qemu_st_bel(tmp64);
++                break;
++            case MO_BEQ:
++                qemu_st_beq(tmp64);
++                break;
++            default:
++                tcg_abort();
++            }
++            break;
++        default:
++            TODO();
++            break;
++        }
++        assert(tb_ptr == old_code_ptr + op_size);
++    }
++exit:
++    return next_tb;
++}
++
++#endif /* CONFIG_TCG_INTERPRETER */
+diff --git a/src/qemu/x86_64.h b/src/qemu/x86_64.h
+index 9b05bec..8e698eb 100644
+--- a/src/qemu/x86_64.h
++++ b/src/qemu/x86_64.h
+@@ -1,6 +1,9 @@
+ /* Autogen header for Unicorn Engine - DONOT MODIFY */
+ #ifndef UNICORN_AUTOGEN_X86_64_H
+ #define UNICORN_AUTOGEN_X86_64_H
++#ifndef UNICORN_ARCH_POSTFIX
++#define UNICORN_ARCH_POSTFIX _x86_64
++#endif
+ #define arm_release arm_release_x86_64
+ #define aarch64_tb_set_jmp_target aarch64_tb_set_jmp_target_x86_64
+ #define ppc_tb_set_jmp_target ppc_tb_set_jmp_target_x86_64

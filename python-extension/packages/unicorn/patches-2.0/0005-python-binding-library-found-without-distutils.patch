@@ -1,0 +1,48 @@
+Python binding: the library found without distutils and pkg_resources.
+
+The binding of Unicorn 2.0 imports distutils.sysconfig and pkg_resources to make the list of
+places it looks for libunicorn.so.2 in: distutils is gone from Python 3.12 on, and pkg_resources
+is setuptools', which a Python need not have (the guest's has not) and whose newer releases have
+it no more — so `import unicorn` fails there with a ModuleNotFoundError, before any of it is used.
+The same places without them: the purelib path from sysconfig (what get_python_lib() gave), and
+not pkg_resources' resource_filename(__name__, 'lib'), which for a package installed as files is
+the folder beside the module, the next entry.
+
+diff --git a/unicorn/unicorn.py b/unicorn/unicorn.py
+index a022965..bdc42be 100644
+--- a/unicorn/unicorn.py
++++ b/unicorn/unicorn.py
+@@ -2,13 +2,12 @@
+ from __future__ import annotations
+ import ctypes
+ import ctypes.util
+-import distutils.sysconfig
+ from functools import wraps
+ from typing import Any, Callable, List, Tuple, Union
+-import pkg_resources
+ import inspect
+ import os.path
+ import sys
++import sysconfig
+ import weakref
+ import functools
+ from collections import namedtuple
+@@ -75,17 +74,15 @@ _uc = None
+ 
+ # Loading attempts, in order
+ # - user-provided environment variable
+-# - pkg_resources can get us the path to the local libraries
+ # - we can get the path to the local libraries by parsing our filename
+ # - global load
+ # - python's lib directory
+ # - last-gasp attempt at some hardcoded paths on darwin and linux
+ 
+ _path_list = [os.getenv('LIBUNICORN_PATH', None),
+-              pkg_resources.resource_filename(__name__, 'lib'),
+               os.path.join(os.path.split(__file__)[0], 'lib'),
+               '',
+-              distutils.sysconfig.get_python_lib(),
++              sysconfig.get_path('purelib'),
+               "/usr/local/lib/" if sys.platform == 'darwin' else '/usr/lib64',
+               os.getenv('PATH', '')]
+ 

@@ -1,0 +1,50 @@
+Python binding: uc_hook_add and uc_ctl called as variadic functions.
+
+ctypes calls a function as variadic (ffi_prep_cif_var) only when it is given more arguments than
+its argtypes name; the binding called both with none for most hooks and controls, which ctypes
+makes as a call of a function of fixed parameters. Natively that is the same call; on WebAssembly
+a variadic function also takes where its variable arguments are, so is of another type, and the
+call traps. One argument the function does not read is added when there are none.
+
+diff --git a/unicorn/unicorn_py3/unicorn.py b/unicorn/unicorn_py3/unicorn.py
+index 6f50eab..6dc64e9 100644
+--- a/unicorn/unicorn_py3/unicorn.py
++++ b/unicorn/unicorn_py3/unicorn.py
+@@ -234,6 +234,19 @@ uclib = __load_uc_lib()
+ __set_lib_prototypes(uclib)
+ 
+ 
++def _variadic(args: tuple) -> tuple:
++    """The variable arguments of a call of uc_hook_add or uc_ctl, at least one.
++
++    ctypes calls a function as variadic (libffi's ffi_prep_cif_var) only when it is given more
++    arguments than its argtypes name; a call with none is made as to a function of fixed
++    parameters. Natively that is the same call; on WebAssembly a variadic function takes, after
++    its fixed parameters, where its variable arguments are, and so is of another type, which a
++    call through a pointer is checked against. The one added is not read (uc_hook_add reads
++    them by hook type, uc_ctl as many as its code says).
++    """
++    return args or (ctypes.c_int(0),)
++
++
+ # native hook callback signatures
+ HOOK_INTR_CFUNC         = ctypes.CFUNCTYPE(None, uc_engine, ctypes.c_uint32, ctypes.c_void_p)
+ HOOK_CODE_CFUNC         = ctypes.CFUNCTYPE(None, uc_engine, ctypes.c_uint64, ctypes.c_uint32, ctypes.c_void_p)
+@@ -1016,7 +1029,7 @@ class Uc(RegStateManager):
+             ctypes.cast(dummy, ctypes.c_void_p),
+             ctypes.c_uint64(begin),
+             ctypes.c_uint64(end),
+-            *args
++            *_variadic(args)
+         )
+ 
+         if status != uc.UC_ERR_OK:
+@@ -1233,7 +1246,7 @@ class Uc(RegStateManager):
+     def ctl(self, ctl: int, op: int, *args):
+         code = Uc.__ctl_encode(ctl, op, len(args))
+ 
+-        status = uclib.uc_ctl(self._uch, code, *args)
++        status = uclib.uc_ctl(self._uch, code, *_variadic(args))
+ 
+         if status != uc.UC_ERR_OK:
+             raise UcError(status)

@@ -1,0 +1,90 @@
+Python binding: uc_hook_add called as the variadic function it is.
+
+ctypes calls a function as variadic (ffi_prep_cif_var) only when it has argtypes and is given more
+arguments than they name; Unicorn 1's binding set none for uc_hook_add, so ctypes called it as a
+function of fixed parameters, the types of the arguments given, and with none after `end` for
+most hooks. Natively that is the same call. On WebAssembly a variadic function takes, after its
+fixed parameters, where its variable arguments are: the instruction number of a UC_HOOK_INSN hook
+was taken for that address, and uc_hook_add read the instruction from memory there
+(UC_ERR_HOOK for every IN, OUT and SYSCALL hook). uc_hook_add now has its fixed parameters'
+types, as Unicorn 2's binding gives them, and one argument it does not read is added when there
+are none.
+
+diff --git a/unicorn/unicorn.py b/unicorn/unicorn.py
+index 5fe77ee..f2724b6 100644
+--- a/unicorn/unicorn.py
++++ b/unicorn/unicorn.py
+@@ -99,6 +99,14 @@ else:
+ 
+ __version__ = "%u.%u.%u" % (uc.UC_VERSION_MAJOR, uc.UC_VERSION_MINOR, uc.UC_VERSION_EXTRA)
+ 
++# The variable argument of a call of uc_hook_add that has none. ctypes calls a function as
++# variadic (libffi's ffi_prep_cif_var) only when it is given more arguments than its argtypes
++# name; a call with none is made as to a function of fixed parameters. Natively that is the same
++# call; on WebAssembly a variadic function takes, after its fixed parameters, where its variable
++# arguments are, and so is of another type, which a call through a pointer is checked against.
++# This one is not read (uc_hook_add reads them by hook type).
++_UNREAD_VARARG = ctypes.c_int(0)
++
+ # setup all the function prototype
+ def _setup_prototype(lib, fname, restype, *argtypes):
+     getattr(lib, fname).restype = restype
+@@ -144,8 +152,13 @@ _setup_prototype(_uc, "uc_context_free", ucerr, uc_context)
+ _setup_prototype(_uc, "uc_mem_regions", ucerr, uc_engine, ctypes.POINTER(ctypes.POINTER(_uc_mem_region)), ctypes.POINTER(ctypes.c_uint32))
+ 
+ # uc_hook_add is special due to variable number of arguments
+-_uc.uc_hook_add = _uc.uc_hook_add
+-_uc.uc_hook_add.restype = ucerr
++# (its fixed parameters' types, as Unicorn 2's binding has them: with argtypes, ctypes calls it as
++# the variadic function it is when given more arguments; with none it would call it as one of
++# fixed parameters, the types of the arguments given — on WebAssembly a variadic function takes
++# where its variable arguments are after its fixed parameters, and an instruction number of
++# UC_HOOK_INSN passed so would be taken for that address)
++_setup_prototype(_uc, "uc_hook_add", ucerr, uc_engine, ctypes.POINTER(uc_hook_h), ctypes.c_int, ctypes.c_void_p,
++                 ctypes.c_void_p, ctypes.c_uint64, ctypes.c_uint64)
+ 
+ UC_HOOK_CODE_CB = ctypes.CFUNCTYPE(None, uc_engine, ctypes.c_uint64, ctypes.c_size_t, ctypes.c_void_p)
+ UC_HOOK_INSN_INVALID_CB = ctypes.CFUNCTYPE(ctypes.c_bool, uc_engine, ctypes.c_void_p)
+@@ -575,14 +588,14 @@ class Uc(object):
+             status = _uc.uc_hook_add(
+                 self._uch, ctypes.byref(_h2), htype, cb,
+                 ctypes.cast(self._callback_count, ctypes.c_void_p),
+-                ctypes.c_uint64(begin), ctypes.c_uint64(end)
++                ctypes.c_uint64(begin), ctypes.c_uint64(end), _UNREAD_VARARG
+             )
+         elif htype == uc.UC_HOOK_INSN_INVALID:
+             cb = ctypes.cast(UC_HOOK_INSN_INVALID_CB(self._hook_insn_invalid_cb), UC_HOOK_INSN_INVALID_CB)
+             status = _uc.uc_hook_add(
+                 self._uch, ctypes.byref(_h2), htype, cb,
+                 ctypes.cast(self._callback_count, ctypes.c_void_p),
+-                ctypes.c_uint64(begin), ctypes.c_uint64(end)
++                ctypes.c_uint64(begin), ctypes.c_uint64(end), _UNREAD_VARARG
+             )
+         else:
+             if htype in (uc.UC_HOOK_BLOCK, uc.UC_HOOK_CODE):
+@@ -592,7 +605,7 @@ class Uc(object):
+                 status = _uc.uc_hook_add(
+                     self._uch, ctypes.byref(_h2), htype, cb,
+                     ctypes.cast(self._callback_count, ctypes.c_void_p),
+-                    ctypes.c_uint64(begin), ctypes.c_uint64(end)
++                    ctypes.c_uint64(begin), ctypes.c_uint64(end), _UNREAD_VARARG
+                 )
+             elif htype & (uc.UC_HOOK_MEM_READ_UNMAPPED |
+                           uc.UC_HOOK_MEM_WRITE_UNMAPPED |
+@@ -604,14 +617,14 @@ class Uc(object):
+                 status = _uc.uc_hook_add(
+                     self._uch, ctypes.byref(_h2), htype, cb,
+                     ctypes.cast(self._callback_count, ctypes.c_void_p),
+-                    ctypes.c_uint64(begin), ctypes.c_uint64(end)
++                    ctypes.c_uint64(begin), ctypes.c_uint64(end), _UNREAD_VARARG
+                 )
+             else:
+                 cb = ctypes.cast(UC_HOOK_MEM_ACCESS_CB(self._hook_mem_access_cb), UC_HOOK_MEM_ACCESS_CB)
+                 status = _uc.uc_hook_add(
+                     self._uch, ctypes.byref(_h2), htype, cb,
+                     ctypes.cast(self._callback_count, ctypes.c_void_p),
+-                    ctypes.c_uint64(begin), ctypes.c_uint64(end)
++                    ctypes.c_uint64(begin), ctypes.c_uint64(end), _UNREAD_VARARG
+                 )
+ 
+         # save the ctype function so gc will leave it alone.

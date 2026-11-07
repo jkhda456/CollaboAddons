@@ -1,0 +1,37 @@
+version (1, 0) (1, 0)
+supported ['arm', 'arm64', 'mips', 'x86', 'sparc', 'm68k']
+x86-64 ['0x27f80ddaa1ba7878', '0x257bf', '0x70f95987', '0x3d', '0x27f80ddb12b3d1ff', '0xf4243', '0x27f80ddb12b3d1ff', '0x2468000', '0x4']
+x86-32 ['0xca85fd75', '0x2', '0x0']
+x86-16 ['0x3523', '0x1']
+sample_x86 0x1235 0x788f 0x112233445566778899aabbccddeeff
+arm ['0x13ba', '0x2d9e2', '0x699164', '0xc46994d7', '0x0']
+thumb ['0x4fb', '0x27d8', '0xd8270000']
+arm64 ['0x533163ef0321e5', '0x151b801c2a67', '0x1ee', '0x79b0e', '0x70d9e00000000000', '0x3f0', '0x7e2']
+mipsel ['0x13ba', '0x13ba', '0x0', '0x13ba', '0x9dd0']
+sample_mips ['0x77df']
+sample_mips ['0x77df']
+sparc ['0x13ba', '0x13ba0', '0x1281a']
+m68k ['0x13ba', '0x9dd0']
+hooks 0x1122334455667789
+   ('block', '0x400000', 32)
+   ('code', '0x400000', 10)
+   ('code', '0x40000a', 8)
+   ('mem', 17, '0x401000', 8, '0x1122334455667788')
+   ('code', '0x400012', 8)
+   ('mem', 16, '0x401000', 8, '0x0')
+   ('code', '0x40001a', 4)
+   ('code', '0x40001e', 2)
+   ('block', '0x400020', 1)
+   ('code', '0x400020', 1)
+unmapped [(19, '0x200000', 4)] 42 42
+protected 12 Write to write-protected memory (UC_ERR_WRITE_PROT)
+regions [('0x10000', '0x10fff', 7), ('0x200000', '0x200fff', 1)]
+unmapped read Invalid memory read (UC_ERR_READ_UNMAPPED)
+x86 events [('intr', 128), ('in', 16, 4), ('out', 18, 1, '0xaa')] 0x55aa
+x86-64 events [('syscall', 60)]
+invalid ('invalid', '0x10000') Invalid instruction (UC_ERR_INSN_INVALID)
+count 0x10010 100 99
+restored 0x0 0 0
+until 0x10014 5050 0 1024
+errors ['OK (UC_ERR_OK)', 'No memory available or memory not present (UC_ERR_NOMEM)', 'Invalid memory read (UC_ERR_READ_UNMAPPED)', 'Fetch from non-executable memory (UC_ERR_FETCH_PROT)', 'Invalid instruction (UC_ERR_INSN_INVALID)']
+done

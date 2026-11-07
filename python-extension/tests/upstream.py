@@ -10,7 +10,8 @@ what cannot work in the guest, each with its reason); any other is a finding. Th
 tests/run.sh compare with the wheels; these cover what the packages test themselves — it is how
 the guest's traps of mistyped methods were found (tools/fpcast-scan.py now finds them at build).
 
-    python3 tests/upstream.py [numpy|pillow|lxml|cffi|cryptography|libffi|rpds-py|jsonschema|referencing ...]
+    python3 tests/upstream.py [numpy|pillow|lxml|cffi|cryptography|libffi|ctypes|unicorn|unicorn-regress|rpds-py|
+                               jsonschema|referencing ...]
                                                                        (tests/run.sh --upstream)
 
 Same guest as tests/test_guest.py (COLLABO_RUNTIME, PYEXT_CPIO, PYEXT_ENGINE). A suite takes a few
@@ -156,6 +157,28 @@ for t in bin/*; do
 done
 echo "$failed failed, $passed passed in $(( $(date +%s) - start ))s"
 '''
+# Unicorn's unit tests (tests/unit, C with acutest), built by prepare() as programs of the guest
+# against the package's archives; each test run on its own (acutest would fork a child for each:
+# --no-exec), so that one that traps ends only itself; reported as pytest reports.
+UNICORN_RUNNER = r'''cd /tmp && passed=0 failed=0 start=$(date +%s)
+for t in /upstream/unicorn-unit/test_*; do
+  n=${t##*/}
+  for c in $($t --list | sed -n 's/^  *\(test_[A-Za-z0-9_]*\).*/\1/p'); do
+    timeout 300 $t --no-exec --no-summary "$c" > /dev/null 2>&1; rc=$?
+    if [ $rc != 0 ]; then echo "FAILED $n::$c - exit $rc"; failed=$((failed + 1)); else passed=$((passed + 1)); fi
+  done
+done
+echo "$failed failed, $passed passed in $(( $(date +%s) - start ))s"
+'''
+# its Python regression tests (tests/regress/*.py, each a script of its own), against the package
+UNICORN_REGRESS_RUNNER = r'''cd /upstream/unicorn-regress && passed=0 failed=0 start=$(date +%s)
+for t in *.py; do
+  [ "$t" = regress.py ] && continue
+  timeout 300 python3 "$t" > /tmp/out.txt 2>&1; rc=$?
+  if [ $rc != 0 ]; then echo "FAILED regress/$t - $(tail -1 /tmp/out.txt | cut -c1-200)"; failed=$((failed + 1)); else passed=$((passed + 1)); fi
+done
+echo "$failed failed, $passed passed in $(( $(date +%s) - start ))s"
+'''
 SUITES = {
     # numpy's tests, copied into the installed package, so that they import it as upstream intends
     "numpy": ("numpy", f"""
@@ -191,6 +214,13 @@ SUITES = {
             COLUMNS=300 python3 -m pytest -p no:cacheprovider -q --tb=no -rfE --continue-on-collection-errors \\
             -o addopts="" --ignore=tests/bench tests"""),
     "libffi": ("libffi", LIBFFI_RUNNER),
+    "unicorn": ("unicorn", UNICORN_RUNNER),
+    "unicorn-regress": ("unicorn-regress", UNICORN_REGRESS_RUNNER),
+    # CPython's test_ctypes (the python step's source), against the add-on's _ctypes, with its
+    # _ctypes_test; on after a test that ends the interpreter (a call of a function as another type)
+    "ctypes": ("ctypes", """
+        cd /upstream/cpython && PYTHONPATH=/upstream/cpython:/upstream/site COLUMNS=300 \\
+            python3 /upstream/resilient-pytest.py -- test/test_ctypes"""),
     # rpds-py's tests/, against the installed package
     "rpds-py": ("rpds-py", """
         cp -r /upstream/rpds-py /tmp/rpds && cd /tmp/rpds && PYTHONPATH=/upstream/site COLUMNS=300 \\
@@ -324,7 +354,71 @@ def prepare():
     os.chmod(os.path.join(U, "bin-cffi/cc"), 0o755)
     build_cffi_testownlib()
     build_libffi_tests()
+    copy_cpython_tests()
+    build_unicorn_tests()
     subprocess.run(["chmod", "-R", "a+rX", U], check=True)
+
+
+def build_unicorn_tests():
+    """Unicorn's unit tests built for the guest (build/upstream/unicorn-unit), as programs linked with
+    the package's archives (build/unicorn/build: the library is a side module in the image, which a
+    program cannot link to), and its regression tests' folder (build/upstream/unicorn-regress)."""
+    srcs = sorted(glob.glob(os.path.join(A, "build/unicorn/src/unicorn-*/src")))
+    build = os.path.join(A, "build/unicorn/build")
+    lib = os.path.join(build, "libunicorn_static.a")
+    if not srcs or not os.path.exists(lib):
+        sys.exit("no unicorn build: build the add-on's unicorn first (build.sh unicorn)")
+    src = srcs[-1]
+    out = os.path.join(U, "unicorn-unit")
+    stamp = os.path.join(out, ".done")
+    if not (os.path.exists(stamp) and os.path.getmtime(stamp) > os.path.getmtime(lib)):
+        shutil.rmtree(out, ignore_errors=True)
+        os.makedirs(out)
+        # acutest runs each test in a fork()ed child, which the guest cannot: run with --no-exec, and
+        # fork declared for it to link
+        with open(os.path.join(out, "nofork.h"), "w") as f:
+            f.write("#include <sys/types.h>\npid_t acutest_fork(void);\n#define fork acutest_fork\n")
+        with open(os.path.join(out, "nofork.c"), "w") as f:
+            f.write("#include <errno.h>\n#include <sys/types.h>\npid_t acutest_fork(void) { errno = ENOSYS; return -1; }\n")
+        archives = [lib] + sorted(glob.glob(os.path.join(build, "lib*-softmmu.a"))) + [os.path.join(build, "libunicorn-common.a")]
+        env = dict(os.environ, WASM_LD=os.path.join(tg.ROOT, ".tools/rust-wasm/bin/wasm-ld"))
+        tests = sorted(glob.glob(os.path.join(src, "tests/unit/test_*.c")))
+        print(f"== unicorn's unit tests: {len(tests)} programs")
+        def one(t):
+            r = subprocess.run([os.path.join(A, "tools/wasm-pyext-cc"), "-O2", "-w", "-include", os.path.join(out, "nofork.h"),
+                                f"-I{src}/include", f"-I{src}/tests/unit", f"-I{build}", t, os.path.join(out, "nofork.c"),
+                                "-o", os.path.join(out, os.path.basename(t)[:-2]), *archives, "-lm"],
+                               env=env, capture_output=True, text=True)
+            if r.returncode:
+                sys.exit(f"{t}: does not build\n{r.stderr[-2000:]}")
+        with ThreadPoolExecutor(os.cpu_count()) as ex:
+            list(ex.map(one, tests))
+        for f in ("nofork.h", "nofork.c"):
+            os.remove(os.path.join(out, f))
+        open(stamp, "w").close()
+    regress = os.path.join(U, "unicorn-regress")
+    shutil.rmtree(regress, ignore_errors=True)
+    shutil.copytree(os.path.join(src, "tests/regress"), regress)
+
+
+def copy_cpython_tests():
+    """CPython's test_ctypes, with the test package's support modules (the image has no test
+    package), from the python step's source, and the add-on's _ctypes_test: build/upstream/cpython."""
+    lib = os.path.join(tg.ROOT, "python/src/Python-3.13.14/Lib")
+    built = os.path.join(A, "build/ctypes/test/_ctypes_test.cpython-313.so")
+    if not os.path.exists(built):
+        sys.exit("no _ctypes_test: build the add-on first (build.sh: stage ctypes)")
+    out = os.path.join(U, "cpython")
+    stamp = os.path.join(out, ".done")
+    if os.path.exists(stamp) and os.path.getmtime(stamp) > os.path.getmtime(built):
+        return
+    shutil.rmtree(out, ignore_errors=True)
+    os.makedirs(os.path.join(out, "test"))
+    shutil.copy(os.path.join(lib, "test/__init__.py"), os.path.join(out, "test"))
+    for d in ("support", "test_ctypes"):
+        shutil.copytree(os.path.join(lib, "test", d), os.path.join(out, "test", d))
+    shutil.copy(built, out)
+    open(stamp, "w").close()
 
 
 def build_cffi_testownlib():
@@ -412,7 +506,7 @@ def main():
         unknown = [f for f in failures if not any(s == suite and fnmatch.fnmatch(f, p) for s, p in patterns)]
         # (each of libffi's tests is a program of its own, and cffi's run on after a test that ends
         # the interpreter: there one that traps is one failed test)
-        trapped = suite not in ("libffi", "cffi") and ("trapped and was ended" in err or "nothing caught" in err)
+        trapped = suite not in ("libffi", "cffi", "ctypes", "unicorn") and ("trapped and was ended" in err or "nothing caught" in err)
         if trapped and suite in EXIT_TRAP_KNOWN and summary != "(no summary)":
             print(f"  (known: {suite}'s pytest trapped at its exit, after its summary: EXIT_TRAP_KNOWN)")
             trapped = False

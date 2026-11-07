@@ -1,0 +1,8 @@
+# The python-extension add-on (/usr/lib/python3.13/site-packages): a configure script that a build
+# started from Python runs reads the guest's config.site (the build-tools add-on's: the machine,
+# wasm32-unknown-linux-musl, and what the guest has not), whatever its --prefix. Without
+# CONFIG_SITE, autoconf looks only in $prefix/share, and pip's builds configure the libraries they
+# bundle with a prefix of their own (PyNaCl's libsodium: --prefix <its build folder>), where
+# config.guess, not knowing `uname -m` wasm, stops it ("cannot guess build type"). Set for this
+# process and what it starts, when the file is there and CONFIG_SITE is not set.
+import os; os.path.isfile("/usr/share/config.site") and os.environ.setdefault("CONFIG_SITE", "/usr/share/config.site")

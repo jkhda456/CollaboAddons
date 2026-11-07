@@ -15,7 +15,16 @@
 # Also cffi for the host CPython (build/cffi/host-site: cffi, a host _cffi_backend on a host
 # build of the same libffi, pycparser), for the packages whose build runs cffi (cryptography's
 # _openssl.c).
-# Run by ../../build.sh (packages/README.md); result: build/cffi/site.
+#
+# And cffi's earlier minor lines, built the same way, for pip in the guest (build/cffi/wheels:
+# ../../build.sh packs them as wheels, with the installed version, into /usr/share/python-wheels,
+# where /etc/pip.conf's find-links points). pip builds a package in an isolated environment with the
+# cffi its pyproject.toml asks for — zstandard's `cffi~=1.17` on Python < 3.14 — and would build
+# it from PyPI's sdist, which cannot work here: without patches/cffi, cffi allocates its callbacks
+# in executable memory (mmap, which the guest's C library does not declare) and calls variadic
+# functions as fixed ones (a trap here). One version per minor line, its last release, back to
+# 1.17, the first that builds for CPython 3.13 (1.16 calls _PyErr_WriteUnraisableMsg, gone in 3.13).
+# Run by ../../build.sh (packages/README.md); result: build/cffi/site, build/cffi/wheels.
 set -euo pipefail
 source "$PYEXT/tools/lib.sh"
 HERE="$PYEXT/packages/cffi"
@@ -92,3 +101,33 @@ if stage cffi "$SITE/.done" "$BP/src/.stamp" "$D/.done" "$HERE/build.sh" "$PYEXT
   "$HOSTPY" "$PYEXT/tools/dist-info.py" "$S" "$SITE" --license "libffi-LICENSE=$(echo "$BP"/deps-src/libffi-*/LICENSE)"
   touch "$SITE/.done"
 fi
+
+# ── cffi's earlier minor lines, for wheels: build/cffi/wheels/cffi-<version> ────────────────────
+# Each as the installed one, from its sdist with patches/cffi (which applies to 1.17 and 2.0 as it
+# is), on the same libffi. Its source stays (src-<version>): the fpcast stage compiles it again.
+OTHER=(cffi-1.17.1 cffi-2.0.0)
+for name in "${OTHER[@]}"; do
+  W="$BP/wheels/$name"
+  if stage "$name" "$W/.done" "$(lock "$name")" "$BP/patches-cffi.sum" "$D/.done" "$HERE/build.sh" \
+       "$PYEXT/tools/dist-info.py" "$PYEXT/tools/wasm-pyext-cc" "$ROOT/userspace/bin/wasm-cc"; then
+    rm -rf "$BP/src-$name" "$W"
+    VS="$(unpack "$name" "$BP/src-$name")"
+    apply_patches "$VS" "$HERE/patches/cffi"
+    LOG="$BP/build-$name.log"; : > "$LOG"
+    (cd "$VS" && log_run "$LOG" env CC="$PYEXT/tools/wasm-pyext-cc" LDSHARED="$PYEXT/tools/wasm-pyext-cc -shared" \
+       CFLAGS="-O2" PKG_CONFIG="$(pkgconfig "$D" guest)" "$B/host/bin/python3-guest" setup.py build_ext build)
+    mkdir -p "$W"
+    cp -r "$VS"/build/lib.*/. "$W/"
+    "$HOSTPY" "$PYEXT/tools/dist-info.py" "$VS" "$W" --license "libffi-LICENSE=$(echo "$BP"/deps-src/libffi-*/LICENSE)"
+    rm -rf "$VS/build"
+    touch "$W/.done"
+  fi
+done
+# (a version taken out of OTHER leaves no wheel behind, nor compile records of a source now gone)
+for W in "$BP"/wheels/*/; do
+  name="$(basename "$W")"
+  [[ -d "$W" && " ${OTHER[*]} " != *" $name "* ]] || continue
+  echo "  $name: no longer built, removed"
+  rm -rf "$W" "$BP/src-$name"
+  { grep -lF "\"$BP/src-$name/" "$BP"/compdb/*.json 2>/dev/null || true; } | xargs -r rm -f
+done

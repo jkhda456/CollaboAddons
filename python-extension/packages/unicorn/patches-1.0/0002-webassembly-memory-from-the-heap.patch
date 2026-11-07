@@ -1,0 +1,124 @@
+Unicorn 1 on WebAssembly: the code buffer and RAM blocks from the heap, no memory protections.
+
+A program's memory on WebAssembly is its own linear memory, which mmap (the kernel's) does not
+hand out, and none of it is executable or can be protected: the guest's C library declares no
+mmap for it. The code buffer (TCG's interpreter's data here) comes from the heap (translate-all.c's
+g_malloc branch, not USE_MMAP; map_exec does nothing), and so does the RAM of uc_mem_map
+(qemu_anon_ram_alloc, zeroed as an anonymous mapping is; qemu_anon_ram_free frees it). RAM backed
+by a file, and qemu_ram_remap, which no one calls, are left out there (exec.c).
+
+diff --git a/src/qemu/exec.c b/src/qemu/exec.c
+index 9e4fa5d..d60867e 100644
+--- a/src/qemu/exec.c
++++ b/src/qemu/exec.c
+@@ -1106,7 +1106,7 @@ void qemu_ram_free(struct uc_struct *uc, ram_addr_t addr)
+             uc->ram_list.version++;
+             if (block->flags & RAM_PREALLOC) {
+                 ;
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__wasm__)
+             } else if (block->fd >= 0) {
+                 munmap(block->host, block->length);
+                 close(block->fd);
+@@ -1120,7 +1120,9 @@ void qemu_ram_free(struct uc_struct *uc, ram_addr_t addr)
+     }
+ }
+ 
+-#ifndef _WIN32
++/* (not on WebAssembly: there RAM blocks come from the heap, util/oslib-posix.c, never from a file,
++   and none is remapped) */
++#if !defined(_WIN32) && !defined(__wasm__)
+ void qemu_ram_remap(struct uc_struct *uc, ram_addr_t addr, ram_addr_t length)
+ {
+     RAMBlock *block;
+@@ -1167,7 +1169,7 @@ void qemu_ram_remap(struct uc_struct *uc, ram_addr_t addr, ram_addr_t length)
+         }
+     }
+ }
+-#endif /* !_WIN32 */
++#endif /* !_WIN32 && !__wasm__ */
+ 
+ int qemu_get_ram_fd(struct uc_struct *uc, ram_addr_t addr)
+ {
+diff --git a/src/qemu/translate-all.c b/src/qemu/translate-all.c
+index 2deddd1..7ed23de 100644
+--- a/src/qemu/translate-all.c
++++ b/src/qemu/translate-all.c
+@@ -323,7 +323,12 @@ bool cpu_restore_state(CPUState *cpu, uintptr_t retaddr)
+     return false;
+ }
+ 
+-#ifdef _WIN32
++#if defined(__wasm__)
++/* WebAssembly: no memory is executable, nor can be made so (the code is TCG's interpreter's data) */
++static inline QEMU_UNUSED_FUNC void map_exec(void *addr, long size)
++{
++}
++#elif defined(_WIN32)
+ static inline QEMU_UNUSED_FUNC void map_exec(void *addr, long size)
+ {
+     DWORD old_protect;
+@@ -505,10 +510,13 @@ static inline PageDesc *page_find(struct uc_struct *uc, tb_page_addr_t index)
+ #endif
+ 
+ /* ??? Should configure for this, not list operating systems here.  */
++/* (not on WebAssembly: a program's memory is its own linear memory, which mmap does not hand
++   out, and none of it is executable; the code buffer, TCG's interpreter's data there (tci.c),
++   comes from the heap) */
+ #if (defined(__linux__) \
+     || defined(__FreeBSD__) || defined(__FreeBSD_kernel__) \
+     || defined(__DragonFly__) || defined(__OpenBSD__) \
+-    || defined(__NetBSD__))
++    || defined(__NetBSD__)) && !defined(__wasm__)
+ # define USE_MMAP
+ #endif
+ 
+diff --git a/src/qemu/util/oslib-posix.c b/src/qemu/util/oslib-posix.c
+index 3614205..3064527 100644
+--- a/src/qemu/util/oslib-posix.c
++++ b/src/qemu/util/oslib-posix.c
+@@ -99,6 +99,24 @@ void *qemu_memalign(size_t alignment, size_t size)
+     return qemu_oom_check(qemu_try_memalign(alignment, size));
+ }
+ 
++#if defined(__wasm__)
++/* WebAssembly: a program's memory is its own linear memory, which mmap does not hand out; a RAM
++   block comes from the heap, zeroed as an anonymous mapping is (qemu_anon_ram_free: free) */
++void *qemu_anon_ram_alloc(size_t size, uint64_t *alignment)
++{
++    size_t align = QEMU_VMALLOC_ALIGN;
++    void *ptr = qemu_try_memalign(align, size);
++
++    if (ptr == NULL) {
++        return NULL;
++    }
++    memset(ptr, 0, size);
++    if (alignment) {
++        *alignment = align;
++    }
++    return ptr;
++}
++#else
+ /* alloc shared memory pages */
+ void *qemu_anon_ram_alloc(size_t size, uint64_t *alignment)
+ {
+@@ -127,6 +145,7 @@ void *qemu_anon_ram_alloc(size_t size, uint64_t *alignment)
+ 
+     return ptr;
+ }
++#endif /* __wasm__ */
+ 
+ void qemu_vfree(void *ptr)
+ {
+@@ -135,7 +154,11 @@ void qemu_vfree(void *ptr)
+ 
+ void qemu_anon_ram_free(void *ptr, size_t size)
+ {
++#if defined(__wasm__)
++    qemu_vfree(ptr);
++#else
+     if (ptr) {
+         munmap(ptr, size);
+     }
++#endif
+ }

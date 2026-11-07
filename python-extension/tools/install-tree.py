@@ -1,6 +1,7 @@
 """Install the packages' built trees into one site-packages, as pip would.
 
     install-tree.py INTERPRETER SITE BIN PACKAGE_SITE...
+    install-tree.py --check INTERPRETER MODULE...     (only the check below, of modules it does not install)
 
 Run with the host CPython 3.13 (python/host), so the .pyc files it writes are the guest's version.
 Each PACKAGE_SITE is a packages/<name>/build.sh result: a site-packages tree with one .dist-info
@@ -22,6 +23,7 @@ import hashlib
 import io
 import os
 import py_compile
+import re
 import shutil
 import sys
 
@@ -166,7 +168,8 @@ def install_dist(package, info, files, site, bindir, interpreter):
     count = 0
     for rel in files:
         src = os.path.join(package, rel)
-        if rel.endswith(".so"):
+        # (and a library loaded by its file name, libunicorn.so.2: a module's, through ctypes)
+        if rel.endswith(".so") or re.search(r"\.so\.\d+$", rel):
             with open(src, "rb") as f:
                 head = f.read(64)
             if head[:4] != b"\0asm" or b"dylink.0" not in head:
@@ -226,6 +229,17 @@ def install_dist(package, info, files, site, bindir, interpreter):
 def main():
     if sys.version_info[:2] != (3, 13):
         sys.exit("run this with the host CPython 3.13 (its .pyc files must match the guest's)")
+    if sys.argv[1:2] == ["--check"]:
+        interpreter, *modules = sys.argv[2:]
+        interpreter = wasm_links(interpreter)[1]
+        for module in modules:
+            with open(module, "rb") as f:
+                head = f.read(64)
+            if head[:4] != b"\0asm" or b"dylink.0" not in head:
+                sys.exit(f"{module}: no WebAssembly shared library")
+            check_links(module, interpreter)
+            print(f"  {os.path.basename(module)}: links")
+        return
     interpreter, site, bindir, *packages = sys.argv[1:]
     interpreter = wasm_links(interpreter)[1]
     for d in (site, bindir):

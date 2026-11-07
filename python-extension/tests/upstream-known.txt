@@ -89,3 +89,47 @@ libffi libffi.closures/closure_loc_fn0
 # compares it with importlib.__file__, which in the guest is the standard library's zip of .pyc files
 # (/usr/lib/python313.zip/importlib/__init__.pyc): the same module, named two ways.
 jsonschema test_deprecations.py::TestDeprecations::test_import_cli
+
+# ── ctypes (CPython's test_ctypes, against the add-on's _ctypes) ─────────────────────────────────
+# Calls of a function as a type it does not have: natively harmless (the extra arguments, or the
+# result, ignored), a trap here, where WebAssembly checks the type of every call through a pointer
+# (the run goes on after it): `void *_testfunc_p_p(void *)` called with restype None; a callback
+# of two arguments called with six ("as in C, to call cdecl functions with more parameters");
+# `_testfunc_pylist_append(list, item)` called with a third argument; atan2(double, double) called
+# with a structure of two doubles by value (two registers on x86-64; a pointer to it here).
+ctypes test/test_ctypes/test_checkretval.py::Test::test_checkretval
+ctypes test/test_ctypes/test_funcptr.py::CFuncPtrTestCase::test_first
+ctypes test/test_ctypes/test_parameters.py::SimpleTypesTestCase::test_from_param_result_refcount
+ctypes test/test_ctypes/test_structures.py::StructureTestCase::test_issue18060_*
+# _testcapi, which the image has not (none of CPython's test modules)
+ctypes test/test_ctypes/test_structures.py::StructureTestCase::test_packed_c_limits
+
+# ── unicorn (its unit tests: C programs, each test run on its own) ───────────────────────────────
+# Hooks given a callback of another type than the hook's: natively harmless (a result returned and
+# ignored, or none where one is read), a trap here, where a call through a pointer is checked against
+# the function's type: memory-access hooks (UC_HOOK_MEM_READ/WRITE, uc_cb_hookmem_t, void) given a
+# callback returning bool; test_x86_in's IN hook (uc_cb_insn_in_t returns uint32_t) a void one;
+# test_arm64_mrs_hook's sysreg hook a function of three parameters for four. (The Python binding's
+# callbacks are each of its hook's type; it refuses one callback for hooks of different types.)
+unicorn test_arm::test_arm_mem_hook_read_write
+unicorn test_arm64::test_arm64_mrs_hook
+unicorn test_arm64::test_arm64_mem_hook_read_write
+unicorn test_x86::test_x86_in
+unicorn test_x86::test_x86_mem_hook_all
+unicorn test_x86::test_x86_cmpxchg
+unicorn test_x86::test_x86_64_not_overwriting_tmp0_for_pc_update
+unicorn test_x86::test_x86_ro_segfault
+unicorn test_x86::test_x86_mem_hooks_pc_guarantee
+
+# ── unicorn-regress (its Python regression tests) ───────────────────────────────────────────────
+# capstone, the disassembler these print with, which is not here
+unicorn-regress regress/fpu_ip.py
+unicorn-regress regress/invalid_insn.py
+unicorn-regress regress/mips_branch_delay.py
+unicorn-regress regress/movsd.py
+
+# ── lxml, with ctypes ───────────────────────────────────────────────────────────────────────────
+# adopt_external_document's test makes its document with libxml2 as a library of its own, through
+# ctypes (find_library('xml2'), natively the system's): the guest has none — lxml's libxml2 is
+# inside lxml.etree, as in its wheels — and CDLL(None), the interpreter, has no xmlReadMemory.
+lxml lxml/tests/test_external_document.py::ExternalDocumentTestCase::test_external_document_adoption

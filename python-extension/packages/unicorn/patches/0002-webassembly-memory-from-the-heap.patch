@@ -1,0 +1,98 @@
+Unicorn on WebAssembly: the code buffer and RAM blocks from the heap, no memory protections.
+
+A program's memory on WebAssembly is its own linear memory, which mmap (the kernel's) does not
+hand out, and none of it is executable or can be protected: the guest's C library declares no
+mmap for it. The code buffer (TCG's interpreter's data here) and the RAM of uc_mem_map come from
+the heap, zeroed as an anonymous mapping is; qemu_mprotect_rwx and qemu_mprotect_none do nothing.
+
+diff --git a/src/qemu/accel/tcg/translate-all.c b/src/qemu/accel/tcg/translate-all.c
+index 71b6b2b..c40e212 100644
+--- a/src/qemu/accel/tcg/translate-all.c
++++ b/src/qemu/accel/tcg/translate-all.c
+@@ -1005,6 +1005,23 @@ void free_code_gen_buffer(struct uc_struct *uc)
+         VirtualFree(tcg_ctx->initial_buffer, 0, MEM_RELEASE);
+     }
+ }
++#elif defined(__wasm__)
++/*
++ * WebAssembly: TCG's interpreter (tcg/tci) runs the translated code, which is data here — no
++ * memory is executable, and a program's memory is its own linear memory, which mmap does not
++ * hand out. The buffer comes from the heap.
++ */
++void free_code_gen_buffer(struct uc_struct *uc)
++{
++    TCGContext *tcg_ctx = uc->tcg_ctx;
++    qemu_vfree(tcg_ctx->initial_buffer);
++}
++
++static inline void *alloc_code_gen_buffer(struct uc_struct *uc)
++{
++    TCGContext *tcg_ctx = uc->tcg_ctx;
++    return qemu_try_memalign(uc->qemu_real_host_page_size, tcg_ctx->code_gen_buffer_size);
++}
+ #else
+ void free_code_gen_buffer(struct uc_struct *uc)
+ {
+diff --git a/src/qemu/util/osdep.c b/src/qemu/util/osdep.c
+index 148e37a..805a503 100644
+--- a/src/qemu/util/osdep.c
++++ b/src/qemu/util/osdep.c
+@@ -51,6 +51,19 @@ int qemu_madvise(void *addr, size_t len, int advice)
+ #endif
+ }
+ 
++#ifdef __wasm__
++/* WebAssembly: no memory is executable, and none can be protected (code here is TCG's
++   interpreter's data: tcg/tci) */
++int qemu_mprotect_rwx(void *addr, size_t size)
++{
++    return 0;
++}
++
++int qemu_mprotect_none(void *addr, size_t size)
++{
++    return 0;
++}
++#else
+ static int qemu_mprotect__osdep(void *addr, size_t size, int prot)
+ {
+ #ifdef _WIN32
+@@ -88,3 +101,4 @@ int qemu_mprotect_none(void *addr, size_t size)
+     return qemu_mprotect__osdep(addr, size, PROT_NONE);
+ #endif
+ }
++#endif /* __wasm__ */
+diff --git a/src/qemu/util/oslib-posix.c b/src/qemu/util/oslib-posix.c
+index 615e477..2cfbc15 100644
+--- a/src/qemu/util/oslib-posix.c
++++ b/src/qemu/util/oslib-posix.c
+@@ -173,7 +173,28 @@ static size_t qemu_fd_getpagesize(struct uc_struct *uc)
+ }
+ #endif
+ 
+-#ifndef __MINGW32__
++#if defined(__wasm__)
++/* WebAssembly: a program's memory is its own linear memory, which mmap does not hand out; a RAM
++   block comes from the heap, zeroed as an anonymous mapping is */
++static void *qemu_ram_mmap(struct uc_struct *uc,
++                    size_t size,
++                    size_t align,
++                    bool shared)
++{
++    void *ptr = qemu_try_memalign(align, size);
++
++    if (ptr == NULL) {
++        return MAP_FAILED;
++    }
++    memset(ptr, 0, size);
++    return ptr;
++}
++
++static void qemu_ram_munmap(struct uc_struct *uc, void *ptr, size_t size)
++{
++    qemu_vfree(ptr);
++}
++#elif !defined(__MINGW32__)
+ static void *qemu_ram_mmap(struct uc_struct *uc,
+                     size_t size,
+                     size_t align,

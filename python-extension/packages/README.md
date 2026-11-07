@@ -2,7 +2,8 @@
 
 Each folder here is one package whose extension modules are compiled for the guest, as shared
 libraries its CPython loads with `dlopen`: `numpy`, `pillow`, `lief`, `lxml`, `cffi`,
-`cryptography`, `rpds-py` — and the pure-Python ones those need or need them: `pycparser` (cffi's), and
+`cryptography`, `rpds-py`, `unicorn` (whose library is one ctypes loads: `unicorn/lib/libunicorn.so.2`,
+checked as a module is) — and the pure-Python ones those need or need them: `pycparser` (cffi's), and
 `mcp` (the MCP SDK, with the wheels it needs but rpds-py and cryptography). `../build.sh` runs
 `packages/<name>/build.sh` for each name in its `PACKAGES` list (or those on its command line),
 then installs what they made into one site-packages.
@@ -42,6 +43,16 @@ It must leave **`$BP/site/`**: a site-packages tree with
 
 and then `touch $BP/site/.done`. Its stages should skip when their output is up to date (`stage`),
 so that a build of the add-on redoes only what changed.
+
+A package listed in `WHEELS` (`../build.sh`) is also carried as wheels, in the guest's
+`/usr/share/python-wheels`, where `/etc/pip.conf` has pip look (`../README.md`): its installed
+version, and any others its build.sh leaves as `$BP/wheels/<name>-<version>/` — each a tree like
+`$BP/site/` (one `.dist-info`, from `tools/dist-info.py`), with its own `.done`. Those are for pip
+only: a build's isolated environment that asks for another version (`cffi/build.sh`: the last release
+of each minor line, for zstandard's `cffi~=1.17`), or a package that pins another (`unicorn/build.sh`:
+the same, for pwntools' `unicorn>=2.0.1,!=2.1.3,!=2.1.4`; their patches differ by line,
+`patches-<major>.<minor>/`). Their compiles are recorded and scanned with the package's (so their
+sources, and the headers their build generated, stay in `$BP`).
 
 Every compile it makes is recorded (`build/<name>/compdb`), and the stage after it,
 `fpcast-<name>`, scans them with `tools/fpcast-scan.py`: a function in a method table, a type

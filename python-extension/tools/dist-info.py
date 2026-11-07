@@ -6,13 +6,15 @@ Run with the host CPython 3.13 (python/host). The metadata is the source's PKG-I
 the same format, and text, as a wheel's METADATA), or else made from the [project] table of
 pyproject.toml in SOURCE_DIR or --project-dir (LIEF's GitHub archive has no PKG-INFO; --version
 when its version is dynamic). entry_points.txt comes from [project.scripts], [project.gui-scripts]
-and [project.entry-points]; WHEEL gives the guest's tag, cp313-cp313-linux_wasm (what pip, on
+and [project.entry-points], or, for a setuptools sdist whose setup.py says it all (no [project]),
+from the .egg-info setuptools put in the sdist (cffi 1.17's `cffi_modules` setup keyword); WHEEL gives the guest's tag, cp313-cp313-linux_wasm (what pip, on
 the guest, takes a platform wheel of this machine to be); every License-File the metadata names,
 and each --license (the libraries a package carries: NAME=PATH, as licenses/NAME), is copied to
 licenses/. INSTALLER and RECORD are install-tree.py's to write.
 """
 import argparse
 import email.parser
+import glob
 import os
 import re
 import shutil
@@ -53,6 +55,13 @@ def entry_points(project):
                    for g, items in groups.items() if items)
 
 
+def egg_info_entry_points(source):
+    """A setuptools sdist's entry points when setup.py declares them: its .egg-info's file."""
+    found = sorted(glob.glob(os.path.join(source, "*.egg-info", "entry_points.txt"))
+                   + glob.glob(os.path.join(source, "src", "*.egg-info", "entry_points.txt")))
+    return open(found[0], encoding="utf-8").read() if found else ""
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("source")
@@ -81,7 +90,7 @@ def main():
         f.write(metadata)
     with open(os.path.join(info, "WHEEL"), "w") as f:
         f.write(f"Wheel-Version: 1.0\nGenerator: collabo-core python-extension\nRoot-Is-Purelib: false\nTag: {TAG}\n")
-    eps = entry_points(project)
+    eps = entry_points(project) if project else egg_info_entry_points(a.project_dir or a.source)
     if eps:
         with open(os.path.join(info, "entry_points.txt"), "w") as f:
             f.write(eps)

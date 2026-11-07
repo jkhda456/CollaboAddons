@@ -1,0 +1,38 @@
+glib_compat: g_list_sort and g_slist_sort call their GCompareFunc as its type.
+
+They called it as a GCompareDataFunc, with a third argument, the data: natively unnoticed, a trap
+on WebAssembly, where every call through a pointer is checked against the function's type. A
+wrapper of that type calls it with the two keys (as patches/0003 for Unicorn 2).
+
+diff --git a/src/qemu/glib_compat.c b/src/qemu/glib_compat.c
+index 946e4f0..906ec80 100644
+--- a/src/qemu/glib_compat.c
++++ b/src/qemu/glib_compat.c
+@@ -278,9 +278,17 @@ static GList *g_list_sort_real(GList *list,
+  * value comes before the second, 0 if they are equal, or a positive
+  * integer if the first value comes after the second.
+  **/
++/* A GCompareFunc called as the GCompareDataFunc the sorts call (with the data, func): with its
++   two arguments alone, as the type it has. Natively the third argument goes unnoticed; on
++   WebAssembly a call through a pointer is checked against the function's type, and traps. */
++static gint g_compare_func_data (gconstpointer a, gconstpointer b, gpointer func)
++{
++    return ((GCompareFunc) func) (a, b);
++}
++
+ GList *g_list_sort (GList *list, GCompareFunc  compare_func)
+ {
+-    return g_list_sort_real (list, (GFunc) compare_func, NULL);
++    return g_list_sort_real (list, (GFunc) g_compare_func_data, (gpointer) compare_func);
+ }
+ 
+ /* END of g_list related functions */
+@@ -402,7 +410,7 @@ static GSList *g_slist_sort_real (GSList *list,
+ GSList *g_slist_sort (GSList *list,
+               GCompareFunc  compare_func)
+ {
+-  return g_slist_sort_real (list, (GFunc) compare_func, NULL);
++  return g_slist_sort_real (list, (GFunc) g_compare_func_data, (gpointer) compare_func);
+ }
+ 
+ /* END of g_slist related functions */

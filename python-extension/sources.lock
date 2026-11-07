@@ -15,6 +15,8 @@
 # version cryptography 50.0.2's own wheels carry (OpenSSL_version() of the wheel's module).
 # rpds-py: its sdist (the same files as its GitHub tag 2026.9.1, and PKG-INFO). mcp: its wheel and
 # those of what it needs, resolved from PyPI for CPython 3.13 on Linux (packages/mcp).
+# unicorn: its sdist (the C library's source, Unicorn's QEMU 5.0.1, with the Python binding); QEMU
+# 5.0.1's TCG interpreter, which it lacks, is in packages/unicorn/patches/0001.
 
 # toolchain and build tools (run on the host)
 llvm          https://github.com/llvm/llvm-project/releases/download/llvmorg-19.1.7/llvm-project-19.1.7.src.tar.xz                                    82401fea7b79d0078043f7598b835284d6650a75b93e64b6f761ea7b63097501
@@ -52,7 +54,19 @@ pycparser     https://files.pythonhosted.org/packages/90/11/0e6f11117525ff0eec40
 
 # packages/cffi
 cffi          https://files.pythonhosted.org/packages/9e/ef/008a1939e372c06329a3fce4279c02f328488f3526744906eeec3da7ad5f/cffi-2.1.1.tar.gz             dd31f52ea1086513bb9df30f8fcee9b8918323ae067a3d5b78bc826a000712be
+# its other versions, carried as wheels for pip in the guest: the last release of each earlier
+# minor line that builds for CPython 3.13 (1.17 is the first; packages/cffi/build.sh)
+cffi-1.17.1   https://files.pythonhosted.org/packages/fc/97/c783634659c2920c3fc70419e3af40972dbaf758daa229a7d6ea6135c90d/cffi-1.17.1.tar.gz             1c39c6016c32bc48dd54561950ebd6836e1670f2ae46128f67cf49e789c52824
+cffi-2.0.0    https://files.pythonhosted.org/packages/eb/56/b1ba7935a17738ae8453301356628e8147c79dbb825bcbc73dc7401f9846/cffi-2.0.0.tar.gz              44d1b5909021139fe36001ae048dbdde8214afa20200eda0f64c068cac5d5529
 libffi        https://github.com/libffi/libffi/releases/download/v3.8.0/libffi-3.8.0.tar.gz                                                          7da3e2d9a171eb0a038f592ecad3ff2bb2550f3496d87b3b29ad0cf4430c0db4
+
+# packages/unicorn
+unicorn       https://files.pythonhosted.org/packages/b2/1b/b4248aa8422e86de690cf8e85cf8feae4c33405a097d1ebe71570bdaa6f5/unicorn-2.1.4.tar.gz          00567a70e323f749b419cd86bee4f9115beab7ebba32194581c090cbb7c59cff
+# its other versions, carried as wheels for pip in the guest: the last release of each earlier
+# minor line (packages/unicorn/build.sh) — 2.0's on the same QEMU 5.0.1, 1.0's on Unicorn 1's QEMU
+# 2.2.1 (whose TCG interpreter, which it lacks too, is QEMU 2.2.1's: patches-1.0/0001)
+unicorn-2.0.1.post1 https://files.pythonhosted.org/packages/64/c7/1a571a06adda2a9802e21d84398c5547761cb28b22f59a2c5db62bf23887/unicorn-2.0.1.post1.tar.gz 7fc69523eb83b4c8abc7cb4410ca21875e066c34b7afe998f59481e830d28e56
+unicorn-1.0.3 https://files.pythonhosted.org/packages/6c/64/18ebc847dd261ea1742640e87bbd5d78ed1934d7a9b76fb2f93b9908dd9f/unicorn-1.0.3.tar.gz      08fd3616de4ad97ffcbddd3c40d3afb0bd789956b5a1e8905be90042b9706541
 
 # packages/cryptography
 cryptography  https://files.pythonhosted.org/packages/9d/af/182eb91b0df3fe75c4d9f26fe70684569566745f6ba7e5c9c73a862c5252/cryptography-50.0.2.tar.gz     7b46165bb56eb4704e2eaaf86f3c940d19154535d9b0ca7d6d590b04060e00d5

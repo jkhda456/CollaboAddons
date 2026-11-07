@@ -6,8 +6,10 @@ cases: a method registered METH_NOARGS or METH_VARARGS but written with one para
 `f(PyObject *self)`, which CPython calls as `f(self, args)` (Pillow's ExportArrowSchemaPyCapsule);
 one registered METH_VARARGS|METH_KEYWORDS but written without `kwargs` (numpy's
 _get_castingimpl); a getter without its closure (numpy's array_converter_get_scalar_input).
-Pyodide's CPython calls methods through a JavaScript trampoline that forgives these; the guest's
-CPython cannot.
+Pyodide's CPython calls methods through a JavaScript trampoline that forgives these, and the
+guest's CPython now forgives those of methods, getters and setters too
+(python/patches/cpython-call-trampoline.patch), though not those of type and module slots; the
+packages here are fixed all the same.
 
 Two analyses of each source, compiled as its compile record says:
 
