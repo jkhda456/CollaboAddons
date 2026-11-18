@@ -1,0 +1,72 @@
+The IWAD search: where Chocolate Doom looks on Unix; Freedoom Phase 1 before Phase 2.
+
+doomgeneric looks for IWADs in the current directory only (FILES_DIR, "."): Chocolate Doom's
+search — the current directory, $DOOMWADDIR, $DOOMWADPATH, /usr/share/games/doom,
+/usr/local/share/games/doom — is under ORIGCODE. It is back (the add-on installs Freedoom in
+/usr/share/games/doom; -iwad NAME finds a file there too).
+
+Without -iwad, the IWADs are looked for in the order of the list; the add-on installs both Freedoom
+IWADs, and Phase 1 (DOOM's episodes) is the one the game starts with. Doom's own IWADs come first,
+as before.
+
+diff --git a/doomgeneric/d_iwad.c b/doomgeneric/d_iwad.c
+index 508cc61..91039fd 100644
+--- a/doomgeneric/d_iwad.c
++++ b/doomgeneric/d_iwad.c
+@@ -42,8 +42,8 @@ static const iwad_t iwads[] =
+     { "chex.wad",     pack_chex, shareware,  "Chex Quest" },
+     { "hacx.wad",     pack_hacx, commercial, "Hacx" },
+     { "freedm.wad",   doom2,     commercial, "FreeDM" },
+-    { "freedoom2.wad", doom2,    commercial, "Freedoom: Phase 2" },
+     { "freedoom1.wad", doom,     retail,     "Freedoom: Phase 1" },
++    { "freedoom2.wad", doom2,    commercial, "Freedoom: Phase 2" },
+     { "heretic.wad",  heretic,   retail,     "Heretic" },
+     { "heretic1.wad", heretic,   shareware,  "Heretic Shareware" },
+     { "hexen.wad",    hexen,     commercial, "Hexen" },
+@@ -508,7 +508,7 @@ static GameMission_t IdentifyIWADByName(char *name, int mask)
+     return mission;
+ }
+ 
+-#if ORIGCODE
++// (doomterm: not only under ORIGCODE: BuildIWADDirList uses it)
+ //
+ // Add directories from the list in the DOOMWADPATH environment variable.
+ //
+@@ -558,7 +558,6 @@ static void AddDoomWadPath(void)
+     }
+ }
+ 
+-#endif
+ 
+ //
+ // Build a list of IWAD files
+@@ -613,8 +612,29 @@ static void BuildIWADDirList(void)
+ 
+ #endif
+ #else
++    // doomterm: where Chocolate Doom looks on Unix (the add-on installs Freedoom in
++    // /usr/share/games/doom), not only the current directory
++    char *doomwaddir;
++
++    if (iwad_dirs_built)
++    {
++        return;
++    }
++
+     AddIWADDir (FILES_DIR);
+ 
++    doomwaddir = getenv("DOOMWADDIR");
++
++    if (doomwaddir != NULL)
++    {
++        AddIWADDir(doomwaddir);
++    }
++
++    AddDoomWadPath();
++
++    AddIWADDir("/usr/share/games/doom");
++    AddIWADDir("/usr/local/share/games/doom");
++
+     // Don't run this function again.
+ 
+     iwad_dirs_built = true;

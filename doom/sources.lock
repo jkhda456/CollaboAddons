@@ -1,0 +1,9 @@
+# What the doom add-on downloads: name, URL, sha256 of the download, and the file name it is kept
+# under in build/dl when the URL's own name says too little.
+
+# doomgeneric (github.com/ozkl/doomgeneric, GPL-2.0-or-later): Chocolate Doom's engine made easy to
+# port, at the commit of 2026-10-11 (master)
+doomgeneric https://github.com/ozkl/doomgeneric/archive/e257a09527062bfb986b6e5e0780839b6cbd5b71.tar.gz 26f8f60daa6c6e4d3c01e5eac9fb700d592dede803d13ac848154ff356b2a2e7 doomgeneric-e257a09.tar.gz
+# Freedoom 0.13.0 (freedoom.github.io, BSD-3-Clause): the IWADs — Phase 1 (DOOM's episodes) and
+# Phase 2 (DOOM II's maps), free content for the engine; the release's signed CHECKSUM gives the sum
+freedoom    https://github.com/freedoom/freedoom/releases/download/v0.13.0/freedoom-0.13.0.zip 3f9b264f3e3ce503b4fb7f6bdcb1f419d93c7b546f4df3e874dd878db9688f59

@@ -1,0 +1,4 @@
+{
+  "name": "doom",
+  "description": "doom: DOOM in the guest's terminal — Chocolate Doom's engine (doomgeneric) drawn in the shell with block characters in 24-bit colour, scaled to the terminal as it is and as it changes (half blocks, quadrants or ASCII; 24-bit, 256, 16 colours or none), only the cells that changed sent and, when the terminal cannot take a whole frame in time, the ones that look most wrong first; keys as a terminal sends them, with key releases where the terminal tells them (kitty keyboard protocol, Windows Terminal) and inferred from key repeat elsewhere; Freedoom Phase 1 and 2 (free IWADs) included, DOOM's own IWADs found if you bring them; ENDOOM on the way out; the same frames as a native build"
+}

@@ -1,0 +1,31 @@
+The configuration and the saved games in $HOME/.doom/.
+
+doomgeneric's default configuration directory is "." joined without a separator: hidden files
+(.default.cfg, .savegame/) in whatever folder the game was started in. $HOME/.doom/ instead, as
+Chocolate Doom's ~/.chocolate-doom/ (M_SetConfigDir makes it).
+
+diff --git a/doomgeneric/m_config.c b/doomgeneric/m_config.c
+index 865e168..f7ef002 100644
+--- a/doomgeneric/m_config.c
++++ b/doomgeneric/m_config.c
+@@ -2042,11 +2042,16 @@ float M_GetFloatVariable(char *name)
+ 
+ static char *GetDefaultConfigDir(void)
+ {
+-    char *result = (char *)malloc(2);
+-    result[0] = '.';
+-    result[1] = '\0';
++    // doomterm: $HOME/.doom/ (default.cfg, the saved games), like Chocolate Doom's
++    // ~/.chocolate-doom/, not hidden files in the current folder
++    char *home = getenv("HOME");
+ 
+-    return result;
++    if (home != NULL && home[0] != '\0')
++    {
++        return M_StringJoin(home, DIR_SEPARATOR_S, ".doom", DIR_SEPARATOR_S, NULL);
++    }
++
++    return M_StringDuplicate("");
+ }
+ 
+ // 

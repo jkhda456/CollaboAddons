@@ -1,0 +1,56 @@
+I_Error: the exit functions first, then the message; no zenity.
+
+The terminal frontend draws on the alternate screen with the terminal in raw mode, and gives the
+terminal back in an exit function: printed before that, I_Error's message vanished with the
+alternate screen. The exit functions (those for errors) now run first, the message after them. The
+GUI error box (zenity through system()) is not tried: the message is on the terminal.
+
+diff --git a/doomgeneric/i_system.c b/doomgeneric/i_system.c
+index 53ab2c9..c8f53e6 100644
+--- a/doomgeneric/i_system.c
++++ b/doomgeneric/i_system.c
+@@ -375,6 +375,20 @@ void I_Error (char *error, ...)
+         already_quitting = true;
+     }
+ 
++    // doomterm: the exit functions first: they give the terminal back (the game drew on the
++    // alternate screen), so that the message is seen where the game was run.
++    entry = exit_funcs;
++
++    while (entry != NULL)
++    {
++        if (entry->run_on_error)
++        {
++            entry->func();
++        }
++
++        entry = entry->next;
++    }
++
+     // Message first.
+     va_start(argptr, error);
+     //fprintf(stderr, "\nError: ");
+@@ -389,21 +403,9 @@ void I_Error (char *error, ...)
+     M_vsnprintf(msgbuf, sizeof(msgbuf), error, argptr);
+     va_end(argptr);
+ 
+-    // Shutdown. Here might be other errors.
+-
+-    entry = exit_funcs;
+-
+-    while (entry != NULL)
+-    {
+-        if (entry->run_on_error)
+-        {
+-            entry->func();
+-        }
+-
+-        entry = entry->next;
+-    }
++    // (doomterm: the exit functions ran above)
+ 
+-    exit_gui_popup = !M_ParmExists("-nogui");
++    exit_gui_popup = 0;  // doomterm: no zenity; the message is on the terminal
+ 
+     // Pop up a GUI dialog box to show the error message, if the
+     // game was not run from the console (and the user will

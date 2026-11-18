@@ -1,0 +1,68 @@
+Freedoom's DEHACKED lump, and an exit function WebAssembly can call.
+
+DEH_String becomes a function (the add-on's src/deh_lite.c) where doomgeneric left Chocolate Doom's
+dehacked code out (FEATURE_DEHACKED off): an IWAD's own DEHACKED lump is read where Chocolate Doom
+loads it (LoadIwadDeh, under ORIGCODE here) — Freedoom's: its texts (BEX [STRINGS]: level names,
+messages, the stories between episodes), changed frames and par times. Freedoom needs it ("The
+Freedoom IWADs have DEHACKED lumps that must be loaded"); without it the game shows the original
+game's texts. -nodeh leaves it out, as in Chocolate Doom.
+
+G_CheckDemoStatus returns a boolean and was registered as an exit function (void (*)(void)) by a
+cast: WebAssembly calls a function only as what it is, and the call at exit trapped (the program
+ended with SIGSEGV instead of 0 after -timedemo, -shot, quitting). A void wrapper is registered.
+
+diff --git a/doomgeneric/d_main.c b/doomgeneric/d_main.c
+index 9012e5f..c9518cd 100644
+--- a/doomgeneric/d_main.c
++++ b/doomgeneric/d_main.c
+@@ -1157,6 +1157,13 @@ static void LoadIwadDeh(void)
+ }
+ #endif
+ 
++// doomterm: an exit function returns nothing; G_CheckDemoStatus returns a boolean, and
++// WebAssembly calls a function only as what it is (a cast pointer to it traps)
++static void CheckDemoStatusAtExit(void)
++{
++    G_CheckDemoStatus();
++}
++
+ //
+ // D_DoomMain
+ //
+@@ -1401,6 +1408,12 @@ void D_DoomMain (void)
+         // them to be played properly.
+         LoadIwadDeh();
+     }
++#else
++    if (!M_ParmExists("-nodeh"))
++    {
++        // doomterm: Freedoom's DEHACKED lump (its texts, frames, par times)
++        DEH_LoadIwadLump();
++    }
+ #endif
+ 
+     // Doom 3: BFG Edition includes modified versions of the classic
+@@ -1510,7 +1523,7 @@ void D_DoomMain (void)
+         printf("Playing demo %s.\n", file);
+     }
+ 
+-    I_AtExit((atexit_func_t) G_CheckDemoStatus, true);
++    I_AtExit(CheckDemoStatusAtExit, true);
+ 
+     // Generate the WAD hash table.  Speed things up a bit.
+     W_GenerateHashTable();
+diff --git a/doomgeneric/deh_str.h b/doomgeneric/deh_str.h
+index cdecaf0..88830a0 100644
+--- a/doomgeneric/deh_str.h
++++ b/doomgeneric/deh_str.h
+@@ -35,7 +35,9 @@ void DEH_AddStringReplacement(char *from_text, char *to_text);
+ 
+ #else
+ 
+-#define DEH_String(x) (x)
++// doomterm: the texts of an IWAD's DEHACKED lump ([STRINGS]; deh_lite.c)
++char *DEH_String(char *s);
++void DEH_LoadIwadLump(void);
+ #define DEH_printf printf
+ #define DEH_fprintf fprintf
+ #define DEH_snprintf snprintf
