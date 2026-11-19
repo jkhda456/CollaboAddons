@@ -1,0 +1,38 @@
+[package]
+name = "collabo-docu"
+version = "0.1.0"
+edition = "2021"
+description = "docu: edit and render office documents (docx, xlsx, pptx, doc, xls, ppt, ...) from the command line, in place and in part"
+license = "GPL-3.0-only"
+publish = false
+
+[[bin]]
+name = "docu"
+path = "src/main.rs"
+
+[features]
+default = ["render"]
+# PDF, PNG and SVG output, laid out by the Typst library.
+render = ["dep:typst", "dep:typst-layout", "dep:typst-pdf", "dep:typst-render", "dep:typst-svg", "dep:image", "dep:ttf-parser"]
+
+[dependencies]
+encoding_rs = "0.8"
+miniz_oxide = "0.8"
+regex = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+typst = { version = "=0.15.1", optional = true }
+typst-layout = { version = "=0.15.1", optional = true }
+typst-pdf = { version = "=0.15.1", optional = true }
+typst-render = { version = "=0.15.1", optional = true }
+typst-svg = { version = "=0.15.1", optional = true }
+ttf-parser = { version = "0.25", optional = true }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"], optional = true }
+
+[profile.release]
+opt-level = 2
+codegen-units = 16
+panic = "unwind"
+strip = true
+
+[profile.dev]
+debug = 0

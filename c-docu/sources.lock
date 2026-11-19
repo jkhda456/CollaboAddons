@@ -1,0 +1,29 @@
+# NAME URL SHA256: what build.sh downloads (into build/dl), checked against the sum.
+# Fonts the renderer uses for the fonts Office documents name (all SIL Open Font License 1.1 but
+# DejaVu's Bitstream Vera license): metric-compatible substitutes, so lines break where Word,
+# Excel and PowerPoint break them — Carlito for Calibri, Caladea for Cambria, Liberation Sans,
+# Serif and Mono for Arial, Times New Roman and Courier New (Liberation Sans Narrow for Arial
+# Narrow); Nanum Gothic and Myeongjo for Korean (맑은 고딕, 굴림, 돋움, 바탕, 궁서); DejaVu Sans
+# for symbols and scripts the others lack; Droid Sans Fallback (Apache License 2.0) for Chinese
+# characters (Hanja, Kanji, Hanzi) and kana, which Nanum lacks.
+carlito-regular    https://github.com/google/fonts/raw/main/ofl/carlito/Carlito-Regular.ttf                f6418f708baede9789daef5d458c0f53d2a888af9820e8062934e504fedc6595
+carlito-bold       https://github.com/google/fonts/raw/main/ofl/carlito/Carlito-Bold.ttf                   bb5d20f79b82599ec72983597437373a80f2d2085fa91fc144fd74e876a594db
+carlito-italic     https://github.com/google/fonts/raw/main/ofl/carlito/Carlito-Italic.ttf                 0b019225e58d702bfedcbd35c21696769f8ee115cb6343f84c2f240312450d1c
+carlito-bolditalic https://github.com/google/fonts/raw/main/ofl/carlito/Carlito-BoldItalic.ttf             b32928186c119599e03ca6a1ffc680fdcb7fac95772f4b95d989cf6cd3861517
+carlito-ofl        https://github.com/google/fonts/raw/main/ofl/carlito/OFL.txt                            58402f82a7c332a700294988fe7554fbb0a63a8d27ccc1ee3bbc640311990a00
+caladea-regular    https://github.com/google/fonts/raw/main/ofl/caladea/Caladea-Regular.ttf                f1e899278b7b4491aba5b6a8253c4b04c050cc59b21865be5c37559a775153cd
+caladea-bold       https://github.com/google/fonts/raw/main/ofl/caladea/Caladea-Bold.ttf                   ae3cb2dcbc925809dd29d2a44e9802211cab66be541bacbfc9c08c74b27c3742
+caladea-italic     https://github.com/google/fonts/raw/main/ofl/caladea/Caladea-Italic.ttf                 4359a8e24f748b6447b1ff6d7a174febe70961d29f8bb8634b56dacd740a3deb
+caladea-bolditalic https://github.com/google/fonts/raw/main/ofl/caladea/Caladea-BoldItalic.ttf             ccabaa7b7e2fdf253d2b1a5fa699dd8a3df8d835a9eb285ad82631a677eb76c0
+liberation         https://github.com/liberationfonts/liberation-fonts/files/7261482/liberation-fonts-ttf-2.1.5.tar.gz 7191c669bf38899f73a2094ed00f7b800553364f90e2637010a69c0e268f25d0
+nanum-gothic-regular   https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Regular.ttf     76f45ef4a6bcff344c837c95a7dcc26e017e38b5846d5ae0cdcb5b86be2e2d31
+nanum-gothic-bold      https://github.com/google/fonts/raw/main/ofl/nanumgothic/NanumGothic-Bold.ttf        f96298f9fb18e364d2370f4c3ce948ac67a2b61af992d7234bc15c42b033c674
+nanum-myeongjo-regular https://github.com/google/fonts/raw/main/ofl/nanummyeongjo/NanumMyeongjo-Regular.ttf 7ed9e8653a8ed04285d51dc343ffea6eb3d9c73afc27383ea8929ee4ffd03205
+nanum-myeongjo-bold    https://github.com/google/fonts/raw/main/ofl/nanummyeongjo/NanumMyeongjo-Bold.ttf    bc9ed8e60d93fe6db054b8fb988481b625f2eef8cb2317ad0e9834681b8fe3f3
+nanum-ofl              https://github.com/google/fonts/raw/main/ofl/nanumgothic/OFL.txt                     eeacf16032901d0ed0456876ec77b8f0fda6b3fecec7d972f8543eb602e6c30f
+droid-fallback     https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android-10.0.0_r1/data/fonts/DroidSansFallbackFull.ttf 2392015530438bafc48edfc4aee6d9de2387f627a6134d8ab3dfcc99d21c8240
+droid-notice       https://raw.githubusercontent.com/aosp-mirror/platform_frameworks_base/android-10.0.0_r1/data/fonts/NOTICE 38751245389e1e23f73e6f5384b5cbe7fa972cc4410c5adc9c04b082a0b9561a
+dejavu             https://github.com/dejavu-fonts/dejavu-fonts/releases/download/version_2_37/dejavu-fonts-ttf-2.37.tar.bz2 fa9ca4d13871dd122f61258a80d01751d603b4d3ee14095d65453b4e846e17d7
+# The geometry of DrawingML's preset shapes (ECMA-376 part 1, presetShapeDefinitions.xml, as
+# LibreOffice carries it): compiled into docu, which draws shapes from it.
+preset-shapes      https://raw.githubusercontent.com/LibreOffice/core/libreoffice-25.8.1.1/oox/source/drawingml/customshapes/presetShapeDefinitions.xml eaff19f4405b3be6822428c96ef46cc685499217366fd58e5e63a5a24739f02f

@@ -1,0 +1,4 @@
+{
+  "name": "c-docu",
+  "description": "docu (collabo-docu): office documents on the command line for agents — read Word, Excel and PowerPoint files (docx, xlsx, pptx and the older doc, xls, ppt) with addresses, edit them in place and in part (text across runs, styles of a word or a cell, paragraphs, rows, cells, slides, sheets; formulas recalculated) without rewriting the rest, and render them to PDF, PNG or SVG"
+}
