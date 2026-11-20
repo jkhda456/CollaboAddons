@@ -34,7 +34,14 @@ static const char *help_text =
     "                                     pitfalls, recipes (web --agent-help topics)\n"
     "\n"
     "Pages\n"
-    "  open URL [TIMEOUT]       load a page (words: a web search); waits until it has loaded\n"
+    "  open URL [TIMEOUT]       load a page (words: a web search); waits until it has loaded; a\n"
+    "                           robot check on it is said on a last line (challenge: ...)\n"
+    "  search WORDS... [--engine E[,E...]]   a web search: the results page of the first engine\n"
+    "                           that lets the browser in (duckduckgo, bing, google, brave; naver)\n"
+    "  challenge [solve [TIMEOUT]]   the robot check on the page (Cloudflare, Turnstile, reCAPTCHA,\n"
+    "                           hCaptcha, press and hold, DataDome, AWS WAF...); solve: wait for\n"
+    "                           it, click its box or hold its button as a person does (90 s);\n"
+    "                           a picture puzzle is left to the agent (exit 1)\n"
     "  back | forward | reload  history; waits for the page\n"
     "  info                     url, title, loading, history, size, last error or dialog\n"
     "  history [N | --all] [TEXT]   the pages visited, the last N (30): time, title, address;\n"
@@ -47,10 +54,12 @@ static const char *help_text =
     "  text                     the page's text (innerText)\n"
     "  links                    every link: text and address\n"
     "  html [CSS]               the HTML of the page or of an element\n"
-    "  eval JS                  run JavaScript in the page; prints the result (JSON)\n"
-    "  run [--timeout S] FILE|- [ARG...]   run a JavaScript file (-: stdin) in the page as the body\n"
-    "                           of an async function: `return` gives the result (JSON), `await`\n"
-    "                           waits (up to S seconds, 120), `args` holds the ARGs (strings)\n"
+    "  eval [--isolated] JS     run JavaScript in the page; prints the result (JSON). --isolated:\n"
+    "                           in a world of its own (the page's DOM, not its variables), where\n"
+    "                           the page cannot see it or change what it calls\n"
+    "  run [--timeout S] [--isolated] FILE|- [ARG...]   run a JavaScript file (-: stdin) in the\n"
+    "                           page as the body of an async function: `return` gives the result\n"
+    "                           (JSON), `await` waits (up to S seconds, 120), `args` holds the ARGs\n"
     "  screenshot [FILE] [--max-width N]   the page as PNG (default /tmp/NAME.png)\n"
     "\n"
     "Acting (TARGET: a number from `web read`, a CSS selector, or a link's or button's text)\n"
@@ -66,9 +75,18 @@ static const char *help_text =
     "                           click's as it goes in, the others' once done; scroll: an arrow\n"
     "\n"
     "How the browser presents itself (from the next request on; `web reload` for this page)\n"
-    "  ua [PROFILE | 'USER AGENT' | list]   the user agent: default, safari, chrome, edge, firefox,\n"
-    "                           iphone, android, or any string; the page's navigator (platform,\n"
-    "                           vendor, userAgentData) and Chrome's Sec-CH-UA headers follow it\n"
+    "  ua [PROFILE | 'USER AGENT' | list]   the user agent: safari (the default: Safari on a Mac,\n"
+    "                           the engine it is), webkit, chrome, edge, firefox, iphone, android,\n"
+    "                           or any string; the page's navigator, screen and window (a real\n"
+    "                           machine of that kind) and Chrome's Sec-CH-UA headers follow it\n"
+    "  identity [new [SEED]]    who the browser says it is: user agent, the machine (screen,\n"
+    "                           window, cores), languages, time zone, human input; new: another\n"
+    "                           machine of the same kind (kept for this browser across restarts)\n"
+    "  tz [ZONE | auto | default]   the time zone pages see (Date, Intl): Asia/Seoul...; auto:\n"
+    "                           where the browser's address is (asks ipinfo.io); default: UTC\n"
+    "  humanize [on | off]      input as a person gives it (on, the default): the pointer travels\n"
+    "                           to what it clicks, keys and buttons are held and spaced as a\n"
+    "                           person's, the wheel turns notch by notch; off: all at once\n"
     "  header [list]            the headers put on every request (the page, its parts, fetch)\n"
     "  header set NAME VALUE [--host HOST]   add or replace one; --host: only to HOST and its\n"
     "                           subdomains; an empty VALUE takes the header off the requests\n"
@@ -136,8 +154,8 @@ static const char *help_text =
     "Browser options (before COMMAND): the browser this command starts gets them; one running\n"
     "already gets the settings among them (the others are for a start: `web close` first)\n"
     "  --user-agent PROFILE|UA   --header 'NAME: VALUE'   --header-for HOST 'NAME: VALUE'\n"
-    "  --lang LANGUAGES   --inject FILE   --devtools   (settings: each but --user-agent and\n"
-    "  --devtools can be given more than once)\n"
+    "  --lang LANGUAGES   --timezone ZONE|auto   --humanize on|off   --inject FILE   --devtools\n"
+    "  (settings: --header, --header-for and --inject can be given more than once)\n"
     "  --ephemeral (no cookies or storage kept)   --ignore-tls-errors   --size WxH\n"
     "\n"
     "Exit status: 0 done, 1 failed, 2 usage, 3 timed out, 4 not found, 5 no browser,\n"
@@ -145,6 +163,7 @@ static const char *help_text =
     "WEB_START_TIMEOUT (seconds, 300) bounds the start of a browser; WEB_BROWSER_ARGS adds\n"
     "options to it (words). The first settings of a browser this command starts, unless options\n"
     "say: WEB_USER_AGENT (a profile or a user agent), WEB_HEADERS (lines NAME: VALUE), WEB_LANG,\n"
+    "WEB_TIMEZONE (a zone or auto), WEB_HUMANIZE (on, off),\n"
     "WEB_DEVTOOLS (1, or the bodies kept: text, all, none).\n"
     "WPE_BROWSER_DEBUG=1 logs its loads (`gui logs NAME`).\n";
 
@@ -636,7 +655,8 @@ int main(int argc, char **argv)
         const char *option = argv[i];
         int values = !strcmp(option, "--header-for") ? 2
                    : !strcmp(option, "--user-agent") || !strcmp(option, "--header") || !strcmp(option, "--lang")
-                     || !strcmp(option, "--inject") || !strcmp(option, "--size") ? 1 : 0;
+                     || !strcmp(option, "--inject") || !strcmp(option, "--size") || !strcmp(option, "--timezone")
+                     || !strcmp(option, "--humanize") ? 1 : 0;
         if (values && i + values >= argc)
             die(2, "%s needs %s", option, values == 2 ? "a host and 'NAME: VALUE'" : "a value");
         if ((!strcmp(option, "-n") || !strcmp(option, "--name")) && i + 1 < argc)
@@ -678,7 +698,7 @@ int main(int argc, char **argv)
 
     /* --screenshot FILE (or =FILE): the browser writes it, so its path as the caller means it */
     static const char *const shot_commands[] = { "click", "dblclick", "rightclick", "hover", "type", "select", "key", "press",
-                                                 "scroll", "open", "goto", "back", "forward", "reload", "wait", NULL };
+                                                 "scroll", "open", "goto", "back", "forward", "reload", "wait", "search", NULL };
     int shot_command = 0;
     for (const char *const *c = shot_commands; *c; c++)
         shot_command |= !strcmp(command, *c);
@@ -692,7 +712,7 @@ int main(int argc, char **argv)
         }
         if (!shot_command)
             die(2, "--screenshot is for click, dblclick, rightclick, hover, type, select, key, scroll, open, back, forward,"
-                   " reload and wait (web screenshot takes a picture of the page as it is)");
+                   " reload, wait and search (web screenshot takes a picture of the page as it is)");
         const char *file = word[12] == '=' ? word + 13 : j + 1 < count ? words[++j] : "";
         if (!*file)
             die(2, "--screenshot needs a file (a PNG is written there)");
@@ -721,20 +741,28 @@ int main(int argc, char **argv)
     }
     /* scripts: web reads the file (the caller's: its directory, its stdin) and sends the text */
     if (!strcmp(command, "run")) {
-        int k = 1;
+        int k = 1, isolated = 0;
         const char *timeout = "";
-        if (k + 1 < count && !strcmp(words[k], "--timeout")) {
-            timeout = words[k + 1];
-            k += 2;
+        for (;;) {
+            if (k + 1 < count && !strcmp(words[k], "--timeout")) {
+                timeout = words[k + 1];
+                k += 2;
+            } else if (k < count && !strcmp(words[k], "--isolated")) {
+                isolated = 1;
+                k++;
+            } else
+                break;
         }
         if (k >= count)
-            die(2, "usage: web run [--timeout SECONDS] FILE|- [ARG...]");
-        char **run = calloc(count + 4, sizeof *run);
-        run[0] = "run";
-        run[1] = strcmp(words[k], "-") ? absolute(words[k]) : "stdin";
-        run[2] = read_script(words[k]);
-        run[3] = (char *)timeout;
-        int n = 4;
+            die(2, "usage: web run [--timeout SECONDS] [--isolated] FILE|- [ARG...]");
+        char **run = calloc(count + 5, sizeof *run);
+        int n = 0;
+        run[n++] = "run";
+        if (isolated)
+            run[n++] = "--isolated";
+        run[n++] = strcmp(words[k], "-") ? absolute(words[k]) : "stdin";
+        run[n++] = read_script(words[k]);
+        run[n++] = (char *)timeout;
         for (int j = k + 1; j < count; j++)
             run[n++] = words[j];
         words = run;

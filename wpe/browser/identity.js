@@ -1,11 +1,11 @@
-// The browser's identity as the page's own scripts see it, made to match the user agent it sends
-// (browser.c: the user agent profiles). Run at the start of every document, in every frame, before
-// the page's scripts. WebKit says navigator.platform is what uname says ("Linux wasm32": a platform
-// no site knows, and one that contradicts any user agent); a vendor, Firefox's oscpu, Chromium's
-// userAgentData and a touch screen go with the profile.
+// What of the browser's identity WebKit has no property for, as the page's own scripts would see it
+// in that browser: Firefox's navigator.oscpu, Chromium's navigator.userAgentData. Run at the start of
+// every document, in every frame, before the page's scripts (browser.c: identity_script), and only
+// for a user agent that needs it: Safari's identity (the default) needs none. The rest — platform,
+// vendor, hardwareConcurrency, maxTouchPoints, screen, window, time zone — WebKit answers itself
+// (WebKit patch 0012, set by extension.c), in workers too and with native getters.
 //
-//   id: { platform, vendor, oscpu?, touch, brands?: [[brand, major]...], fullVersion?, mobile?,
-//         chPlatform?, chPlatformVersion? }
+//   id: { oscpu?, brands?: [[brand, major]...], fullVersion?, mobile?, chPlatform?, chPlatformVersion? }
 (id) => {
     const proto = Navigator.prototype;
     const define = (name, value) => {
@@ -13,12 +13,8 @@
             Object.defineProperty(proto, name, { get() { return value; }, configurable: true, enumerable: true });
         } catch (e) {}
     };
-    define('platform', id.platform);
-    define('vendor', id.vendor);
     if (id.oscpu)
         define('oscpu', id.oscpu);
-    if (id.touch)
-        define('maxTouchPoints', 5);
     if (!id.brands)
         return;
     const brands = () => id.brands.map(([brand, version]) => ({ brand, version }));

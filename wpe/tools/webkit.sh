@@ -48,10 +48,12 @@ for step in "${steps[@]}"; do
   configure)
     LOG="$B/webkit-configure.log"; : > "$LOG"
     mkdir -p "$O"
+    # glib-compile-resources: the build machine's (CMake would find the guest's in the sysroot first)
     log_run "$LOG" cmake -S "$S" -B "$O" -G Ninja \
       -DCMAKE_TOOLCHAIN_FILE="$B/cross/toolchain.cmake" -DCMAKE_BUILD_TYPE=Release \
       -DCMAKE_INSTALL_PREFIX=/usr -DCMAKE_PREFIX_PATH="$P" \
       "-DCMAKE_C_FLAGS=-O2 -g0 -msimd128 -I$P/include" "-DCMAKE_CXX_FLAGS=-O2 -g0 -msimd128 -I$P/include" \
+      -DGLIB_COMPILE_RESOURCES_EXECUTABLE="$B/host/bin/glib-compile-resources" \
       -DPORT=WPE -DDEVELOPER_MODE=OFF -DUSE_GSTREAMER=OFF -DCMAKE_SKIP_RPATH=ON -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
       -DENABLE_WPE_PLATFORM=ON -DENABLE_WPE_PLATFORM_DRM=OFF -DENABLE_WPE_PLATFORM_HEADLESS=ON \
       -DENABLE_WPE_PLATFORM_COLLABO=ON -DCOLLABO_GUI_CLIENT_DIR="$ROOT/tools/gui/client" \

@@ -1,0 +1,119 @@
+diff --git a/libsoup/http2/soup-client-message-io-http2.c b/libsoup/http2/soup-client-message-io-http2.c
+index 8dc6740..0ad2160 100644
+--- a/libsoup/http2/soup-client-message-io-http2.c
++++ b/libsoup/http2/soup-client-message-io-http2.c
+@@ -1542,6 +1542,36 @@ request_header_is_valid (const char *name)
+         return !g_hash_table_contains (invalid_request_headers, name);
+ }
+ 
++/* Where a header goes among a request's, as Safari (26 on macOS) orders them: those of a navigation
++ * as it sends them, the content headers before them, the cookies last, the rest as they came */
++static int
++safari_header_rank (const char *name)
++{
++        static const char *const order[] = {
++                "content-type", "content-length", "origin", "sec-fetch-dest", "user-agent", "accept",
++                "referer", "sec-fetch-site", "sec-fetch-mode", "accept-language", "priority", "accept-encoding",
++        };
++        for (guint i = 0; i < G_N_ELEMENTS (order); i++) {
++                if (!g_ascii_strcasecmp (name, order[i]))
++                        return (int)i * 10;
++        }
++        return g_ascii_strcasecmp (name, "cookie") ? 115 : 200;
++}
++
++/* sorts n headers by safari_header_rank, keeping the order of those of the same rank */
++static void
++order_headers (nghttp2_nv *nv, guint n)
++{
++        for (guint i = 1; i < n; i++) {
++                nghttp2_nv item = nv[i];
++                int rank = safari_header_rank ((const char *)item.name);
++                guint j = i;
++                for (; j > 0 && safari_header_rank ((const char *)nv[j - 1].name) > rank; j--)
++                        nv[j] = nv[j - 1];
++                nv[j] = item;
++        }
++}
++
+ static void
+ send_message_request (SoupMessage          *msg,
+                       SoupClientMessageIOHTTP2   *io,
+@@ -1576,14 +1606,25 @@ send_message_request (SoupMessage          *msg,
+         SoupMessageHeaders *request_headers = soup_message_get_request_headers (msg);
+         SoupMessageHeadersIter iter;
+         const char *name, *value;
++        gboolean document = FALSE, has_priority = FALSE;
+         soup_message_headers_iter_init (&iter, request_headers);
+         while (soup_message_headers_iter_next (&iter, &name, &value)) {
+                 if (!request_header_is_valid (name))
+                         continue;
++                if (!g_ascii_strcasecmp (name, "sec-fetch-dest"))
++                        document = !g_ascii_strcasecmp (value, "document") || !g_ascii_strcasecmp (value, "iframe");
++                has_priority |= !g_ascii_strcasecmp (name, "priority");
+ 
+                 const nghttp2_nv nv = MAKE_NV2 (name, value);
+                 g_array_append_val (headers, nv);
+         }
++        /* a page's own request goes first, as Safari says (RFC 9218) */
++        if (document && !has_priority) {
++                const nghttp2_nv nv = MAKE_NV2 ("priority", "u=0, i");
++                g_array_append_val (headers, nv);
++        }
++        /* the headers after the pseudo-headers in Safari's order */
++        order_headers ((nghttp2_nv *)headers->data + G_N_ELEMENTS (pseudo_headers), headers->len - G_N_ELEMENTS (pseudo_headers));
+ 
+         GInputStream *body_stream = soup_message_get_request_body_stream (msg);
+         SoupSessionFeature *logger = soup_session_get_feature_for_message (data->item->session, SOUP_TYPE_LOGGER, data->msg);
+@@ -2138,7 +2179,6 @@ soup_client_message_io_http2_init (SoupClientMessageIOHTTP2 *io)
+         io->iface.funcs = &io_funcs;
+ }
+ 
+-#define MAX_HEADER_TABLE_SIZE 65536 /* Match size used by Chromium/Firefox */
+ 
+ SoupClientMessageIO *
+ soup_client_message_io_http2_new (SoupConnection *conn)
+@@ -2155,11 +2195,13 @@ soup_client_message_io_http2_new (SoupConnection *conn)
+ 
+         soup_client_message_io_http2_set_owner (io, soup_connection_get_owner (conn));
+ 
++        /* the SETTINGS Safari opens a connection with (26 on macOS), in its order */
+         int stream_window_size = soup_connection_get_http2_initial_stream_window_size (conn);
+         const nghttp2_settings_entry settings[] = {
+-                { NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, stream_window_size },
+-                { NGHTTP2_SETTINGS_HEADER_TABLE_SIZE, MAX_HEADER_TABLE_SIZE },
+                 { NGHTTP2_SETTINGS_ENABLE_PUSH, 0 },
++                { NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100 },
++                { NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, stream_window_size },
++                { NGHTTP2_SETTINGS_NO_RFC7540_PRIORITIES, 1 },
+         };
+         NGCHECK (nghttp2_submit_settings (io->session, NGHTTP2_FLAG_NONE, settings, G_N_ELEMENTS (settings)));
+         NGCHECK (nghttp2_session_set_local_window_size (io->session, NGHTTP2_FLAG_NONE, 0, soup_connection_get_http2_initial_window_size (conn)));
+diff --git a/libsoup/soup-connection.c b/libsoup/soup-connection.c
+index e164421..8d4b191 100644
+--- a/libsoup/soup-connection.c
++++ b/libsoup/soup-connection.c
+@@ -94,8 +94,9 @@ static gboolean idle_timeout (gpointer conn);
+  */
+ #define SOUP_CONNECTION_UNUSED_TIMEOUT 3
+ 
+-#define HTTP2_INITIAL_WINDOW_SIZE (15 * 1024 * 1024) /* 15MB */
+-#define HTTP2_INITIAL_STREAM_WINDOW_SIZE (6 * 1024 * 1024) /* 6MB */
++/* Safari's (26 on macOS): a 10 MB connection window, 2 MB for each stream */
++#define HTTP2_INITIAL_WINDOW_SIZE (10 * 1024 * 1024)
++#define HTTP2_INITIAL_STREAM_WINDOW_SIZE (2 * 1024 * 1024)
+ 
+ static void
+ soup_connection_init (SoupConnection *conn)
+@@ -624,10 +625,10 @@ new_tls_connection (SoupConnection    *conn,
+                 g_ptr_array_add (advertised_protocols, "h2");
+                 break;
+         default:
++                /* h2 and http/1.1, as browsers offer them (Safari's ClientHello) */
+                 if (is_not_using_http_proxy (conn))
+                         g_ptr_array_add (advertised_protocols, "h2");
+                 g_ptr_array_add (advertised_protocols, "http/1.1");
+-                g_ptr_array_add (advertised_protocols, "http/1.0");
+                 break;
+         }
+         g_ptr_array_add (advertised_protocols, NULL);

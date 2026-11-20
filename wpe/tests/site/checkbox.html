@@ -1,0 +1,19 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Just a moment...</title></head>
+<body style="margin: 0; font-family: sans-serif">
+<!-- a check as Cloudflare's interstitial shows it: the widget's own box drawn after a moment (its
+     inside out of the page's reach, as a closed shadow root keeps it), its response field beside it -->
+<h2 style="margin: 40px 56px 20px">Performing security verification</h2>
+<div style="margin-left: 56px">
+  <div id="widget" style="width: 300px; height: 65px; background: #fafafa; border: 1px solid #e0e0e0; position: relative"></div>
+  <input type="hidden" name="cf-turnstile-response" id="cf-chl-widget-test_response">
+</div>
+<script>
+  setTimeout(() => {
+    const shadow = document.getElementById('widget').attachShadow({ mode: 'closed' });
+    shadow.innerHTML = '<div id="box" style="position: absolute; left: 18px; top: 20px; width: 20px; height: 20px; border: 2px solid #555; background: #fff; cursor: pointer"></div>' +
+      '<span style="position: absolute; left: 52px; top: 22px">Verify you are human</span>';
+    shadow.getElementById('box').addEventListener('click', e => { if (e.isTrusted) setTimeout(() => location.href = 'second.html?verified=1', 500); });
+  }, 3000);
+</script>
+</body></html>

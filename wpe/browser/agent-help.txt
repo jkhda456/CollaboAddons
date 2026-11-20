@@ -13,7 +13,9 @@ Topics
   wait        loads and waits: open, back, reload, wait text|selector|gone|load, slow pages
   screenshot  pictures: web screenshot, --screenshot on an action, when each is taken
   js          JavaScript in the page: eval (an expression), run (a file or stdin, await, args)
-  identity    user agent, headers, languages, cookies, injected scripts, settings
+  identity    who the browser says it is: user agent, machine, languages, time zone, human
+              input; headers, cookies, injected scripts, settings
+  challenge   robot checks and captchas (Cloudflare, Turnstile, reCAPTCHA...), web search
   network     developer tools: requests, details, bodies, search, HAR files, export as curl...
   intercept   pause the page's requests: show, send changed, drop, answer with a mock
   browsers    several browsers (-n NAME), start options, environment, logs, closing
@@ -39,6 +41,9 @@ The rules that matter most
      `web run - <<'EOF' ... EOF`.
   8. Exit statuses: 0 done, 1 failed, 2 usage, 3 timed out, 4 not found, 5 no browser,
      6 requests paused for you (web intercept). Messages go to stderr.
+  9. To search the web, `web search 'WORDS'` (it moves on from an engine that shows a robot check).
+     When a page answers with a check (`web open` ends with a `challenge:` line), run
+     `web challenge solve` before anything else; a picture puzzle it leaves to you (exit 1).
 
 ## start: how the browser works, the loop, a first session
 
@@ -216,8 +221,10 @@ TARGET (for click, dblclick, rightclick, hover, type, select) is, tried in this 
   2. a CSS selector: the first element it matches ('#login', 'input[name=q]', 'form button')
   3. the visible text of a link, button, label, tab, menu item, summary or option: the first
      whose whole text is it (any case, spaces collapsed), else the first that contains it
-  The element is scrolled to the middle of the view and clicked at a point where it is on top.
-  Nothing found: exit 4, "nothing matches ...".
+  The element is scrolled to the middle of the view and clicked at a point where it is on top
+  (with humanize on, the default: a point near its middle, not the exact center, reached by the
+  pointer's path from where it was, the button held a tenth of a second; keys come at a typing
+  pace). Nothing found: exit 4, "nothing matches ...".
 
   Pitfalls of targets
   - A number from an older read (another page, or before the page changed) is gone: it is then
@@ -467,19 +474,35 @@ More
 
 ## identity: how the browser presents itself
 
-Each of these applies from the next request on; `web reload` shows the current page with it.
-`web settings` shows them all.
+The browser says it is Safari on a Mac by default — the same engine (WebKit), so what a site
+checks agrees with what it is told. Everything a page can read of the machine is answered by
+WebKit itself, in workers too, with native getters: navigator.platform, vendor,
+hardwareConcurrency, maxTouchPoints, the screen (a real Mac's or PC's, drawn from recorded
+machines and kept for this browser across restarts), the window's place and size on it, the
+time zone. The browser's own scripts (read, click's targets) run in a JavaScript world the page
+cannot see: no variables, attributes or hooks of theirs are in the page. Its network traffic is
+Safari's too (TLS ClientHello, HTTP/2 settings, header order). Each of these applies from the
+next request on; `web reload` shows the current page with it. `web settings` shows them all.
 
-  web ua [PROFILE | 'USER AGENT' | list]   the user agent. Profiles: default (WebKit on Linux),
-                       safari (Safari on a Mac: the same engine, the most consistent choice),
+  web identity [new [SEED]]   who the browser says it is: user agent, machine, languages, time
+                       zone, human input; new: another machine of the same kind
+  web ua [PROFILE | 'USER AGENT' | list]   the user agent. Profiles: safari (the default: Safari
+                       on a Mac, the most consistent choice), webkit (WebKit's own on Linux),
                        chrome, edge, firefox (on Windows), iphone, android (mobile sites; with
-                       `web resize 390x844`). The page's navigator and Chrome's Sec-CH-UA
-                       headers follow
+                       `web resize 390x844`). The page's navigator, screen and window and
+                       Chrome's Sec-CH-UA headers follow. `default` = safari
+  web tz [ZONE | auto | default]   the time zone pages see (Date, Intl): Asia/Seoul, Europe/Berlin;
+                       auto: where the browser's address is (asks ipinfo.io once); default: UTC
+  web humanize [on | off]   input as a person gives it (on, the default): the pointer travels to
+                       a point inside what it clicks, buttons and keys are held and spaced as a
+                       person's (about 0.1 s each, 0.15 s between keys; a long text faster), the
+                       wheel turns notch by notch. off: each action's events at once (faster)
   web header [list]                       headers put on every request of the page
   web header set NAME VALUE [--host HOST] add or replace one; --host: only to HOST and its
                        subdomains (use it for tokens); an empty VALUE takes the header off
   web header unset NAME [--host HOST] | web header clear
-  web lang [LANGUAGES | default]          ko-KR,en: Accept-Language, navigator.languages, Intl
+  web lang [LANGUAGES | default]          ko-KR,en: Accept-Language, navigator.languages, Intl;
+                       as Safari, pages see the first one only (Accept-Language: ko-KR,ko;q=0.9)
   web cookie [list [URL] [--all]]         the cookies for URL (the page's), or all of them
   web cookie set 'NAME=VALUE[; Domain=..; Path=..; Max-Age=..; Secure; HttpOnly]'... [--url URL]
                        a Set-Cookie, or a Cookie header ('a=1; b=2': two cookies); for the
@@ -490,6 +513,18 @@ Each of these applies from the next request on; `web reload` shows the current p
                        page's own scripts
   web settings         all of the above, and the developer tools
 
+  $ web identity
+  user agent: safari (Safari on a Mac: the same engine, the closest match (the default))
+    Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0.1 Safari/605.1.15
+    navigator.platform "MacIntel", vendor "Apple Computer, Inc."
+    device: screen 1920x1200 (available 1920x1170 at 0,25), 24-bit color, window at 421,144 with 0x79 around the page, 8 cores, 0 touch points (seed 3440150542)
+  languages: the environment's (web lang ko-KR,en); as Safari tells them: navigator.languages ["en-US"], Accept-Language: en-US,en;q=0.9
+  time zone: the guest's, UTC (Date, Intl; web tz ZONE | auto | default)
+  humanize: on (the pointer travels to where it clicks, buttons and keys are held and spaced as a person's, the wheel turns in notches)
+  $ web tz auto
+  time zone: Asia/Seoul (Date, Intl; web tz ZONE | auto | default)
+    from the address 1.209.170.124 in KR, by ipinfo.io
+  (from the next request on: web reload shows this page with it)
   $ web ua chrome; web reload
   $ web header set Authorization 'Bearer eyJ...' --host api.example.com
   $ web lang ko-KR,en
@@ -506,13 +541,78 @@ Each of these applies from the next request on; `web reload` shows the current p
   developer tools: off (web devtools on records the network)
 
 Notes
+  - Keep the default identity (safari) unless a site needs another: the engine is WebKit, so a
+    Chrome or Firefox user agent is a claim the engine's own behavior and its network traffic
+    (Safari's) contradict, which robot checks look for.
+  - A site whose robot check sees a time zone far from the address (a Korean address, UTC):
+    `web tz auto` once, then `web reload`.
+  - `web eval` and `web run` run in the page's world (its variables) — the page can notice what
+    they do there. `--isolated` runs them in a world of their own (the DOM, not the page's
+    variables), invisible to it: use that to read a page that watches for robots.
   - A Cookie header cannot be set with `web header` (the cookie jar replaces it): exit 2 says to
     use `web cookie set`.
-  - A site that turns this browser away ("browser not supported"): try `web ua safari`, then
-    `web ua chrome`, then `web reload`. Another user agent changes what the site is told, not
-    what the engine can do (no WebAssembly, WebGL, video here).
+  - A site that turns this browser away ("browser not supported"): try `web ua chrome`, then
+    `web reload`. Another user agent changes what the site is told, not what the engine can do
+    (no WebAssembly, WebGL, video here).
   - Settings can also be given when a browser starts:
-    `web --user-agent chrome --lang ko-KR open URL` (web --agent-help browsers).
+    `web --user-agent chrome --lang ko-KR --timezone auto open URL` (web --agent-help browsers).
+
+## challenge: robot checks, captchas and searching
+
+Sites behind Cloudflare, Akamai, DataDome, HUMAN and others decide whether a person is there;
+search engines do too. The browser looks like Safari on a Mac to them (identity) and moves like
+a person (humanize); what is left is a check on the page, which `web open` names on a last line
+and `web challenge` deals with:
+
+  web challenge [status]   the check on the page, if any: what it is and what gets past it
+  web challenge solve [TIMEOUT]   get past it as a person does (seconds, 90): wait for one that
+                       passes by itself (Cloudflare's), click a checkbox once it shows
+                       (Turnstile, reCAPTCHA, hCaptcha: at most three times), press and hold a
+                       "press and hold" button; then the page it stood in front of loads.
+                       Exit 0 passed (the page's address and title), 3 still there, 1 a
+                       picture puzzle or an outright refusal (it says which)
+  web search WORDS... [--engine E[,E...]]   search the web: DuckDuckGo, else Bing, Google, Brave
+                       (or the engines given, in order; naver too), moving on from an engine
+                       that shows a robot check or refuses; then `web read` the results
+
+  $ web open https://www.scrapingcourse.com/cloudflare-challenge
+  https://www.scrapingcourse.com/cloudflare-challenge
+  Just a moment...
+  challenge: cloudflare: Cloudflare's check (Just a moment...): it runs, then the page loads (web challenge solve gets past it)
+  $ web challenge solve
+  passed (cloudflare)
+  https://www.scrapingcourse.com/cloudflare-challenge
+  Cloudflare Challenge - ScrapingCourse.com
+  $ web challenge                            (a page without one)
+  no robot check on this page (https://www.scrapingcourse.com/cloudflare-challenge)
+  $ web search 'camoufox anti-detect browser'
+  search: duckduckgo "camoufox anti-detect browser"
+  https://html.duckduckgo.com/html/?q=camoufox%20anti-detect%20browser
+  camoufox anti-detect browser at DuckDuckGo
+  $ web read 2500                            (the results: [N] links with their addresses)
+  $ web search 'wpe webkit' --engine google  (Google answers in the address's language)
+  search: google "wpe webkit"
+  https://www.google.com/search?q=wpe%20webkit&sei=ffn_apDYFtPl2roPpfqm8AY
+  wpe webkit - Google 검색
+
+What it recognizes: cloudflare (the interstitial "Just a moment..."), turnstile (the widget in a
+page), cloudflare-block (refused: "Sorry, you have been blocked"), recaptcha, recaptcha-images,
+google-sorry ("unusual traffic"), hcaptcha, hcaptcha-images, datadome (a slider), press-and-hold
+(HUMAN), aws-waf (Amazon's: passes by itself in a few seconds), blocked (Akamai's "Access Denied"),
+duckduckgo-anomaly, check (a page that asks for a person in words).
+
+A picture puzzle (recaptcha-images, hcaptcha-images, datadome, duckduckgo-anomaly) is left to you:
+`web screenshot`, look, `web click X Y` on each tile it asks for, then its Verify button. A
+refusal (cloudflare-block, google-sorry, blocked) passes with nothing on the page: wait, use
+another site or engine (`web search` does), or another machine (`web identity new`).
+
+Notes
+  - Run `web challenge solve` right after the `open` that showed the check: Cloudflare's check
+    takes 10-40 s here (its script is slow in this browser's JavaScript engine) before its
+    checkbox shows; solve waits for that.
+  - The check passes for this browser's cookies (cf_clearance...): later pages of the site load
+    without it, while the browser keeps them (not with --ephemeral).
+  - Do not hammer a site that shows checks: each new check is stricter. One `solve`, then read.
 
 ## network: the developer tools (requests, bodies, HAR, export)
 
@@ -714,14 +814,15 @@ in parallel only across different names.
 Browser options go BEFORE the command. A browser this command starts gets them all; a running
 one gets the settings among them and says the others need a new start (`web close` first):
   settings:   --user-agent PROFILE|UA   --header 'NAME: VALUE'   --header-for HOST 'NAME: VALUE'
-              --lang LANGUAGES   --inject FILE   --devtools
+              --lang LANGUAGES   --timezone ZONE|auto   --humanize on|off   --inject FILE   --devtools
   start only: --ephemeral (no cookies, storage or history kept)   --ignore-tls-errors
               --size WxH
 
   $ web --ephemeral --user-agent iphone --size 390x844 -n phone open example.com
 
 Environment of the `web` that starts a browser: WEB_USER_AGENT, WEB_HEADERS (lines NAME: VALUE),
-WEB_LANG, WEB_DEVTOOLS (1, or text|all|none), WEB_BROWSER_ARGS (more options),
+WEB_LANG, WEB_TIMEZONE (a zone or auto), WEB_HUMANIZE (on, off), WEB_DEVTOOLS (1, or
+text|all|none), WEB_BROWSER_ARGS (more options),
 WEB_START_TIMEOUT (seconds to wait for the start, 300), WPE_BROWSER_DEBUG=1 (log loads).
 
 ## errors: exit statuses and what to do
@@ -766,9 +867,18 @@ Messages and what to do
       Normal on the first start: wait.
   paused: N requests paused, waiting for the agent (exit 6)
       web intercept list / send / drop / respond, or web intercept off.
+  challenge: KIND: WHAT (...) (the last line of an open, back, click... that loaded a page)
+      A robot check stands in front of the page: `web challenge solve`, then read.
+  still there after S s and N clicks: KIND: ... (exit 3, web challenge solve)
+      The check did not let the browser through: `web screenshot` to see it; try once more
+      later, `web identity new` (another machine), or another site (`web search` moves on).
+  KIND: a picture puzzle / refused (exit 1, web challenge solve)
+      recaptcha-images, hcaptcha-images, datadome, duckduckgo-anomaly: solve it by looking
+      (`web screenshot`, `web click X Y`); cloudflare-block, google-sorry, blocked: nothing on the
+      page passes it.
 
-Sites that do not work: robot checks that need WebAssembly (AWS WAF: Amazon) stay on an empty
-check page; video, audio, WebGL, WebRTC and PDF viewing are not there. Very script-heavy
+Sites that do not work: those that need WebAssembly (some robot checks among them) stay on an
+empty page; video, audio, WebGL, WebRTC and PDF viewing are not there. Very script-heavy
 applications are slow: use longer timeouts, or the site's API (devtools, then curl).
 
 ## recipes: whole tasks
@@ -782,9 +892,11 @@ Log in, then check it worked
   web wait text 'Secure Area' 10 && echo logged-in
   (the cookies stay in the browser: later commands are logged in)
 
-Search a site and read the results
-  web open 'wpe webkit'                      # words: a DuckDuckGo search
+Search the web and read the results
+  web search 'wpe webkit'                    # DuckDuckGo, else Bing, Google, Brave
   web read 4000
+  # a site behind a robot check (web open ends with "challenge: ..."):
+  web open https://site.example/page; web challenge solve; web read
   # or on the site's own search box:
   web read | grep -n 'input'                 # find the box, e.g. [2] input text q:
   web type 'wireless mouse' 2; web key Enter

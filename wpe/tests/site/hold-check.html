@@ -1,0 +1,17 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Access to this page has been denied</title></head>
+<body>
+<!-- a "press and hold" check as HUMAN (PerimeterX) shows it: held 5 s or more, it lets the browser through -->
+<p>Press &amp; Hold to confirm you are a human (and not a bot).</p>
+<div id="px-captcha" style="width: 310px; height: 60px; margin: 40px; border: 2px solid #333; text-align: center; line-height: 60px">Press &amp; Hold</div>
+<script>
+  let down = 0, moves = 0;
+  const box = document.getElementById('px-captcha');
+  box.addEventListener('mousedown', e => { down = e.timeStamp; moves = 0; });
+  box.addEventListener('mousemove', () => { if (down) moves++; });
+  box.addEventListener('mouseup', e => {
+    if (down && e.timeStamp - down >= 5000 && e.isTrusted) location.href = 'second.html?held=' + Math.round((e.timeStamp - down) / 1000) + '&moves=' + moves;
+    down = 0;
+  });
+</script>
+</body></html>

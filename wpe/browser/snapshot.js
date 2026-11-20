@@ -1,6 +1,8 @@
 // The page as text for an agent: what a reader sees, in reading order, with every visible
 // interactive element numbered — [N] — so that `web click N`, `web type TEXT N`, `web select N
-// VALUE` can name it. The numbers are kept on the elements (data-wpe-ref) until the next read.
+// VALUE` can name it. The numbers are kept until the next read in globalThis.__wpeRefs — the
+// browser's own JavaScript world (AGENT_WORLD), which shares the DOM with the page but not its
+// globals: the page sees no mark on its elements.
 // Returns a string. Called as (function(maxChars, includeHidden) { ... }).
 (function (maxChars, includeHidden) {
   "use strict";
@@ -14,8 +16,7 @@
     "[role=radio], [role=tab], [role=menuitem], [role=option], [role=switch], [role=combobox], [role=textbox], " +
     "[contenteditable=''], [contenteditable=true], [onclick], [tabindex]:not([tabindex='-1'])";
 
-  for (const e of document.querySelectorAll("[data-wpe-ref]"))
-    e.removeAttribute("data-wpe-ref");
+  const refs = globalThis.__wpeRefs = [];
 
   let line = "";
   function emit(text) {
@@ -83,10 +84,10 @@
 
     if (el.matches(INTERACTIVE)) {
       const n = ++ref;
-      el.setAttribute("data-wpe-ref", String(n));
+      refs[n] = el;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT" || el.isContentEditable) {
         const description = describeInput(el);
-        if (description === null) { ref--; el.removeAttribute("data-wpe-ref"); return; }
+        if (description === null) { ref--; refs.length = n; return; }
         emit(` [${n}] ${description} `);
         return;
       }

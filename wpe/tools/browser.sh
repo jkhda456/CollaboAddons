@@ -43,7 +43,7 @@ INCLUDES=(
   -I"$P/include" -I"$P/include/glib-2.0" -I"$P/lib/glib-2.0/include" -I"$P/include/libsoup-3.0"
   -I"$P/include/freetype2"   # the captions of --screenshot (libpng and FreeType: WebKit's own)
 )
-python3 "$A/browser/gen-js.py" "$OUT/browser-js.h.new" "$A/browser/snapshot.js" "$A/browser/target.js" "$A/browser/identity.js" "$A/browser/devtools.js"
+python3 "$A/browser/gen-js.py" "$OUT/browser-js.h.new" "$A/browser/snapshot.js" "$A/browser/target.js" "$A/browser/identity.js" "$A/browser/devtools.js" "$A/browser/challenge.js"
 cmp -s "$OUT/browser-js.h.new" "$OUT/browser-js.h" 2>/dev/null && rm "$OUT/browser-js.h.new" || mv "$OUT/browser-js.h.new" "$OUT/browser-js.h"
 
 objects=()
@@ -58,6 +58,7 @@ compile() { # source object compiler flags...
 echo "== wpe-browser"
 compile "$A/browser/browser.c" "$OUT/browser.o" "$CC" -std=gnu11
 compile "$A/browser/extension.c" "$OUT/extension.o" "$CC" -std=gnu11
+compile "$A/browser/human.c" "$OUT/human.o" "$CC" -std=gnu11
 compile "$A/browser/tls.c" "$OUT/tls.o" "$CC" -std=gnu11
 compile "$A/browser/main.cpp" "$OUT/main.o" "$CXX" -std=c++20 -fno-exceptions -fno-rtti
 

@@ -4,7 +4,7 @@
  *
  *   wpe-browser [--name NAME] [--size WxH] [--ephemeral] [--data-dir DIR] [--ignore-tls-errors]
  *               [--user-agent UA|PROFILE] [--header 'NAME: VALUE'] [--header-for HOST 'NAME: VALUE']
- *               [--lang LANGUAGES] [--inject FILE] [--devtools] [URL]
+ *               [--lang LANGUAGES] [--timezone ZONE|auto] [--humanize on|off] [--inject FILE] [--devtools] [URL]
  *
  * The socket is $COLLABO_WEB_DIR/NAME.sock (/tmp/.collabo-web by default). A request is a list of
  * words: "N\n" then N times "LENGTH\n" and the bytes; the answer is "STATUS LENGTH\n" and the
@@ -12,8 +12,14 @@
  * `web intercept`). See web.c for the commands.
  *
  * Input an agent asks for (click, type, key, scroll) is sent into the page as the display's own
- * pointer and keyboard events would be, so pages see real events (hover, focus, keydown...). With
- * --screenshot FILE an action also leaves a picture of the page with where it acted marked.
+ * pointer and keyboard events would be, so pages see real events (hover, focus, keydown...), and
+ * with a person's paths and timing (human.c; `web humanize off`: at once). With --screenshot FILE an
+ * action also leaves a picture of the page with where it acted marked.
+ *
+ * Who it says it is (`web ua`, `web identity`) is answered by WebKit itself in the page's processes
+ * (WebKit patch 0012, through extension.c): navigator, screen, window and time zone, of a real
+ * machine drawn from recorded ones, as Camoufox does for Firefox; the browser's own scripts run in a
+ * JavaScript world the page cannot see (AGENT_WORLD).
  */
 #define _GNU_SOURCE
 #include <ctype.h>
@@ -29,10 +35,18 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <unicode/ucal.h>
 #include <wpe/webkit.h>
 #include <wpe/wpe-platform.h>
 
-#include "browser-js.h" /* snapshot_js, target_js, identity_js, devtools_js: the scripts, as C strings (gen-js.py) */
+#include "browser-js.h" /* snapshot_js, target_js, identity_js, devtools_js, challenge_js: the scripts, as C strings (gen-js.py) */
+#include "human.h"      /* a person's paths and timing for the actions */
+
+/* The browser's own scripts (reading the page, finding targets, counting the input it took) run in
+ * a JavaScript world of their own, as an extension's content scripts do: they share the page's DOM
+ * but not its globals or prototypes, so the page sees no variable, attribute or hook of theirs and
+ * cannot change what they call. `web eval` and `web run` are the page's world unless --isolated. */
+#define AGENT_WORLD "collabo"
 
 /* An inspector frontend in the program (WebKit patch 0011): the inspector protocol's messages, as
  * text, to `callback` and from webkit_inspector_frontend_send; the developer tools' (devtools.js) */
@@ -68,7 +82,38 @@ typedef struct {
     gboolean touch, mobile;
     char *brand, *major;        /* Chromium's: "Google Chrome", "151"; NULL for the others */
     char *ch_platform, *ch_platform_version;
+    char *os;                   /* the device's kind: "mac", "windows", "iphone", "android", "linux" */
 } Identity;
+
+/* The machine the identity is on, drawn from real devices' (device_presets) by the browser's seed:
+ * what WebKit answers for navigator, screen and window (WebKit patch 0012, set in each web process
+ * by extension.c) */
+typedef struct {
+    gboolean set;               /* FALSE: WebKit's own (the guest's display) */
+    int screen[7];              /* width, height, availLeft, availTop, availWidth, availHeight, colorDepth */
+    int window[4];              /* screenX, screenY, outer width - view width, outer height - view height */
+    int cores, touch_points;
+} Device;
+
+/* an input event of an action, planned for its time (ms from the action's start) and sent then */
+typedef enum { EV_MOVE, EV_DOWN, EV_UP, EV_KEY_DOWN, EV_KEY_UP, EV_MOD_DOWN, EV_MOD_UP, EV_WHEEL } EventKind;
+typedef struct {
+    EventKind kind;
+    double t;
+    unsigned seq;               /* order among events of the same time */
+    double x, y;                /* MOVE, DOWN, UP, WHEEL: where; WHEEL: x, y and dx, dy */
+    double dx, dy;
+    guint button, keysym, code; /* DOWN, UP: button; KEY_*, MOD_*: keysym, code */
+    unsigned bit;               /* MOD_*: the modifier */
+    int count;                  /* DOWN: the click count */
+} PlannedEvent;
+
+typedef struct {
+    GArray *events;             /* PlannedEvent */
+    double t;                   /* where the plan is: ms from its start */
+    double px, py;              /* where the pointer will be */
+    gboolean have_pointer;
+} Plan;
 
 /* a header put on requests (`web header`): host "" every host, value "" takes it off */
 typedef struct {
@@ -102,14 +147,26 @@ struct Browser {
     unsigned web_process_crashes;
     unsigned modifiers;         /* WPEModifiers held by injected key events */
     unsigned sent[3];           /* input sent to the page: mousedown, mouseup, keydown (input sync) */
+    double pointer_x, pointer_y; /* where the pointer is (the last move sent) */
+    gboolean pointer_known;
+    gint64 last_release;        /* when the last button was let go (µs, monotonic) */
+    GRand *rand;                /* the human input's draws */
+    gboolean humanize;          /* input as a person gives it (human.c), or each action at once */
     gboolean serving;           /* answering requests: from the end of the first load */
     WPEView *wpe_view;          /* for the ready line */
     /* settings (start options, `web set`, `web ua`, `web header`, `web lang`, `web inject`) */
     Identity identity;
     char *default_user_agent;   /* WebKit's own, with the machine named as desktop Linux */
+    Device device;              /* the machine the identity is on */
+    guint32 seed;               /* draws the device: kept in the data folder, so a browser stays the same machine */
+    char *seed_file;            /* NULL: ephemeral, a new machine each start */
+    int view_width, view_height; /* the page's size, for a device whose screen holds it */
+    char *time_zone;            /* NULL: the guest's (UTC); an IANA name */
+    char *identity_sent;        /* what the web processes have (printed) */
     GPtrArray *headers;         /* Header */
     GPtrArray *scripts;         /* Script */
     char **languages;           /* NULL: WebKit's, from the environment */
+    char *languages_sent;       /* what WebKit has (joined) */
     char *rules_sent;           /* the header rules the web processes have (printed) */
     char *scripts_installed;    /* a checksum of the user scripts the view has */
     GPtrArray *history;         /* Visit, oldest first */
@@ -154,6 +211,7 @@ struct Request {
     gint64 sync_deadline;
     guint sync_id;
     double x, y;                /* where the request acts, and what is there */
+    double target_size;         /* how big what it aims at is (px): how fast a person's pointer gets there */
     char *what;
     JSCall *js;                 /* JavaScript running for it: told when the request is answered first */
     void (*after_bodies)(Request *r); /* network search, har save: once the bodies being read are in */
@@ -181,6 +239,26 @@ struct Request {
     ShotCall *shot;
     guint shot_timeout_id;
     void (*after_shot)(Request *r);
+    /* input planned for its times (human input), being sent */
+    GArray *plan;               /* PlannedEvent, in time order */
+    guint plan_next;
+    gint64 plan_start;          /* µs, monotonic */
+    guint plan_id;
+    void (*plan_done)(Request *r);
+    /* web challenge: what it saw, how often it clicked */
+    char *check_kind, *check_what;
+    gint64 check_since;         /* when it first saw this check (µs, monotonic) */
+    gint64 check_last_act;      /* when it last clicked or held */
+    int check_acts;
+    gboolean check_seen;        /* a check was on the page at some point */
+    /* a load's answer goes here instead (title, challenge.js's line or NULL): web search */
+    void (*loaded)(Request *r, const char *title, const char *check);
+    char **engines;             /* web search: the engines to try, in order */
+    int engine;
+    gboolean settled;           /* its page had a moment to move on by itself */
+    unsigned settle_generation;
+    char *query;
+    GString *skipped;
 };
 
 static Browser browser;
@@ -205,6 +283,13 @@ static void request_free(Request *r)
         g_source_remove(r->shot_timeout_id);
     if (r->shot)
         r->shot->r = NULL;
+    if (r->plan_id) {
+        /* its input stopped half way: no key or button stays down */
+        g_source_remove(r->plan_id);
+        browser.modifiers = 0;
+    }
+    if (r->plan)
+        g_array_free(r->plan, TRUE);
     g_list_free_full(r->cookies, (GDestroyNotify)soup_cookie_free);
     browser.load_waiters = g_list_remove(browser.load_waiters, r);
     browser.pause_waiters = g_list_remove(browser.pause_waiters, r);
@@ -225,6 +310,12 @@ static void request_free(Request *r)
     g_free(r->shot_label);
     g_free(r->shot_note);
     g_free(r->held_text);
+    g_free(r->check_kind);
+    g_free(r->check_what);
+    g_strfreev(r->engines);
+    g_free(r->query);
+    if (r->skipped)
+        g_string_free(r->skipped, TRUE);
     g_free(r);
 }
 
@@ -281,14 +372,39 @@ static const char *paused_note(void)
 
 /* The answer to a finished load: its address and the document's title (the view's title
  * property can come after the load has finished). */
+/* challenge.js's line as the last of a load's answer: "challenge: WHAT (web challenge ...)" */
+static char *check_note(const char *line)
+{
+    char **f = line && *line ? g_strsplit(line, "\t", 6) : NULL;
+    char *note = NULL;
+    if (f && g_strv_length(f) == 6) {
+        const char *how = !strcmp(f[1], "blocked") ? "the site turns this browser away"
+                        : !strcmp(f[1], "agent") ? "web screenshot shows it; web challenge says more"
+                        : "web challenge solve gets past it";
+        note = g_strdup_printf("challenge: %s: %s (%s)\n", f[0], f[5], how);
+    }
+    g_strfreev(f);
+    return note ? note : g_strdup("");
+}
+
 static void loaded_title_read(Request *r, JSCValue *value, GError *error)
 {
-    char *title = !error && value && jsc_value_is_string(value) ? jsc_value_to_string(value) : NULL;
+    char *text = !error && value && jsc_value_is_string(value) ? jsc_value_to_string(value) : NULL;
+    char *check = text ? strchr(text, '\001') : NULL;
+    if (check)
+        *check++ = 0;
+    if (r->loaded) {
+        r->loaded(r, text ? text : "", check && *check ? check : NULL);
+        g_free(text);
+        return;
+    }
+    char *note = check_note(check);
     const char *uri = webkit_web_view_get_uri(browser.view);
     const char *view_title = webkit_web_view_get_title(browser.view);
-    replyf(r, ST_OK, "%s%s\n%s\n%s", r->done_text ? r->done_text : "", uri ? uri : "about:blank",
-           title ? title : view_title ? view_title : "", paused_note());
-    g_free(title);
+    replyf(r, ST_OK, "%s%s\n%s\n%s%s", r->done_text ? r->done_text : "", uri ? uri : "about:blank",
+           text ? text : view_title ? view_title : "", note, paused_note());
+    g_free(note);
+    g_free(text);
 }
 
 static void reply_loaded(Request *r)
@@ -303,7 +419,9 @@ static void reply_loaded(Request *r)
         g_source_remove(r->poll_id);
         r->poll_id = 0;
     }
-    call_js(r, "return document.title;", NULL, loaded_title_read);
+    char *body = g_strconcat("return document.title + '\\u0001' + ((", challenge_js, ")() || '');", NULL);
+    call_js(r, body, NULL, loaded_title_read);
+    g_free(body);
 }
 
 static void finish_load_waiters(int status, const char *why)
@@ -646,10 +764,11 @@ static void eval_finished(GObject *source, GAsyncResult *result, gpointer data)
     js_call_end(data, value, error);
 }
 
-/* Runs `body` (an async function's body) with `args` (a{sv}, floating ok) as its variables. */
+/* Runs `body` (an async function's body) with `args` (a{sv}, floating ok) as its variables, in the
+ * browser's own world (AGENT_WORLD): the page's DOM, none of its globals */
 static void call_js(Request *r, const char *body, GVariant *args, JSDone done)
 {
-    webkit_web_view_call_async_javascript_function(browser.view, body, -1, args, NULL, NULL, NULL, js_finished,
+    webkit_web_view_call_async_javascript_function(browser.view, body, -1, args, AGENT_WORLD, NULL, NULL, js_finished,
                                                    js_call_new(r, done));
 }
 
@@ -721,23 +840,35 @@ static void send_event(WPEEvent *event)
     wpe_event_unref(event);
 }
 
-static void pointer_move(double x, double y)
+static unsigned button_bit(guint button)
 {
-    send_event(wpe_event_pointer_move_new(WPE_EVENT_POINTER_MOVE, wpe_view(), WPE_INPUT_SOURCE_MOUSE, now_ms(),
-                                          (WPEModifiers)browser.modifiers, x, y, 0, 0));
+    return button == 1 ? WPE_MODIFIER_POINTER_BUTTON1 : button == 2 ? WPE_MODIFIER_POINTER_BUTTON2 : WPE_MODIFIER_POINTER_BUTTON3;
 }
 
-static void pointer_click(double x, double y, guint button, int count)
+static void pointer_move(double x, double y)
 {
-    pointer_move(x, y);
-    unsigned held = button == 1 ? WPE_MODIFIER_POINTER_BUTTON1 : button == 2 ? WPE_MODIFIER_POINTER_BUTTON2 : WPE_MODIFIER_POINTER_BUTTON3;
-    for (int i = 1; i <= count; i++) {
+    double dx = browser.pointer_known ? x - browser.pointer_x : 0, dy = browser.pointer_known ? y - browser.pointer_y : 0;
+    send_event(wpe_event_pointer_move_new(WPE_EVENT_POINTER_MOVE, wpe_view(), WPE_INPUT_SOURCE_MOUSE, now_ms(),
+                                          (WPEModifiers)browser.modifiers, x, y, dx, dy));
+    browser.pointer_x = x;
+    browser.pointer_y = y;
+    browser.pointer_known = TRUE;
+}
+
+static void pointer_button(gboolean down, double x, double y, guint button, int count)
+{
+    unsigned held = button_bit(button);
+    if (down) {
         send_event(wpe_event_pointer_button_new(WPE_EVENT_POINTER_DOWN, wpe_view(), WPE_INPUT_SOURCE_MOUSE, now_ms(),
-                                                (WPEModifiers)browser.modifiers, button, x, y, i));
+                                                (WPEModifiers)browser.modifiers, button, x, y, count));
+        browser.modifiers |= held;
+        browser.sent[0]++;
+    } else {
+        browser.modifiers &= ~held;
         send_event(wpe_event_pointer_button_new(WPE_EVENT_POINTER_UP, wpe_view(), WPE_INPUT_SOURCE_MOUSE, now_ms(),
                                                 (WPEModifiers)(browser.modifiers | held), button, x, y, 0));
-        browser.sent[0]++;
         browser.sent[1]++;
+        browser.last_release = g_get_monotonic_time();
     }
 }
 
@@ -795,28 +926,247 @@ static void modifier(gboolean down, unsigned bit, guint keysym, guint code)
     }
 }
 
-static void type_char(gunichar c)
+/* ── input planned for its times: a person's (human.c), or all at once ────────────────────────
+ * An action's events are planned first — the pointer's path, the dwell before a press, how long a
+ * button or key is held, the gaps between keys, a wheel's strokes — and then sent at their times,
+ * each as the display sends a real device's event. With humanize off they are all at time 0. */
+
+static Plan *plan_new(void)
 {
+    Plan *plan = g_new0(Plan, 1);
+    plan->events = g_array_new(FALSE, FALSE, sizeof(PlannedEvent));
+    plan->px = browser.pointer_x;
+    plan->py = browser.pointer_y;
+    plan->have_pointer = browser.pointer_known;
+    return plan;
+}
+
+static PlannedEvent *plan_add(Plan *plan, EventKind kind, double t)
+{
+    PlannedEvent event = { .kind = kind, .t = t, .seq = plan->events->len };
+    g_array_append_val(plan->events, event);
+    return &g_array_index(plan->events, PlannedEvent, plan->events->len - 1);
+}
+
+/* a delay of a person's (median, p90 factor, bounds), or none with humanize off */
+static double human(double median, double spread, double min, double max)
+{
+    return browser.humanize ? human_delay(browser.rand, median, spread, min, max) : 0;
+}
+
+/* the pointer to (x, y), at a target `size` px across */
+static void plan_pointer_to(Plan *plan, double x, double y, double size)
+{
+    x = round(x);
+    y = round(y);
+    if (plan->have_pointer && plan->px == x && plan->py == y)
+        return;
+    if (browser.humanize) {
+        if (!plan->have_pointer) {
+            /* where the hand left it: somewhere in the view, toward its lower right */
+            int width = browser.view_width > 0 ? browser.view_width : 1024, height = browser.view_height > 0 ? browser.view_height : 768;
+            plan->px = round(width * (0.45 + 0.4 * g_rand_double(browser.rand)));
+            plan->py = round(height * (0.5 + 0.4 * g_rand_double(browser.rand)));
+            PlannedEvent *e = plan_add(plan, EV_MOVE, plan->t);
+            e->x = plan->px;
+            e->y = plan->py;
+            plan->have_pointer = TRUE;
+            plan->t += human(120, 1.5, 60, 300);
+        }
+        GArray *path = human_path(browser.rand, plan->px, plan->py, x, y, size, 8 + g_rand_double(browser.rand) * 2);
+        double end = plan->t;
+        for (guint i = 0; i < path->len; i++) {
+            HumanPoint *p = &g_array_index(path, HumanPoint, i);
+            PlannedEvent *e = plan_add(plan, EV_MOVE, plan->t + p->t);
+            e->x = p->x;
+            e->y = p->y;
+            end = plan->t + p->t;
+        }
+        g_array_free(path, TRUE);
+        plan->t = end;
+    } else {
+        PlannedEvent *e = plan_add(plan, EV_MOVE, plan->t);
+        e->x = x;
+        e->y = y;
+    }
+    plan->px = x;
+    plan->py = y;
+    plan->have_pointer = TRUE;
+}
+
+/* presses of `button` where the pointer is: a click, or `count` of them in a row */
+static void plan_press(Plan *plan, guint button, int count, gboolean moved)
+{
+    /* the pointer comes to rest before a press (more so after a move) */
+    plan->t += moved ? human(55, 1.8, 18, 200) : human(25, 2, 5, 120);
+    for (int i = 1; i <= count; i++) {
+        PlannedEvent *down = plan_add(plan, EV_DOWN, plan->t);
+        down->x = plan->px;
+        down->y = plan->py;
+        down->button = button;
+        down->count = i;
+        plan->t += i == 1 ? human(96, 1.3, 55, 220) : human(83, 1.36, 45, 190);
+        PlannedEvent *up = plan_add(plan, EV_UP, plan->t);
+        up->x = plan->px;
+        up->y = plan->py;
+        up->button = button;
+        if (i < count)
+            plan->t += human(66, 1.35, 35, 140); /* presses about 150 ms apart */
+    }
+}
+
+static void plan_key(Plan *plan, gboolean down, guint keysym, guint code, double t)
+{
+    PlannedEvent *e = plan_add(plan, down ? EV_KEY_DOWN : EV_KEY_UP, t);
+    e->keysym = keysym;
+    e->code = code;
+}
+
+static void plan_modifier(Plan *plan, gboolean down, unsigned bit, guint keysym, guint code, double t)
+{
+    PlannedEvent *e = plan_add(plan, down ? EV_MOD_DOWN : EV_MOD_UP, t);
+    e->bit = bit;
+    e->keysym = keysym;
+    e->code = code;
+}
+
+/* a character typed: its key (with Shift for a shifted one); the next key may go down before this
+ * one is up, as a third of a person's do (a key never before its own release) */
+static void plan_char(Plan *plan, gunichar c, double pace, double *free_at, guint *last_keysym, double *last_up)
+{
+    guint keysym, code;
+    gboolean shift = FALSE;
     if (c == '\n') {
-        key_event(TRUE, 0xff0d, 28);
-        key_event(FALSE, 0xff0d, 28);
-        return;
+        keysym = 0xff0d;
+        code = 28;
+    } else if (c == '\t') {
+        keysym = 0xff09;
+        code = 15;
+    } else {
+        code = c < 0x80 ? ascii_code(c, &shift) : 0;
+        keysym = (c >= 0x20 && c < 0x7f) ? c : 0x01000000 + c; /* X11: Unicode keysyms */
     }
-    if (c == '\t') {
-        key_event(TRUE, 0xff09, 15);
-        key_event(FALSE, 0xff09, 15);
-        return;
-    }
-    gboolean shift;
-    guint code = c < 0x80 ? ascii_code(c, &shift) : 0;
-    guint keysym = (c >= 0x20 && c < 0x7f) ? c : 0x01000000 + c; /* X11: Unicode keysyms */
     gboolean add_shift = code && shift && !(browser.modifiers & WPE_MODIFIER_KEYBOARD_SHIFT);
-    if (add_shift)
-        modifier(TRUE, WPE_MODIFIER_KEYBOARD_SHIFT, 0xffe1, 42);
-    key_event(TRUE, keysym, code);
-    key_event(FALSE, keysym, code);
-    if (add_shift)
-        modifier(FALSE, WPE_MODIFIER_KEYBOARD_SHIFT, 0xffe1, 42);
+    double t = plan->t;
+    if (keysym == *last_keysym && t < *last_up + 1)
+        t = *last_up + human(30, 1.5, 12, 80);
+    if (add_shift) {
+        /* Shift goes down first and up after, and the keys around it wait for it */
+        if (t < *free_at)
+            t = *free_at;
+        plan_modifier(plan, TRUE, WPE_MODIFIER_KEYBOARD_SHIFT, 0xffe1, 42, t);
+        t += human(60, 1.5, 25, 140) * pace;
+    }
+    double hold = human(105, 1.3, 50, 230) * pace;
+    plan_key(plan, TRUE, keysym, code, t);
+    plan_key(plan, FALSE, keysym, code, t + hold);
+    *last_keysym = keysym;
+    *last_up = t + hold;
+    if (add_shift) {
+        double up = t + hold + human(40, 1.5, 15, 110) * pace;
+        plan_modifier(plan, FALSE, WPE_MODIFIER_KEYBOARD_SHIFT, 0xffe1, 42, up);
+        *free_at = up + human(20, 1.5, 5, 60);
+        plan->t = *free_at;
+        return;
+    }
+    /* the next keydown: a person's gap after this one's (a little longer after a word) */
+    double gap = human(c == ' ' ? 175 : 150, 1.55, 55, 600) * pace;
+    plan->t = t + gap;
+    if (*free_at < t + hold)
+        *free_at = t + hold;
+}
+
+static int compare_events(gconstpointer a, gconstpointer b)
+{
+    const PlannedEvent *x = a, *y = b;
+    return x->t < y->t ? -1 : x->t > y->t ? 1 : x->seq < y->seq ? -1 : x->seq > y->seq;
+}
+
+/* typing `text`: at a person's pace, faster for a long text so that it takes at most ~8 s */
+static void plan_text(Plan *plan, const char *text)
+{
+    long n = g_utf8_strlen(text, -1);
+    double pace = 1;
+    if (browser.humanize && n > 50)
+        pace = MAX(0.3, 50.0 / n);
+    double free_at = plan->t, last_up = -1;
+    guint last_keysym = 0;
+    for (const char *c = text; *c; c = g_utf8_next_char(c))
+        plan_char(plan, g_utf8_get_char(c), pace, &free_at, &last_keysym, &last_up);
+    if (plan->t < free_at)
+        plan->t = free_at;
+    if (plan->t < last_up)
+        plan->t = last_up;
+}
+
+/* Sends what the plan has due, and the rest at their times; done(r) once all went */
+static void play_due(Request *r);
+
+static gboolean play_again(gpointer data)
+{
+    Request *r = data;
+    r->plan_id = 0;
+    play_due(r);
+    return G_SOURCE_REMOVE;
+}
+
+static void send_planned(const PlannedEvent *e)
+{
+    switch (e->kind) {
+    case EV_MOVE:
+        pointer_move(e->x, e->y);
+        break;
+    case EV_DOWN:
+    case EV_UP:
+        pointer_button(e->kind == EV_DOWN, e->x, e->y, e->button, e->count);
+        break;
+    case EV_KEY_DOWN:
+    case EV_KEY_UP:
+        key_event(e->kind == EV_KEY_DOWN, e->keysym, e->code);
+        break;
+    case EV_MOD_DOWN:
+    case EV_MOD_UP:
+        modifier(e->kind == EV_MOD_DOWN, e->bit, e->keysym, e->code);
+        break;
+    case EV_WHEEL:
+        send_event(wpe_event_scroll_new(wpe_view(), WPE_INPUT_SOURCE_MOUSE, now_ms(), (WPEModifiers)browser.modifiers,
+                                        e->dx, e->dy, FALSE, FALSE, e->x, e->y));
+        break;
+    }
+}
+
+static void play_due(Request *r)
+{
+    double now = (g_get_monotonic_time() - r->plan_start) / 1000.0;
+    while (r->plan_next < r->plan->len) {
+        const PlannedEvent *e = &g_array_index(r->plan, PlannedEvent, r->plan_next);
+        if (e->t > now + 0.5) {
+            r->plan_id = g_timeout_add(MAX(1, (guint)(e->t - now)), play_again, r);
+            return;
+        }
+        send_planned(e);
+        r->plan_next++;
+    }
+    g_array_free(r->plan, TRUE);
+    r->plan = NULL;
+    void (*done)(Request *r) = r->plan_done;
+    r->plan_done = NULL;
+    if (done)
+        done(r);
+}
+
+/* plays `plan` (taken) for r, then done(r) */
+static void play(Request *r, Plan *plan, void (*done)(Request *r))
+{
+    g_array_sort(plan->events, compare_events);
+    if (r->plan)
+        g_array_free(r->plan, TRUE);
+    r->plan = plan->events;
+    r->plan_next = 0;
+    r->plan_start = g_get_monotonic_time();
+    r->plan_done = done;
+    g_free(plan);
+    play_due(r);
 }
 
 /* ── input sync ─────────────────────────────────────────────────────────────────────────────
@@ -894,13 +1244,18 @@ static void input_base_read(Request *r, JSCValue *value, GError *error)
         r->generation_set = TRUE;
     }
     memcpy(r->sent_base, browser.sent, sizeof browser.sent);
-    r->sync_deadline = g_get_monotonic_time() + INPUT_SYNC_MS * 1000;
     r->acted = TRUE;
-    r->send(r);
+    r->send(r); /* plays its plan, then input_sent */
+}
+
+/* the input has all gone: until the page has seen it */
+static void input_sent(Request *r)
+{
+    r->sync_deadline = g_get_monotonic_time() + INPUT_SYNC_MS * 1000;
     input_poll(r);
 }
 
-/* send(r) sends input; synced(r) runs when the page has seen it */
+/* send(r) plays input (ending with input_sent); synced(r) runs when the page has seen it */
 static void input_send(Request *r, void (*send)(Request *r), void (*synced)(Request *r))
 {
     r->send = send;
@@ -908,8 +1263,8 @@ static void input_send(Request *r, void (*send)(Request *r), void (*synced)(Requ
     call_js(r, INPUT_SEEN_JS, NULL, input_base_read);
 }
 
-/* "ctrl+shift+Tab", "Enter", "a": FALSE if not understood; sent when `send` */
-static gboolean key_spec(const char *spec, gboolean send)
+/* "ctrl+shift+Tab", "Enter", "a": FALSE if not understood; planned into `plan` when given */
+static gboolean key_spec(const char *spec, Plan *plan)
 {
     char **parts = g_strsplit(spec, "+", -1);
     int n = g_strv_length(parts);
@@ -947,16 +1302,23 @@ static gboolean key_spec(const char *spec, gboolean send)
         code = c < 0x80 ? ascii_code(c, &shift) : 0;
         keysym = (c >= 0x20 && c < 0x7f) ? c : 0x01000000 + c;
     }
-    if (!keysym || !send) {
+    if (!keysym || !plan) {
         g_strfreev(parts);
         return keysym != 0;
     }
-    for (int i = 0; i < mods; i++)
-        modifier(TRUE, bits[i], syms[i], codes[i]);
-    key_event(TRUE, keysym, code);
-    key_event(FALSE, keysym, code);
-    for (int i = mods - 1; i >= 0; i--)
-        modifier(FALSE, bits[i], syms[i], codes[i]);
+    /* a chord as a hand plays it: the modifiers first, each a moment before the next */
+    for (int i = 0; i < mods; i++) {
+        plan_modifier(plan, TRUE, bits[i], syms[i], codes[i], plan->t);
+        plan->t += human(60, 1.5, 25, 140);
+    }
+    plan_key(plan, TRUE, keysym, code, plan->t);
+    plan->t += human(100, 1.3, 50, 220);
+    plan_key(plan, FALSE, keysym, code, plan->t);
+    for (int i = mods - 1; i >= 0; i--) {
+        plan->t += human(40, 1.5, 15, 110);
+        plan_modifier(plan, FALSE, bits[i], syms[i], codes[i], plan->t);
+    }
+    plan->t += human(150, 1.5, 60, 450);
     g_strfreev(parts);
     return TRUE;
 }
@@ -970,20 +1332,23 @@ static void focus_view(void)
  * Given at the start (options, WEB_USER_AGENT) and changed while it runs (`web set`, `web ua`,
  * `web header`, `web lang`, `web inject`); they apply from the next request or page on. */
 
-/* Recent versions (2026-10): sites turn away browsers they think are years old */
+/* Recent versions: sites turn away browsers they think are years old. Safari's is the release whose
+ * network fingerprint the browser's own matches (TLS, HTTP/2 and the headers of Safari 26.0.1 on
+ * macOS: glib-networking and libsoup patches) */
 #define CHROME_MAJOR "151"
 #define FIREFOX_VERSION "152.0"
-#define SAFARI_VERSION "26.0"
+#define SAFARI_VERSION "26.0.1"
+#define SAFARI_MAC_UA "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/" \
+                      SAFARI_VERSION " Safari/605.1.15"
 
 typedef struct {
     const char *name, *about, *user_agent; /* user_agent NULL: WebKit's own */
 } UAProfile;
 
+/* the first is a browser's unless it is told otherwise: Safari on a Mac, the engine it is */
 static const UAProfile ua_profiles[] = {
-    { "default", "WebKit's own (WPE) on desktop Linux", NULL },
-    { "safari", "Safari on a Mac: the same engine, the closest match",
-      "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/" SAFARI_VERSION
-      " Safari/605.1.15" },
+    { "safari", "Safari on a Mac: the same engine, the closest match (the default)", SAFARI_MAC_UA },
+    { "webkit", "WebKit's own (WPE) on desktop Linux", NULL },
     { "chrome", "Chrome on Windows",
       "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/" CHROME_MAJOR
       ".0.0.0 Safari/537.36" },
@@ -1000,6 +1365,27 @@ static const UAProfile ua_profiles[] = {
       ".0.0.0 Mobile Safari/537.36" },
 };
 
+/* Real machines' screens at a scale of 1 (the scale this browser draws at: a claimed 2 would not
+ * match its pictures), from Camoufox's recorded device presets (python/src/camoufox/
+ * fingerprint-presets.json, MPL-2.0): width, height, available width and height, logical cores,
+ * touch points */
+static const int mac_screens[][6] = {
+    { 1920, 1200, 1920, 1170, 8, 0 }, { 1920, 1080, 1920, 985, 2, 0 }, { 1920, 1080, 1920, 1050, 8, 0 },
+    { 2560, 1440, 2560, 1440, 8, 0 }, { 1920, 1080, 1920, 987, 8, 0 }, { 2560, 1440, 2560, 1415, 16, 0 },
+};
+static const int windows_screens[][6] = {
+    { 1920, 1080, 1920, 1032, 6, 0 }, { 1920, 1080, 1920, 1032, 8, 0 }, { 3440, 1440, 3440, 1392, 12, 0 },
+    { 1920, 1080, 1920, 1040, 4, 0 }, { 1920, 1200, 1920, 1160, 4, 0 }, { 1920, 1080, 1920, 1032, 20, 0 },
+    { 1728, 972, 1728, 936, 4, 0 }, { 1024, 768, 1024, 728, 4, 0 }, { 1920, 1080, 1920, 1032, 12, 0 },
+    { 1600, 900, 1600, 860, 24, 10 }, { 1366, 768, 1366, 720, 12, 0 }, { 1600, 900, 1600, 900, 8, 10 },
+    { 1366, 768, 1366, 720, 4, 0 }, { 1440, 900, 1440, 860, 12, 0 }, { 1366, 768, 1366, 720, 8, 0 },
+    { 2400, 1350, 2400, 1290, 8, 1 }, { 1600, 900, 1600, 860, 4, 0 }, { 1920, 1080, 1920, 1032, 16, 0 },
+    { 1360, 768, 1360, 720, 4, 10 }, { 1920, 1080, 1920, 1040, 8, 0 },
+};
+/* phones: the screen is the page's (web resize 390x844) */
+static const int iphone_screens[][6] = { { 390, 844, 390, 844, 6, 5 } };
+static const int android_screens[][6] = { { 412, 915, 412, 915, 8, 5 } };
+
 static void identity_clear(Identity *id)
 {
     g_free(id->profile);
@@ -1011,6 +1397,7 @@ static void identity_clear(Identity *id)
     g_free(id->major);
     g_free(id->ch_platform);
     g_free(id->ch_platform_version);
+    g_free(id->os);
     memset(id, 0, sizeof *id);
 }
 
@@ -1027,6 +1414,7 @@ static void identity_from(Identity *id, const char *profile, const char *user_ag
     gboolean firefox = strstr(ua, "Firefox/") != NULL;
     id->platform = g_strdup(iphone ? "iPhone" : ipad ? "iPad" : android ? "Linux armv81" : windows ? "Win32"
                             : mac ? "MacIntel" : "Linux x86_64");
+    id->os = g_strdup(iphone || ipad ? "iphone" : android ? "android" : windows ? "windows" : mac ? "mac" : "linux");
     id->mobile = iphone || android || strstr(ua, "Mobile") != NULL;
     id->touch = iphone || ipad || android;
     const char *chrome = strstr(ua, "Chrome/");
@@ -1064,6 +1452,8 @@ static void identity_from(Identity *id, const char *profile, const char *user_ag
 
 static const UAProfile *ua_profile(const char *name)
 {
+    if (!g_ascii_strcasecmp(name, "default"))
+        return &ua_profiles[0];
     for (size_t i = 0; i < G_N_ELEMENTS(ua_profiles); i++) {
         if (!g_ascii_strcasecmp(name, ua_profiles[i].name))
             return &ua_profiles[i];
@@ -1071,7 +1461,7 @@ static const UAProfile *ua_profile(const char *name)
     return NULL;
 }
 
-/* a profile's name or a user agent; "" or "default": WebKit's own */
+/* a profile's name or a user agent; "" or "default": the first profile (Safari on a Mac) */
 static gboolean identity_set(const char *text, char **error)
 {
     const UAProfile *profile = ua_profile(text && *text ? text : "default");
@@ -1086,9 +1476,109 @@ static gboolean identity_set(const char *text, char **error)
     return TRUE;
 }
 
+/* The machine the identity is on: one of the real ones of its kind (mac_screens...) whose screen
+ * holds the page's window, picked by the browser's seed, so the same browser stays the same
+ * machine; where its window is on that screen; what its browser's own bars add around the page.
+ * WebKit's own (the guest's display) for a Linux identity. */
+static void device_draw(void)
+{
+    Identity *id = &browser.identity;
+    Device *d = &browser.device;
+    memset(d, 0, sizeof *d);
+    const char *os = id->os ? id->os : "linux";
+    const int (*table)[6];
+    size_t count;
+    int extra_w = 0, extra_h = 0;
+    gboolean phone = FALSE, mac = !strcmp(os, "mac"), safari = strstr(id->user_agent, "Chrome/") == NULL && strstr(id->user_agent, "Firefox/") == NULL;
+    if (mac) {
+        table = mac_screens;
+        count = G_N_ELEMENTS(mac_screens);
+        /* Safari's toolbar and tab bar over the page */
+        extra_h = safari ? 79 : 87;
+    } else if (!strcmp(os, "windows")) {
+        table = windows_screens;
+        count = G_N_ELEMENTS(windows_screens);
+        /* the window's resize borders, Chrome's tab strip and toolbar (Firefox's are a little lower) */
+        extra_w = 16;
+        extra_h = strstr(id->user_agent, "Firefox/") ? 80 : 87;
+    } else if (!strcmp(os, "iphone")) {
+        table = iphone_screens;
+        count = 1;
+        phone = TRUE;
+    } else if (!strcmp(os, "android")) {
+        table = android_screens;
+        count = 1;
+        phone = TRUE;
+    } else
+        return;
+    int vw = browser.view_width > 0 ? browser.view_width : 1024, vh = browser.view_height > 0 ? browser.view_height : 768;
+    GRand *rand = g_rand_new_with_seed(browser.seed ^ g_str_hash(os));
+    size_t first = (size_t)g_rand_int_range(rand, 0, (gint32)count), pick = first;
+    for (size_t i = 0; i < count; i++) {
+        const int *e = table[(first + i) % count];
+        if (e[2] >= vw + extra_w && e[3] >= vh + extra_h) {
+            pick = (first + i) % count;
+            break;
+        }
+    }
+    const int *e = table[pick];
+    int width = e[0], height = e[1], avail_w = e[2], avail_h = e[3];
+    if (phone) {
+        width = avail_w = vw;
+        height = avail_h = vh;
+    }
+    /* a Mac's menu bar is at the top of the screen (the Dock, if any, below); Windows' taskbar below */
+    int avail_top = mac && avail_h < height ? MIN(height - avail_h, 25) : 0;
+    d->set = TRUE;
+    d->screen[0] = width;
+    d->screen[1] = height;
+    d->screen[2] = 0;
+    d->screen[3] = avail_top;
+    d->screen[4] = avail_w;
+    d->screen[5] = avail_h;
+    d->screen[6] = 24;
+    /* WebKit tells pages 4 cores, or 8 for a machine with 8 or more (Safari's privacy rule) */
+    d->cores = safari ? (e[4] < 8 ? 4 : 8) : e[4];
+    d->touch_points = phone ? 5 : e[5];
+    d->window[2] = phone ? 0 : extra_w;
+    d->window[3] = phone ? 0 : extra_h;
+    int outer_w = vw + d->window[2], outer_h = vh + d->window[3];
+    d->window[0] = phone || avail_w <= outer_w ? 0 : g_rand_int_range(rand, 0, avail_w - outer_w + 1);
+    d->window[1] = phone ? 0 : avail_top + (avail_h <= outer_h ? 0 : g_rand_int_range(rand, 0, avail_h - outer_h + 1));
+    g_rand_free(rand);
+}
+
+/* the identity as WebKit is to answer it in each web process (extension.c → WebKit patch 0012):
+ * a{sms}, nothing for WebKit's own */
+static GVariant *identity_values(void)
+{
+    Identity *id = &browser.identity;
+    Device *d = &browser.device;
+    GVariantBuilder builder;
+    g_variant_builder_init(&builder, G_VARIANT_TYPE("a{sms}"));
+    char *screen = d->set ? g_strdup_printf("%d %d %d %d %d %d %d", d->screen[0], d->screen[1], d->screen[2], d->screen[3],
+                                            d->screen[4], d->screen[5], d->screen[6]) : NULL;
+    char *window = d->set ? g_strdup_printf("%d %d %d %d", d->window[0], d->window[1], d->window[2], d->window[3]) : NULL;
+    char *cores = d->set ? g_strdup_printf("%d", d->cores) : NULL;
+    char *touch = d->set ? g_strdup_printf("%d", d->touch_points) : id->touch ? g_strdup("5") : NULL;
+    g_variant_builder_add(&builder, "{sms}", "platform", id->platform);
+    g_variant_builder_add(&builder, "{sms}", "vendor", id->vendor);
+    g_variant_builder_add(&builder, "{sms}", "hardwareConcurrency", cores);
+    g_variant_builder_add(&builder, "{sms}", "maxTouchPoints", touch);
+    g_variant_builder_add(&builder, "{sms}", "screen", screen);
+    g_variant_builder_add(&builder, "{sms}", "window", window);
+    g_variant_builder_add(&builder, "{sms}", "timeZone", browser.time_zone);
+    g_free(screen);
+    g_free(window);
+    g_free(cores);
+    g_free(touch);
+    return g_variant_builder_end(&builder);
+}
+
 static char *identity_text(void)
 {
     Identity *id = &browser.identity;
+    Device *d = &browser.device;
     const UAProfile *profile = id->profile ? ua_profile(id->profile) : NULL;
     GString *s = g_string_new(NULL);
     g_string_append_printf(s, "user agent: %s%s%s%s\n  %s\n  navigator.platform \"%s\", vendor \"%s\"", profile ? profile->name : "custom",
@@ -1098,23 +1588,30 @@ static char *identity_text(void)
     if (id->brand)
         g_string_append_printf(s, ", userAgentData (%s %s, %s); Sec-CH-UA headers to https sites", id->brand, id->major, id->ch_platform);
     g_string_append_c(s, '\n');
+    if (d->set)
+        g_string_append_printf(s, "  device: screen %dx%d (available %dx%d at %d,%d), %d-bit color, window at %d,%d with %dx%d around the "
+                               "page, %d cores, %d touch points (seed %u)\n", d->screen[0], d->screen[1], d->screen[4], d->screen[5],
+                               d->screen[2], d->screen[3], d->screen[6], d->window[0], d->window[1], d->window[2], d->window[3],
+                               d->cores, d->touch_points, browser.seed);
+    else
+        g_string_append(s, "  device: WebKit's own (the guest's display)\n");
     return g_string_free(s, FALSE);
 }
 
+/* identity.js with what this identity needs of it ("" for none: Safari's) */
 static char *identity_script(void)
 {
     Identity *id = &browser.identity;
+    if (!id->oscpu && !id->brand)
+        return g_strdup("");
     GString *s = g_string_new("(");
     g_string_append(s, identity_js);
-    g_string_append(s, ")({\"platform\": ");
-    json_string(s, id->platform);
-    g_string_append(s, ", \"vendor\": ");
-    json_string(s, id->vendor);
+    g_string_append(s, ")({\"mobile\": ");
+    g_string_append(s, id->mobile ? "true" : "false");
     if (id->oscpu) {
         g_string_append(s, ", \"oscpu\": ");
         json_string(s, id->oscpu);
     }
-    g_string_append_printf(s, ", \"touch\": %s, \"mobile\": %s", id->touch ? "true" : "false", id->mobile ? "true" : "false");
     if (id->brand) {
         g_string_append(s, ", \"brands\": [[\"Chromium\", ");
         json_string(s, id->major);
@@ -1257,11 +1754,48 @@ static unsigned header_unset(const char *host, const char *name)
 
 /* The rules the web processes put on requests (extension.c): the profile's client hints, then
  * what was set, which can replace or take them off */
+/* Safari: one language for pages (navigator.languages), and to servers that one and its base */
+static gboolean identity_is_safari(void)
+{
+    const char *ua = browser.identity.user_agent;
+    const char *os = browser.identity.os;
+    return ua && os && (!strcmp(os, "mac") || !strcmp(os, "iphone")) && !strstr(ua, "Chrome/") && !strstr(ua, "CriOS/")
+           && !strstr(ua, "Firefox/") && !strstr(ua, "FxiOS/");
+}
+
+/* the first preferred language as a tag: "ko-KR" (the environment's, else en-US) */
+static char *first_language(void)
+{
+    const char *first = browser.languages && browser.languages[0] ? browser.languages[0] : NULL;
+    for (const char *const *l = g_get_language_names(); !first && *l; l++) {
+        if (!strpbrk(*l, ".@") && strcmp(*l, "C") && strcmp(*l, "POSIX"))
+            first = *l;
+    }
+    char *tag = g_strdup(first ? first : "en-US");
+    g_strdelimit(tag, "_", '-');
+    return tag;
+}
+
+static char *safari_accept_language(void)
+{
+    char *tag = first_language();
+    const char *dash = strchr(tag, '-');
+    char *value = dash ? g_strdup_printf("%s,%.*s;q=0.9", tag, (int)(dash - tag), tag) : g_strdup(tag);
+    g_free(tag);
+    return value;
+}
+
 static GVariant *header_rules(void)
 {
     GVariantBuilder builder;
     g_variant_builder_init(&builder, G_VARIANT_TYPE("a(sssb)"));
     Identity *id = &browser.identity;
+    if (identity_is_safari()) {
+        /* as Safari words it ("ko-KR,ko;q=0.9"), unless a header the caller set says otherwise */
+        char *value = safari_accept_language();
+        g_variant_builder_add(&builder, "(sssb)", "", "Accept-Language", value, FALSE);
+        g_free(value);
+    }
     if (id->brand) {
         char *brands = g_strdup_printf("\"Chromium\";v=\"%s\", \"%s\";v=\"%s\", \"Not.A/Brand\";v=\"99\"", id->major, id->brand, id->major);
         char *platform = g_strdup_printf("\"%s\"", id->ch_platform);
@@ -1390,18 +1924,159 @@ static gboolean languages_set(const char *text, char **error)
     g_ptr_array_add(list, NULL);
     g_strfreev(browser.languages);
     browser.languages = (char **)g_ptr_array_free(list, FALSE);
-    webkit_web_context_set_preferred_languages(webkit_web_context_get_default(), (const char *const *)browser.languages);
     return TRUE;
 }
 
 static char *languages_text(void)
 {
-    if (!browser.languages)
-        return g_strdup("languages: the environment's (web lang ko-KR,en)\n");
-    char *list = g_strjoinv(", ", browser.languages);
-    char *text = g_strdup_printf("languages: %s (Accept-Language, navigator.languages)\n", list);
+    char *list = browser.languages ? g_strjoinv(", ", browser.languages) : g_strdup("the environment's (web lang ko-KR,en)");
+    char *text;
+    if (identity_is_safari()) {
+        char *first = first_language(), *accept = safari_accept_language();
+        text = g_strdup_printf("languages: %s; as Safari tells them: navigator.languages [\"%s\"], Accept-Language: %s\n",
+                               list, first, accept);
+        g_free(first);
+        g_free(accept);
+    } else
+        text = g_strdup_printf("languages: %s (Accept-Language, navigator.languages)\n", list);
     g_free(list);
     return text;
+}
+
+/* ── time zone: the identity's, as pages see it (Date, Intl); the guest's own is UTC ──────────── */
+
+/* an IANA time zone ICU knows, in its canonical spelling, or NULL */
+static char *time_zone_canonical(const char *name)
+{
+    UChar id[128], canonical[128];
+    int32_t length = 0;
+    for (const char *c = name; *c && length < 127; c++) {
+        if ((unsigned char)*c >= 0x80)
+            return NULL;
+        id[length++] = (UChar)*c;
+    }
+    UErrorCode status = U_ZERO_ERROR;
+    UBool system = 0;
+    int32_t n = ucal_getCanonicalTimeZoneID(id, length, canonical, 127, &system, &status);
+    if (U_FAILURE(status) || !system || n <= 0)
+        return NULL;
+    char *out = g_malloc(n + 1);
+    for (int32_t i = 0; i < n; i++)
+        out[i] = (char)canonical[i];
+    out[n] = 0;
+    return out;
+}
+
+/* "name": "value" of a JSON object's text (the few fields of a geolocation answer) */
+static char *json_field(const char *text, const char *name)
+{
+    char *key = g_strdup_printf("\"%s\"", name);
+    const char *p = strstr(text, key);
+    g_free(key);
+    if (!p)
+        return NULL;
+    p = strchr(p + strlen(name) + 2, ':');
+    if (!p)
+        return NULL;
+    p++;
+    while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r')
+        p++;
+    if (*p != '"')
+        return NULL;
+    const char *end = strchr(p + 1, '"');
+    return end ? g_strndup(p + 1, end - p - 1) : NULL;
+}
+
+/* The time zone of the address the browser's requests come from, as Camoufox's geoip does (a page
+ * compares the clock it is shown with where the address is): asked of ipinfo.io, else ipapi.co.
+ * *about: where it was found. */
+static char *time_zone_lookup(char **about, char **error)
+{
+    static const char *const services[][4] = {
+        { "https://ipinfo.io/json", "timezone", "ip", "country" },
+        { "https://ipapi.co/json/", "timezone", "ip", "country_code" },
+    };
+    SoupSession *session = soup_session_new_with_options("timeout", 10, "user-agent", browser.identity.user_agent, NULL);
+    char *zone = NULL;
+    GString *failures = g_string_new(NULL);
+    for (size_t i = 0; i < G_N_ELEMENTS(services) && !zone; i++) {
+        SoupMessage *message = soup_message_new("GET", services[i][0]);
+        GError *e = NULL;
+        GBytes *body = soup_session_send_and_read(session, message, NULL, &e);
+        guint status = soup_message_get_status(message);
+        if (body && status == 200) {
+            char *text = g_strndup(g_bytes_get_data(body, NULL), g_bytes_get_size(body));
+            char *found = json_field(text, services[i][1]);
+            zone = found ? time_zone_canonical(found) : NULL;
+            if (zone) {
+                char *ip = json_field(text, services[i][2]), *country = json_field(text, services[i][3]);
+                char *host = g_strndup(services[i][0] + 8, strcspn(services[i][0] + 8, "/"));
+                *about = g_strdup_printf("the address %s%s%s, by %s", ip ? ip : "?", country ? " in " : "", country ? country : "", host);
+                g_free(ip);
+                g_free(country);
+                g_free(host);
+            } else
+                g_string_append_printf(failures, "%s%s: no time zone in its answer", failures->len ? "; " : "", services[i][0]);
+            g_free(found);
+            g_free(text);
+        } else
+            g_string_append_printf(failures, "%s%s: %s", failures->len ? "; " : "", services[i][0],
+                                   e ? e->message : soup_message_get_reason_phrase(message));
+        if (body)
+            g_bytes_unref(body);
+        g_clear_error(&e);
+        g_object_unref(message);
+    }
+    g_object_unref(session);
+    if (!zone)
+        *error = g_strdup_printf("could not find where the browser's address is (%s)", failures->str);
+    g_string_free(failures, TRUE);
+    return zone;
+}
+
+/* ZONE (Asia/Seoul), auto (the address's), or default / "" (the guest's: UTC) */
+static gboolean time_zone_set(const char *text, char **about, char **error)
+{
+    char *zone = NULL;
+    if (!text || !*text || !g_ascii_strcasecmp(text, "default") || !g_ascii_strcasecmp(text, "utc-guest"))
+        zone = NULL;
+    else if (!g_ascii_strcasecmp(text, "auto")) {
+        zone = time_zone_lookup(about, error);
+        if (!zone)
+            return FALSE;
+    } else if (!(zone = time_zone_canonical(text))) {
+        *error = g_strdup_printf("\"%s\" is not a time zone (an IANA name: Asia/Seoul, America/New_York, Europe/Berlin, UTC; or auto)", text);
+        return FALSE;
+    }
+    g_free(browser.time_zone);
+    browser.time_zone = zone;
+    return TRUE;
+}
+
+static char *time_zone_text(void)
+{
+    return g_strdup_printf("time zone: %s (Date, Intl; web tz ZONE | auto | default)\n",
+                           browser.time_zone ? browser.time_zone : "the guest's, UTC");
+}
+
+static gboolean humanize_set(const char *text, char **error)
+{
+    if (!g_ascii_strcasecmp(text, "on") || !strcmp(text, "1") || !g_ascii_strcasecmp(text, "true"))
+        browser.humanize = TRUE;
+    else if (!g_ascii_strcasecmp(text, "off") || !strcmp(text, "0") || !g_ascii_strcasecmp(text, "false"))
+        browser.humanize = FALSE;
+    else {
+        *error = g_strdup_printf("humanize is on or off, not \"%s\"", text);
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static char *humanize_text(void)
+{
+    return g_strdup_printf("humanize: %s\n", browser.humanize
+        ? "on (the pointer travels to where it clicks, buttons and keys are held and spaced as a person's, the wheel turns in notches)"
+        : "off (each action's events at once)");
 }
 
 /* A setting among the arguments at argv[i] (the browser's options, `web set`): applied (the view
@@ -1409,9 +2084,11 @@ static char *languages_text(void)
 static int setting_option(int argc, char **argv, int i, char **error)
 {
     const char *option = argv[i];
+    char *about = NULL;
     int words = !strcmp(option, "--header-for") ? 3
               : !strcmp(option, "--user-agent") || !strcmp(option, "--header") || !strcmp(option, "--lang")
-                || !strcmp(option, "--inject") ? 2 : !strcmp(option, "--devtools") ? 1 : 0;
+                || !strcmp(option, "--inject") || !strcmp(option, "--timezone") || !strcmp(option, "--humanize") ? 2
+              : !strcmp(option, "--devtools") ? 1 : 0;
     if (!words)
         return 0;
     if (words == 1) {
@@ -1426,7 +2103,10 @@ static int setting_option(int argc, char **argv, int i, char **error)
                 : !strcmp(option, "--header") ? header_line(NULL, argv[i + 1], error)
                 : !strcmp(option, "--header-for") ? header_line(argv[i + 1], argv[i + 2], error)
                 : !strcmp(option, "--lang") ? languages_set(argv[i + 1], error)
+                : !strcmp(option, "--humanize") ? humanize_set(argv[i + 1], error)
+                : !strcmp(option, "--timezone") ? time_zone_set(argv[i + 1], &about, error)
                 : script_file(argv[i + 1], error);
+    g_free(about);
     return ok ? words : -1;
 }
 
@@ -1443,23 +2123,64 @@ static void settings_changed(void)
     if (g_strcmp0(webkit_settings_get_user_agent(settings), browser.identity.user_agent))
         webkit_settings_set_user_agent(settings, browser.identity.user_agent);
 
+    /* Safari tells pages one language (navigator.languages, Intl's default); the others the list */
+    WebKitWebContext *context = webkit_web_context_get_default();
+    char **languages;
+    if (identity_is_safari()) {
+        languages = g_new0(char *, 2);
+        languages[0] = first_language();
+    } else if (browser.languages)
+        languages = g_strdupv(browser.languages);
+    else {
+        GPtrArray *list = g_ptr_array_new();
+        for (const char *const *l = g_get_language_names(); *l; l++) {
+            if (!strpbrk(*l, ".@"))
+                g_ptr_array_add(list, g_strdup(*l));
+        }
+        g_ptr_array_add(list, NULL);
+        languages = (char **)g_ptr_array_free(list, FALSE);
+    }
+    char *joined = g_strjoinv(",", languages);
+    if (g_strcmp0(joined, browser.languages_sent)) {
+        webkit_web_context_set_preferred_languages(context, (const char *const *)languages);
+        g_free(browser.languages_sent);
+        browser.languages_sent = g_steal_pointer(&joined);
+    }
+    g_free(joined);
+    g_strfreev(languages);
+
+    /* the header rules and the identity: a web process started from now on gets them as it starts
+     * (its extension's initialization data), the ones running at once (a message) */
+    device_draw();
     GVariant *rules = g_variant_ref_sink(header_rules());
-    char *printed = g_variant_print(rules, FALSE);
-    if (g_strcmp0(printed, browser.rules_sent)) {
-        /* a web process started from now on gets them as it starts, the ones running at once */
-        WebKitWebContext *context = webkit_web_context_get_default();
+    GVariant *identity = g_variant_ref_sink(identity_values());
+    char *printed = g_variant_print(rules, FALSE), *printed_identity = g_variant_print(identity, FALSE);
+    gboolean rules_changed = g_strcmp0(printed, browser.rules_sent) != 0;
+    gboolean identity_changed = g_strcmp0(printed_identity, browser.identity_sent) != 0;
+    if (rules_changed || identity_changed) {
         GVariantDict dict;
         g_variant_dict_init(&dict, NULL);
         g_variant_dict_insert_value(&dict, "headers", rules);
+        g_variant_dict_insert_value(&dict, "identity", identity);
         webkit_web_context_set_web_process_extensions_initialization_user_data(context, g_variant_dict_end(&dict));
+    }
+    if (rules_changed) {
         webkit_web_context_send_message_to_all_extensions(context, webkit_user_message_new("headers", rules));
         g_free(browser.rules_sent);
         browser.rules_sent = g_steal_pointer(&printed);
     }
+    if (identity_changed) {
+        webkit_web_context_send_message_to_all_extensions(context, webkit_user_message_new("identity", identity));
+        g_free(browser.identity_sent);
+        browser.identity_sent = g_steal_pointer(&printed_identity);
+    }
     g_free(printed);
+    g_free(printed_identity);
     g_variant_unref(rules);
+    g_variant_unref(identity);
 
-    /* user scripts, at the start of every document: the input counter, the identity, the injected */
+    /* user scripts, at the start of every document: the input counter (in the browser's own world),
+     * what of the identity WebKit does not answer itself (identity.js), the injected */
     GPtrArray *sources = g_ptr_array_new_with_free_func(g_free);
     g_ptr_array_add(sources, g_strdup(INPUT_COUNTER_JS));
     g_ptr_array_add(sources, identity_script());
@@ -1476,8 +2197,14 @@ static void settings_changed(void)
         WebKitUserContentManager *content = webkit_web_view_get_user_content_manager(browser.view);
         webkit_user_content_manager_remove_all_scripts(content);
         for (guint i = 0; i < sources->len; i++) {
-            WebKitUserScript *script = webkit_user_script_new(g_ptr_array_index(sources, i), WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES,
-                                                              WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START, NULL, NULL);
+            const char *source = g_ptr_array_index(sources, i);
+            if (!*source)
+                continue;
+            WebKitUserScript *script = i == 0
+                ? webkit_user_script_new_for_world(source, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,
+                                                   AGENT_WORLD, NULL, NULL)
+                : webkit_user_script_new(source, WEBKIT_USER_CONTENT_INJECT_ALL_FRAMES, WEBKIT_USER_SCRIPT_INJECT_AT_DOCUMENT_START,
+                                         NULL, NULL);
             webkit_user_content_manager_add_script(content, script);
             webkit_user_script_unref(script);
         }
@@ -1801,14 +2528,17 @@ static void cmd_info(Request *r)
     g_free(intercept);
 }
 
+/* eval [--isolated] JS: in the page's world (its globals), or the browser's own (the DOM only,
+ * where nothing the page did to its globals and prototypes is in the way, and nothing shows) */
 static void cmd_eval(Request *r)
 {
-    if (r->argc < 2) {
-        reply(r, ST_USAGE, "usage: eval JAVASCRIPT\n");
+    gboolean isolated = r->argc > 2 && !strcmp(r->argv[1], "--isolated");
+    if (r->argc < 2 + isolated) {
+        reply(r, ST_USAGE, "usage: eval [--isolated] JAVASCRIPT\n");
         return;
     }
-    webkit_web_view_evaluate_javascript(browser.view, r->argv[1], -1, NULL, NULL, NULL, eval_finished,
-                                        js_call_new(r, reply_js_text));
+    webkit_web_view_evaluate_javascript(browser.view, r->argv[1 + isolated], -1, isolated ? AGENT_WORLD : NULL, NULL, NULL,
+                                        eval_finished, js_call_new(r, reply_js_text));
 }
 
 /* run NAME SOURCE TIMEOUT_SECONDS [ARG...] (web.c reads the file): the file as the body of an async
@@ -1831,8 +2561,15 @@ static gboolean run_timed_out(gpointer data)
 
 static void cmd_run(Request *r)
 {
+    gboolean isolated = r->argc > 1 && !strcmp(r->argv[1], "--isolated");
+    if (isolated) {
+        /* the words after it as the rest expect them */
+        g_free(r->argv[1]);
+        memmove(r->argv + 1, r->argv + 2, (r->argc - 1) * sizeof *r->argv);
+        r->argc--;
+    }
     if (r->argc < 4) {
-        reply(r, ST_USAGE, "usage: run FILE [ARG...] (web run reads the file)\n");
+        reply(r, ST_USAGE, "usage: run [--isolated] FILE [ARG...] (web run reads the file)\n");
         return;
     }
     const char *name = r->argv[1];
@@ -1860,7 +2597,7 @@ static void cmd_run(Request *r)
     webkit_web_view_call_async_javascript_function(browser.view, body, -1,
                                                    args_dict("__webArgs", g_variant_new_string(args->str), "__webFile", g_variant_new_string(uri),
                                                              "__webLines", g_variant_new_int32(lines), NULL),
-                                                   NULL, uri, NULL, js_finished, js_call_new(r, reply_js_text));
+                                                   isolated ? AGENT_WORLD : NULL, uri, NULL, js_finished, js_call_new(r, reply_js_text));
     r->timeout_id = g_timeout_add(timeout_arg(r, 3, 120000), run_timed_out, r);
     browser.pause_waiters = g_list_prepend(browser.pause_waiters, r); /* a request it awaits may pause */
     g_free(uri);
@@ -2431,6 +3168,10 @@ static void target_found(Request *r, JSCValue *value, GError *error)
     p = strstr(json, "\"y\":");
     if (p)
         y = g_ascii_strtod(p + 4, NULL);
+    double box[4];
+    p = strstr(json, "\"box\":[");
+    if (p && sscanf(p + 7, "%lf,%lf,%lf,%lf", &box[0], &box[1], &box[2], &box[3]) == 4)
+        r->target_size = MIN(box[2], box[3]);
     if (r->shot_file)
         shot_element(r, value, json);
     act_at(r, action_of(r), x, y, json);
@@ -2468,19 +3209,52 @@ static void select_done(Request *r, JSCValue *value, GError *error)
     g_free(text);
 }
 
+static void hovered(Request *r)
+{
+    r->acted = TRUE;
+    r->shot_when = "after the hover";
+    replyf(r, ST_OK, "hovering %s\n", r->what);
+}
+
+/* select: the click on the <select> went in; the option is chosen as the page's own script would */
+static void select_clicked(Request *r)
+{
+    r->acted = TRUE;
+    r->shot_when = "after selecting";
+    call_js(r, "const t = /^\\d+$/.test(target) ? (globalThis.__wpeRefs || [])[+target] : document.querySelector(target);"
+               "if (!t || t.tagName !== 'SELECT') return null;"
+               "const want = value.trim().toLowerCase();"
+               "const o = Array.from(t.options).find(o => o.value === value || o.text.trim().toLowerCase() === want)"
+               "  || Array.from(t.options).find(o => o.text.trim().toLowerCase().includes(want));"
+               "if (!o) return null; t.value = o.value;"
+               "t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true }));"
+               "return o.text.trim();",
+            args_dict("target", g_variant_new_string(r->argv[1]), "value", g_variant_new_string(r->argv[2]), NULL), select_done);
+}
+
+/* the pointer to the request's point (r->x, r->y) and `count` presses of `button` there */
+static void send_press(Request *r, guint button, int count)
+{
+    Plan *plan = plan_new();
+    gboolean moved = !(plan->have_pointer && plan->px == round(r->x) && plan->py == round(r->y));
+    plan_pointer_to(plan, r->x, r->y, r->target_size);
+    plan_press(plan, button, count, moved);
+    play(r, plan, input_sent);
+}
+
 static void send_click(Request *r)
 {
-    pointer_click(r->x, r->y, 1, 1);
+    send_press(r, 1, 1);
 }
 
 static void send_double_click(Request *r)
 {
-    pointer_click(r->x, r->y, 1, 2);
+    send_press(r, 1, 2);
 }
 
 static void send_right_click(Request *r)
 {
-    pointer_click(r->x, r->y, 3, 1);
+    send_press(r, 3, 1);
 }
 
 static void wait_after_click(Request *r)
@@ -2498,8 +3272,11 @@ static void click_after_shot(Request *r)
 /* the text of `type` (argv[1]) as key events */
 static void send_text(Request *r)
 {
-    for (const char *c = r->argv[1]; *c; c = g_utf8_next_char(c))
-        type_char(g_utf8_get_char(c));
+    Plan *plan = plan_new();
+    /* a moment between the click that focused the field and the first key */
+    plan->t += r->have_point ? human(250, 1.6, 120, 700) : 0;
+    plan_text(plan, r->argv[1]);
+    play(r, plan, input_sent);
 }
 
 static void typed(Request *r)
@@ -2530,26 +3307,21 @@ static void act_at(Request *r, Action action, double x, double y, const char *wh
         g_free(caption);
     }
     switch (action) {
-    case ACT_HOVER:
-        pointer_move(x, y);
-        r->acted = TRUE;
-        r->shot_when = "after the hover";
-        replyf(r, ST_OK, "hovering %s\n", what);
+    case ACT_HOVER: {
+        r->what = g_strdup(what);
+        Plan *plan = plan_new();
+        plan_pointer_to(plan, x, y, r->target_size);
+        play(r, plan, hovered);
         return;
-    case ACT_SELECT:
-        pointer_click(x, y, 1, 1);
-        r->acted = TRUE;
-        r->shot_when = "after selecting";
-        call_js(r, "const t = /^\\d+$/.test(target) ? document.querySelector(`[data-wpe-ref=\"${target}\"]`) : document.querySelector(target);"
-                   "if (!t || t.tagName !== 'SELECT') return null;"
-                   "const want = value.trim().toLowerCase();"
-                   "const o = Array.from(t.options).find(o => o.value === value || o.text.trim().toLowerCase() === want)"
-                   "  || Array.from(t.options).find(o => o.text.trim().toLowerCase().includes(want));"
-                   "if (!o) return null; t.value = o.value;"
-                   "t.dispatchEvent(new Event('input', { bubbles: true })); t.dispatchEvent(new Event('change', { bubbles: true }));"
-                   "return o.text.trim();",
-                args_dict("target", g_variant_new_string(r->argv[1]), "value", g_variant_new_string(r->argv[2]), NULL), select_done);
+    }
+    case ACT_SELECT: {
+        Plan *plan = plan_new();
+        gboolean moved = !(plan->have_pointer && plan->px == round(x) && plan->py == round(y));
+        plan_pointer_to(plan, x, y, r->target_size);
+        plan_press(plan, 1, 1, moved);
+        play(r, plan, select_clicked);
         return;
+    }
     case ACT_TYPE:
         /* the click first, and the keys once it has focused the field */
         r->what = g_strdup(what);
@@ -2616,15 +3388,19 @@ static void cmd_target(Request *r)
         g_free(what);
         return;
     }
-    char *body = g_strconcat("return (", target_js, ")(target);", NULL);
-    call_js(r, body, args_dict("target", g_variant_new_string(r->argv[target_index]), NULL), target_found);
+    char *body = g_strconcat("return (", target_js, ")(target, !!spread);", NULL);
+    call_js(r, body, args_dict("target", g_variant_new_string(r->argv[target_index]),
+                               "spread", g_variant_new_int32(browser.humanize && action != ACT_TYPE && action != ACT_SELECT), NULL),
+            target_found);
     g_free(body);
 }
 
 static void send_keys(Request *r)
 {
+    Plan *plan = plan_new();
     for (int i = 1; i < r->argc; i++)
-        key_spec(r->argv[i], TRUE);
+        key_spec(r->argv[i], plan);
+    play(r, plan, input_sent);
 }
 
 static void wait_after_keys(Request *r)
@@ -2639,7 +3415,7 @@ static void cmd_key(Request *r)
         return;
     }
     for (int i = 1; i < r->argc; i++) {
-        if (!key_spec(r->argv[i], FALSE)) {
+        if (!key_spec(r->argv[i], NULL)) {
             replyf(r, ST_USAGE, "unknown key \"%s\"\n", r->argv[i]);
             return;
         }
@@ -2695,16 +3471,66 @@ static void scroll_settled(Request *r, JSCValue *value, GError *error)
     g_free(to);
 }
 
-static void scroll_send(Request *r, double dx, double dy)
+/* The wheel turned dx, dy notches where the pointer is (in the view; else its middle): with
+ * humanize, a notch per event in strokes of a few, as a hand turns a notched wheel; then done(r) */
+static void scroll_send(Request *r, double dx, double dy, void (*done)(Request *r))
 {
     int width = 0, height = 0;
     wpe_toplevel_get_size(wpe_view_get_toplevel(wpe_view()), &width, &height);
-    send_event(wpe_event_scroll_new(wpe_view(), WPE_INPUT_SOURCE_MOUSE, now_ms(), (WPEModifiers)browser.modifiers,
-                                    dx, dy, FALSE, FALSE, width / 2.0, height / 2.0));
+    Plan *plan = plan_new();
+    double x = width / 2.0, y = height / 2.0;
+    if (plan->have_pointer && plan->px >= 0 && plan->py >= 0 && plan->px < width && plan->py < height) {
+        x = plan->px;
+        y = plan->py;
+    } else if (browser.humanize)
+        plan_pointer_to(plan, x + (g_rand_double(browser.rand) - 0.5) * width * 0.3,
+                        y + (g_rand_double(browser.rand) - 0.5) * height * 0.3, 200);
+    if (browser.humanize) {
+        x = plan->px;
+        y = plan->py;
+        int notches = (int)fabs(dx != 0 ? dx : dy);
+        double sx = dx > 0 ? 1 : dx < 0 ? -1 : 0, sy = dy > 0 ? 1 : dy < 0 ? -1 : 0;
+        plan->t += human(120, 1.6, 40, 400);
+        /* a short scroll opens with a lone notch; then strokes of 1-5 (2 most often) */
+        for (int done_notches = 0, stroke = 1; done_notches < notches; stroke = 1 + (int)(g_rand_double(browser.rand) * 4.2)) {
+            if (stroke > notches - done_notches)
+                stroke = notches - done_notches;
+            for (int i = 0; i < stroke; i++) {
+                PlannedEvent *e = plan_add(plan, EV_WHEEL, plan->t);
+                e->x = x;
+                e->y = y;
+                e->dx = sx;
+                e->dy = sy;
+                plan->t += human(16, 1.3, 8, 30);
+            }
+            done_notches += stroke;
+            if (done_notches < notches)
+                plan->t += human(60, 1.3, 40, 120);
+        }
+    } else {
+        PlannedEvent *e = plan_add(plan, EV_WHEEL, 0);
+        e->x = x;
+        e->y = y;
+        e->dx = dx;
+        e->dy = dy;
+    }
+    /* --screenshot: the arrow in the view's middle (the wheel turned wherever the pointer was) */
     r->acted = TRUE;
     r->x = width / 2.0;
     r->y = height / 2.0;
     r->have_point = TRUE;
+    play(r, plan, done);
+}
+
+static void scrolled(Request *r)
+{
+    replyf(r, ST_OK, "scrolled %s %d\n", r->argc > 1 ? r->argv[1] : "down", scroll_notches(r));
+}
+
+static void scroll_settle(Request *r)
+{
+    call_js(r, SCROLL_SETTLE_JS, args_dict("x0", g_variant_new_double(r->scroll_from[0]), "y0", g_variant_new_double(r->scroll_from[1]), NULL),
+            scroll_settled);
 }
 
 /* scroll --screenshot: where the page was, then the wheel, then wait for it to settle */
@@ -2716,9 +3542,7 @@ static void scroll_from_read(Request *r, JSCValue *value, GError *error)
     g_free(from);
     /* the arrow points the way the page goes; the wheel's notches the other way (+: up, left) */
     int notches = scroll_notches(r);
-    scroll_send(r, -r->arrow_dx * notches, -r->arrow_dy * notches);
-    call_js(r, SCROLL_SETTLE_JS, args_dict("x0", g_variant_new_double(r->scroll_from[0]), "y0", g_variant_new_double(r->scroll_from[1]), NULL),
-            scroll_settled);
+    scroll_send(r, -r->arrow_dx * notches, -r->arrow_dy * notches, scroll_settle);
 }
 
 static void cmd_scroll(Request *r)
@@ -2751,8 +3575,358 @@ static void cmd_scroll(Request *r)
         call_js(r, "return `${Math.round(scrollX)} ${Math.round(scrollY)}`;", NULL, scroll_from_read);
         return;
     }
-    scroll_send(r, dx, dy);
-    replyf(r, ST_OK, "scrolled %s %d\n", how, notches);
+    scroll_send(r, dx, dy, scrolled);
+}
+
+/* ── robot checks (`web challenge`) ─────────────────────────────────────────────────────────────
+ * challenge.js recognizes the check on the page; `solve` waits for one that passes by itself
+ * (Cloudflare's), clicks a checkbox or presses and holds a button as a person does (once it has
+ * been there a moment, at most three times, some seconds apart), and hands a picture puzzle to the
+ * agent. A check that passes usually loads the page it stood in front of. */
+
+#define CHECK_POLL_MS 1000
+
+static void check_step(Request *r);
+
+static gboolean check_step_again(gpointer data)
+{
+    Request *r = data;
+    r->poll_id = 0;
+    check_step(r);
+    return G_SOURCE_REMOVE;
+}
+
+static void check_later(Request *r, int ms)
+{
+    r->poll_id = g_timeout_add(ms, check_step_again, r);
+}
+
+static void check_acted(Request *r)
+{
+    r->check_last_act = g_get_monotonic_time();
+    check_later(r, 2500);
+}
+
+static const char *check_advice(const char *action)
+{
+    return !strcmp(action, "wait") ? "it passes by itself in a few seconds: web challenge solve waits for it"
+         : !strcmp(action, "click") ? "web challenge solve clicks its box as a person would"
+         : !strcmp(action, "hold") ? "web challenge solve presses and holds it as a person would"
+         : !strcmp(action, "agent") ? "a puzzle for whoever looks: web screenshot, then web click X Y on what it asks for"
+         : "nothing on the page gets past it: later, another site, or another machine (web identity new)";
+}
+
+/* a press held `hold` ms at the pointer, the hand not quite still */
+static void plan_hold(Plan *plan, double hold)
+{
+    plan->t += human(80, 1.6, 30, 250);
+    PlannedEvent *down = plan_add(plan, EV_DOWN, plan->t);
+    down->x = plan->px;
+    down->y = plan->py;
+    down->button = 1;
+    down->count = 1;
+    double end = plan->t + hold;
+    for (double t = plan->t + human(300, 1.6, 120, 900); t < end - 50; t += human(260, 1.7, 90, 800)) {
+        PlannedEvent *e = plan_add(plan, EV_MOVE, t);
+        e->x = plan->px + (g_rand_double(browser.rand) < 0.5 ? -1 : 1) * (g_rand_double(browser.rand) < 0.7 ? 1 : 2);
+        e->y = plan->py + (g_rand_double(browser.rand) < 0.5 ? -1 : 1) * (g_rand_double(browser.rand) < 0.8 ? 0 : 1);
+    }
+    PlannedEvent *up = plan_add(plan, EV_UP, end);
+    up->x = plan->px;
+    up->y = plan->py;
+    up->button = 1;
+    plan->t = end;
+}
+
+/* An empty checkbox around (x, y) in the view's picture, as a person sees it before clicking: a
+ * square 14-32 px across whose frame is darker than its light inside, the same on several rows and
+ * columns (a spinner's dots, a tick, a blank are not). *cx, *cy: its middle (view coordinates). */
+static gboolean find_checkbox(WebKitImage *image, double x, double y, double *cx, double *cy)
+{
+    int w = webkit_image_get_width(image), h = webkit_image_get_height(image);
+    guint stride = webkit_image_get_stride(image);
+    gsize size = 0;
+    const guint8 *px = g_bytes_get_data(webkit_image_as_bytes(image), &size);
+    int view_w = wpe_view_get_width(wpe_view()), view_h = wpe_view_get_height(wpe_view());
+    double sx = view_w > 0 ? (double)w / view_w : 1, sy = view_h > 0 ? (double)h / view_h : 1;
+    if (!px || w <= 0 || h <= 0 || size < (gsize)stride * h)
+        return FALSE;
+#define LUMA(X, Y) ((X) < 0 || (Y) < 0 || (X) >= w || (Y) >= h ? -1 \
+    : (px[(gsize)(Y) * stride + (X) * 4 + 2] * 3 + px[(gsize)(Y) * stride + (X) * 4 + 1] * 6 + px[(gsize)(Y) * stride + (X) * 4]) / 10)
+#define DARK(X, Y) (LUMA(X, Y) >= 0 && LUMA(X, Y) < inside - 50)
+    /* the box may be off the point a little: start from a few points around it */
+    for (int oy = -8; oy <= 8; oy += 4) {
+        for (int ox = -16; ox <= 8; ox += 4) {
+            int x0 = (int)(x * sx) + ox, y0 = (int)(y * sy) + oy, inside = LUMA(x0, y0);
+            if (inside < 190)
+                continue;
+            int left = -1, right = -1, top = -1, bottom = -1;
+            for (int d = 1; d <= 34; d++) {
+                if (left < 0 && DARK(x0 - d, y0)) left = x0 - d;
+                if (right < 0 && DARK(x0 + d, y0)) right = x0 + d;
+                if (top < 0 && DARK(x0, y0 - d)) top = y0 - d;
+                if (bottom < 0 && DARK(x0, y0 + d)) bottom = y0 + d;
+            }
+            int bw = right - left, bh = bottom - top;
+            if (left < 0 || right < 0 || top < 0 || bottom < 0 || bw < 14 * sx || bw > 32 * sx || abs(bw - bh) > 3 * sx)
+                continue;
+            /* a frame: the same edges on other rows and columns, the inside light throughout */
+            gboolean frame = TRUE;
+            int mx = (left + right) / 2, my = (top + bottom) / 2;
+            for (int k = -bh / 3; k <= bh / 3 && frame; k += MAX(1, bh / 6))
+                frame = DARK(left, my + k) && DARK(right, my + k) && DARK(mx + k, top) && DARK(mx + k, bottom)
+                     && LUMA(mx + k / 2, my) >= inside - 25 && LUMA(mx, my + k / 2) >= inside - 25;
+            if (!frame)
+                continue;
+            *cx = mx / sx;
+            *cy = my / sy;
+            return TRUE;
+        }
+    }
+#undef DARK
+#undef LUMA
+    return FALSE;
+}
+
+static void check_click(Request *r, double x, double y)
+{
+    /* as a person: a moment to look, the pointer over, then the click */
+    r->check_acts++;
+    r->x = x;
+    r->y = y;
+    r->have_point = TRUE;
+    focus_view();
+    Plan *plan = plan_new();
+    gboolean moved = !(plan->have_pointer && plan->px == round(x) && plan->py == round(y));
+    plan->t += human(500, 1.8, 200, 1600);
+    plan_pointer_to(plan, x, y, 24);
+    plan_press(plan, 1, 1, moved);
+    play(r, plan, check_acted);
+}
+
+/* the picture of the view: a checkbox is clicked once it shows (not while its widget is still at
+ * work, which takes no clicks), else looked for again a moment later */
+static void check_looked(GObject *source, GAsyncResult *result, gpointer data)
+{
+    ShotCall *call = data;
+    Request *r = call->r;
+    WebKitImage *image = webkit_web_view_get_snapshot_finish(WEBKIT_WEB_VIEW(source), result, NULL);
+    g_free(call);
+    if (r) {
+        r->shot = NULL;
+        double x, y;
+        if (image && find_checkbox(image, r->x, r->y, &x, &y))
+            check_click(r, x, y);
+        else
+            check_later(r, CHECK_POLL_MS);
+    }
+    if (image)
+        g_object_unref(image);
+}
+
+static void check_seen(Request *r, JSCValue *value, GError *error)
+{
+    gboolean solve = r->argc > 1 && (!strcmp(r->argv[1], "solve") || !strcmp(r->argv[1], "pass"));
+    char *line = !error && value && jsc_value_is_string(value) ? jsc_value_to_string(value) : NULL;
+    char **f = line ? g_strsplit(line, "\t", 6) : NULL;
+    gint64 now = g_get_monotonic_time();
+    const char *uri = webkit_web_view_get_uri(browser.view), *title = webkit_web_view_get_title(browser.view);
+    if (!f || g_strv_length(f) != 6) {
+        if (solve && (browser.loading || error) && now < r->deadline)
+            check_later(r, CHECK_POLL_MS); /* the page it let through is loading */
+        else if (r->check_seen)
+            replyf(r, ST_OK, "passed (%s)\n%s\n%s\n", r->check_kind, uri ? uri : "", title ? title : "");
+        else
+            replyf(r, ST_OK, "no robot check on this page (%s)\n", uri ? uri : "about:blank");
+        g_strfreev(f);
+        g_free(line);
+        return;
+    }
+    const char *kind = f[0], *action = f[1], *what = f[5];
+    double x = g_ascii_strtod(f[2], NULL), y = g_ascii_strtod(f[3], NULL), hold = g_ascii_strtod(f[4], NULL);
+    if (g_strcmp0(kind, r->check_kind)) {
+        g_free(r->check_kind);
+        r->check_kind = g_strdup(kind);
+        r->check_since = now;
+        r->check_acts = 0;
+    }
+    g_free(r->check_what);
+    r->check_what = g_strdup(what);
+    r->check_seen = TRUE;
+    gboolean acts = !strcmp(action, "click") || !strcmp(action, "hold");
+    if (!solve) {
+        char *at = acts ? g_strdup_printf(" (at %g, %g)", x, y) : g_strdup("");
+        replyf(r, ST_OK, "%s: %s\n  %s%s\n", kind, what, check_advice(action), at);
+        g_free(at);
+    } else if (!strcmp(action, "blocked") || !strcmp(action, "agent"))
+        replyf(r, ST_FAILED, "%s: %s\n  %s\n", kind, what, check_advice(action));
+    else if (now >= r->deadline) {
+        char *tried = r->check_acts ? g_strdup_printf(" and %d %s", r->check_acts, !strcmp(action, "hold") ? "holds" : "clicks")
+                                    : g_strdup("");
+        replyf(r, ST_TIMEOUT, "still there after %d s%s: %s: %s\n", timeout_arg(r, 2, 90000) / 1000, tried, kind, what);
+        g_free(tried);
+    } else if (acts && !browser.loading && r->check_acts < 3 && now - r->check_since >= 2500000 && now - r->check_last_act >= 8000000) {
+        if (!strcmp(action, "hold")) {
+            /* as a person: a moment to look, the pointer over, then the hold */
+            r->check_acts++;
+            r->x = x;
+            r->y = y;
+            r->have_point = TRUE;
+            focus_view();
+            Plan *plan = plan_new();
+            plan->t += human(500, 1.8, 200, 1600);
+            plan_pointer_to(plan, x, y, 40);
+            plan_hold(plan, hold);
+            play(r, plan, check_acted);
+        } else {
+            /* a checkbox: once the picture shows it (check_looked) */
+            r->x = x;
+            r->y = y;
+            r->shot = g_new0(ShotCall, 1);
+            r->shot->r = r;
+            webkit_web_view_get_snapshot(browser.view, WEBKIT_SNAPSHOT_REGION_VISIBLE, WEBKIT_SNAPSHOT_OPTIONS_NONE, NULL,
+                                         check_looked, r->shot);
+        }
+    } else
+        check_later(r, CHECK_POLL_MS);
+    g_strfreev(f);
+    g_free(line);
+}
+
+static void check_step(Request *r)
+{
+    char *body = g_strconcat("return (", challenge_js, ")();", NULL);
+    call_js(r, body, NULL, check_seen);
+    g_free(body);
+}
+
+/* challenge [status] | challenge solve [TIMEOUT] */
+static void cmd_challenge(Request *r)
+{
+    if (r->argc > 1 && strcmp(r->argv[1], "solve") && strcmp(r->argv[1], "pass") && strcmp(r->argv[1], "status")) {
+        reply(r, ST_USAGE, "usage: challenge [status] | challenge solve [TIMEOUT]\n");
+        return;
+    }
+    r->deadline = g_get_monotonic_time() + (gint64)timeout_arg(r, 2, 90000) * 1000;
+    check_step(r);
+}
+
+/* ── web search: one search engine after the other, past those that turn the browser away ────── */
+
+typedef struct {
+    const char *name, *format; /* format: the query, escaped, at %s */
+} Engine;
+
+static const Engine engines[] = {
+    { "duckduckgo", "https://html.duckduckgo.com/html/?q=%s" },
+    { "bing", "https://www.bing.com/search?q=%s" },
+    { "google", "https://www.google.com/search?q=%s" },
+    { "brave", "https://search.brave.com/search?q=%s" },
+    { "naver", "https://search.naver.com/search.naver?query=%s" },
+};
+
+static const Engine *engine_named(const char *name)
+{
+    for (size_t i = 0; i < G_N_ELEMENTS(engines); i++) {
+        if (!g_ascii_strcasecmp(name, engines[i].name) || (!g_ascii_strcasecmp(name, "ddg") && i == 0))
+            return &engines[i];
+    }
+    return NULL;
+}
+
+static void search_next(Request *r);
+
+/* a moment after the results page loaded: a page that moved on by itself (Google's first answer
+ * runs a script that loads the results) is waited for, else the page is read again */
+static gboolean search_settle(gpointer data)
+{
+    Request *r = data;
+    r->poll_id = 0;
+    if (browser.loading || browser.load_generation > r->settle_generation) {
+        r->generation_set = TRUE;
+        r->load_generation = r->settle_generation;
+        wait_for_load(r, 60000, -1);
+    } else
+        reply_loaded(r);
+    return G_SOURCE_REMOVE;
+}
+
+static void search_loaded(Request *r, const char *title, const char *check)
+{
+    if (!r->settled) {
+        r->settled = TRUE;
+        r->settle_generation = browser.load_generation;
+        r->poll_id = g_timeout_add(1500, search_settle, r);
+        return;
+    }
+    const char *uri = webkit_web_view_get_uri(browser.view);
+    char **f = check ? g_strsplit(check, "\t", 6) : NULL;
+    gboolean turned_away = f && g_strv_length(f) == 6 && (!strcmp(f[1], "blocked") || !strcmp(f[1], "agent"));
+    if (turned_away && r->engines[r->engine + 1]) {
+        g_string_append_printf(r->skipped, "  %s: %s (%s)\n", r->engines[r->engine], f[0], f[5]);
+        g_strfreev(f);
+        r->engine++;
+        search_next(r);
+        return;
+    }
+    char *note = check_note(check);
+    replyf(r, ST_OK, "search: %s \"%s\"%s\n%s%s\n%s\n%s%s", r->engines[r->engine], r->query,
+           r->skipped->len ? " (the engines before it turned the browser away:)" : "", r->skipped->str,
+           uri ? uri : "", title, note, paused_note());
+    g_free(note);
+    g_strfreev(f);
+}
+
+static void search_next(Request *r)
+{
+    const Engine *engine = engine_named(r->engines[r->engine]);
+    char *query = g_uri_escape_string(r->query, NULL, FALSE);
+    char *uri = g_strdup_printf(engine->format, query);
+    webkit_web_view_load_uri(browser.view, uri);
+    g_free(uri);
+    g_free(query);
+    r->acted = TRUE;
+    r->shot_when = "after the load";
+    r->generation_set = FALSE;
+    r->settled = FALSE;
+    wait_for_load(r, 60000, 15000);
+}
+
+/* search WORDS... [--engine NAME[,NAME...]]: the results page of the first engine that lets the
+ * browser in (duckduckgo, bing, google, brave by default); the ones that showed a robot check or
+ * refused are said */
+static void cmd_search(Request *r)
+{
+    GString *words = g_string_new(NULL);
+    char *list = NULL;
+    for (int i = 1; i < r->argc; i++) {
+        if (!strcmp(r->argv[i], "--engine") && i + 1 < r->argc) {
+            g_free(list);
+            list = g_strdup(r->argv[++i]);
+        } else
+            g_string_append_printf(words, "%s%s", words->len ? " " : "", r->argv[i]);
+    }
+    if (!words->len) {
+        g_string_free(words, TRUE);
+        g_free(list);
+        reply(r, ST_USAGE, "usage: search WORDS... [--engine duckduckgo|bing|google|brave|naver[,...]]\n");
+        return;
+    }
+    r->engines = g_strsplit(list ? list : "duckduckgo,bing,google,brave", ",", -1);
+    g_free(list);
+    for (char **e = r->engines; *e; e++) {
+        if (!engine_named(*e)) {
+            replyf(r, ST_USAGE, "no search engine \"%s\" (duckduckgo, bing, google, brave, naver)\n", *e);
+            g_string_free(words, TRUE);
+            return;
+        }
+    }
+    r->query = g_string_free(words, FALSE);
+    r->skipped = g_string_new(NULL);
+    r->loaded = search_loaded;
+    if (browser.devtools_reconnect)
+        devtools_connect_again();
+    search_next(r);
 }
 
 /* wait load | text STRING | selector CSS | gone CSS [TIMEOUT] */
@@ -2829,6 +4003,9 @@ static void cmd_resize(Request *r)
         return;
     }
     wpe_toplevel_resize(wpe_view_get_toplevel(wpe_view()), w, h);
+    browser.view_width = w;
+    browser.view_height = h;
+    settings_changed(); /* a screen that holds the window, the window's size around the page */
     replyf(r, ST_OK, "asked for %dx%d\n", w, h);
 }
 
@@ -2842,7 +4019,7 @@ static void cmd_set(Request *r)
         if (n <= 0) {
             settings_changed(); /* the ones before it */
             if (n == 0)
-                replyf(r, ST_USAGE, "unknown setting %s (--user-agent, --header, --header-for, --lang, --inject, --devtools)\n", r->argv[i]);
+                replyf(r, ST_USAGE, "unknown setting %s (--user-agent, --header, --header-for, --lang, --timezone, --humanize, --inject, --devtools)\n", r->argv[i]);
             else
                 replyf(r, ST_USAGE, "%s\n", error);
             g_free(error);
@@ -2884,6 +4061,68 @@ static void cmd_ua(Request *r)
         settings_changed();
     }
     reply_setting(r, identity_text(), r->argc > 1);
+}
+
+/* identity [new [SEED]]: who the browser says it is, and the machine it is on; new: another machine */
+static void cmd_identity(Request *r)
+{
+    if (r->argc > 1 && strcmp(r->argv[1], "new")) {
+        reply(r, ST_USAGE, "usage: identity [new [SEED]]\n");
+        return;
+    }
+    if (r->argc > 1) {
+        browser.seed = r->argc > 2 ? (guint32)strtoul(r->argv[2], NULL, 10) : g_random_int();
+        if (browser.seed_file) {
+            char *text = g_strdup_printf("%u\n", browser.seed);
+            g_file_set_contents(browser.seed_file, text, -1, NULL);
+            g_free(text);
+        }
+        settings_changed();
+    }
+    char *parts[] = { identity_text(), languages_text(), time_zone_text(), humanize_text() };
+    GString *s = g_string_new(NULL);
+    for (size_t i = 0; i < G_N_ELEMENTS(parts); i++) {
+        g_string_append(s, parts[i]);
+        g_free(parts[i]);
+    }
+    reply_setting(r, g_string_free(s, FALSE), r->argc > 1);
+}
+
+/* tz [ZONE | auto | default] */
+static void cmd_tz(Request *r)
+{
+    char *about = NULL;
+    if (r->argc > 1) {
+        char *error = NULL;
+        if (!time_zone_set(r->argv[1], &about, &error)) {
+            replyf(r, !g_ascii_strcasecmp(r->argv[1], "auto") ? ST_FAILED : ST_USAGE, "%s\n", error);
+            g_free(error);
+            return;
+        }
+        settings_changed();
+    }
+    char *text = time_zone_text();
+    if (about) {
+        char *with = g_strdup_printf("%s  from %s\n", text, about);
+        g_free(text);
+        text = with;
+    }
+    reply_setting(r, text, r->argc > 1);
+    g_free(about);
+}
+
+/* humanize [on | off] */
+static void cmd_humanize(Request *r)
+{
+    if (r->argc > 1) {
+        char *error = NULL;
+        if (!humanize_set(r->argv[1], &error)) {
+            replyf(r, ST_USAGE, "%s\n", error);
+            g_free(error);
+            return;
+        }
+    }
+    replyf(r, ST_OK, "%s", humanize_text());
 }
 
 /* header [list] | set NAME VALUE [--host HOST] | set 'NAME: VALUE' [--host HOST] | unset NAME [--host HOST] | clear */
@@ -2948,6 +4187,7 @@ static void cmd_lang(Request *r)
             g_free(error);
             return;
         }
+        settings_changed();
     }
     reply_setting(r, languages_text(), r->argc > 1);
 }
@@ -3046,8 +4286,8 @@ static void cmd_visits(Request *r)
 
 static void cmd_settings(Request *r)
 {
-    char *parts[] = { identity_text(), languages_text(), headers_text(), scripts_text(), devtools_text() };
-    replyf(r, ST_OK, "%s%s%s%s%s", parts[0], parts[1], parts[2], parts[3], parts[4]);
+    char *parts[] = { identity_text(), languages_text(), time_zone_text(), humanize_text(), headers_text(), scripts_text(), devtools_text() };
+    replyf(r, ST_OK, "%s%s%s%s%s%s%s", parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]);
     for (size_t i = 0; i < G_N_ELEMENTS(parts); i++)
         g_free(parts[i]);
 }
@@ -3787,7 +5027,7 @@ static gboolean quit_soon(gpointer data)
 
 /* the commands --screenshot FILE is for: the actions, and the loads (a picture once loaded) */
 static const char *const shot_commands[] = { "click", "dblclick", "rightclick", "hover", "type", "select", "key", "press",
-                                             "scroll", "open", "goto", "back", "forward", "reload", "wait", NULL };
+                                             "scroll", "open", "goto", "back", "forward", "reload", "wait", "search", NULL };
 
 static void run_request(Request *r)
 {
@@ -3837,6 +5077,16 @@ static void run_request(Request *r)
         cmd_set(r);
     else if (!strcmp(cmd, "ua") || !strcmp(cmd, "user-agent"))
         cmd_ua(r);
+    else if (!strcmp(cmd, "identity") || !strcmp(cmd, "whoami"))
+        cmd_identity(r);
+    else if (!strcmp(cmd, "tz") || !strcmp(cmd, "timezone"))
+        cmd_tz(r);
+    else if (!strcmp(cmd, "humanize"))
+        cmd_humanize(r);
+    else if (!strcmp(cmd, "challenge") || !strcmp(cmd, "captcha"))
+        cmd_challenge(r);
+    else if (!strcmp(cmd, "search"))
+        cmd_search(r);
     else if (!strcmp(cmd, "header") || !strcmp(cmd, "headers"))
         cmd_header(r);
     else if (!strcmp(cmd, "lang") || !strcmp(cmd, "languages"))
@@ -4128,7 +5378,8 @@ static void usage(void)
 {
     g_printerr("usage: wpe-browser [--name NAME] [--size WxH] [--ephemeral] [--data-dir DIR] [--ignore-tls-errors]\n"
                "                   [--user-agent UA|PROFILE] [--header 'NAME: VALUE'] [--header-for HOST 'NAME: VALUE']\n"
-               "                   [--lang LANGUAGES] [--inject FILE] [--devtools] [URL]\n"
+               "                   [--lang LANGUAGES] [--timezone ZONE|auto] [--humanize on|off] [--inject FILE]\n"
+               "                   [--devtools] [URL]\n"
                "Usually started by the `web` command; `web help` says more.\n");
 }
 
@@ -4145,6 +5396,9 @@ int wpe_browser_main(int argc, char **argv)
     const char *devtools_env = g_getenv("WEB_DEVTOOLS");
     browser.devtools_bodies = g_strdup(devtools_bodies_mode(devtools_env) ? devtools_env : "text");
     browser.devtools_wanted = devtools_env && *devtools_env && strcmp(devtools_env, "0") && strcmp(devtools_env, "off");
+    /* human input unless WEB_HUMANIZE=0 (or off) */
+    browser.rand = g_rand_new();
+    browser.humanize = TRUE;
 
     /* WebKit names the machine as uname does: "Linux wasm" is a platform no site knows, and some
      * take it for a robot; the desktop Linux most of them have seen instead */
@@ -4176,6 +5430,16 @@ int wpe_browser_main(int argc, char **argv)
         g_printerr("wpe-browser: WEB_LANG: %s\n", error_text);
         return 2;
     }
+    if (g_getenv("WEB_HUMANIZE") && *g_getenv("WEB_HUMANIZE") && !humanize_set(g_getenv("WEB_HUMANIZE"), &error_text)) {
+        g_printerr("wpe-browser: WEB_HUMANIZE: %s\n", error_text);
+        return 2;
+    }
+    char *about = NULL;
+    if (g_getenv("WEB_TIMEZONE") && *g_getenv("WEB_TIMEZONE") && !time_zone_set(g_getenv("WEB_TIMEZONE"), &about, &error_text)) {
+        g_printerr("wpe-browser: WEB_TIMEZONE: %s\n", error_text);
+        return 2;
+    }
+    g_free(about);
 
     for (int i = 1; i < argc; i++) {
         int taken = setting_option(argc, argv, i, &error_text);
@@ -4220,8 +5484,10 @@ int wpe_browser_main(int argc, char **argv)
         return 1;
     }
 
-    if (ephemeral)
+    if (ephemeral) {
         browser.session = webkit_network_session_new_ephemeral();
+        browser.seed = g_random_int();
+    }
     else {
         char *data = data_dir ? g_strdup(data_dir) : g_build_filename(g_get_user_data_dir(), "collabo-web", browser.name, NULL);
         char *cache = g_build_filename(g_get_user_cache_dir(), "collabo-web", browser.name, NULL);
@@ -4230,6 +5496,18 @@ int wpe_browser_main(int argc, char **argv)
         char *history = g_build_filename(data, "history.tsv", NULL);
         history_load(history);
         g_free(history);
+        /* the machine it is on, the same each start (web identity new: another) */
+        browser.seed_file = g_build_filename(data, "identity-seed", NULL);
+        char *seed_text = NULL;
+        if (g_file_get_contents(browser.seed_file, &seed_text, NULL, NULL) && g_ascii_isdigit(*seed_text))
+            browser.seed = (guint32)strtoul(seed_text, NULL, 10);
+        else {
+            browser.seed = g_random_int();
+            char *text = g_strdup_printf("%u\n", browser.seed);
+            g_file_set_contents(browser.seed_file, text, -1, NULL);
+            g_free(text);
+        }
+        g_free(seed_text);
         g_free(data);
         g_free(cache);
     }
@@ -4256,6 +5534,15 @@ int wpe_browser_main(int argc, char **argv)
                                                 "settings", settings,
                                                 NULL));
     g_object_unref(settings);
+    /* the page's size, which the identity's screen must hold */
+    int size_w, size_h;
+    if (size && sscanf(size, "%dx%d", &size_w, &size_h) == 2 && size_w > 0 && size_h > 0) {
+        browser.view_width = size_w;
+        browser.view_height = size_h;
+    } else if (wpe_view() && wpe_view_get_width(wpe_view()) > 0) {
+        browser.view_width = wpe_view_get_width(wpe_view());
+        browser.view_height = wpe_view_get_height(wpe_view());
+    }
     /* the user scripts (the input counter, the identity, the injected) and, before a web process
      * starts, the headers it puts on requests */
     settings_changed();
@@ -4285,6 +5572,12 @@ int wpe_browser_main(int argc, char **argv)
     }
 
     browser.wpe_view = view;
+    /* the browser's input is a mouse's and a keyboard's: pages are told so before their first
+     * process starts (a display that says none answers (pointer: none) and (hover: none), as no
+     * desktop browser does) */
+    WPEDisplay *display = view ? wpe_view_get_display(view) : wpe_display_get_primary();
+    if (display)
+        wpe_display_set_available_input_devices(display, WPE_AVAILABLE_INPUT_DEVICE_MOUSE | WPE_AVAILABLE_INPUT_DEVICE_KEYBOARD);
     char *start = normalize_uri(url ? url : "about:blank");
     webkit_web_view_load_uri(browser.view, start);
     g_free(start);

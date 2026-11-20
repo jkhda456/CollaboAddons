@@ -22,7 +22,10 @@ $ web click 'new'                    # by text, [N] number or CSS selector; wait
 $ web type 'webkit' 'input[name=q]'; web key Enter
 $ web screenshot                     # /tmp/web.png (gui screenshot web)
 $ web click 640 220 --screenshot /tmp/click.png   # and a picture of where it clicked: ring, frame, caption
-$ web ua chrome; web reload          # a site that turns WebKit away: say it is Chrome on Windows
+$ web search 'wpe webkit'            # DuckDuckGo, else Bing, Google, Brave: past an engine's robot check
+$ web open https://site.example/     # "challenge: cloudflare: ..." on a last line: a robot check
+$ web challenge solve                # waited for, its box clicked as a person does: "passed (cloudflare)"
+$ web identity                       # Safari on a Mac, a real machine's screen; web tz auto: the address's zone
 $ web header set Referer https://example.com/ --host example.com
 $ web run extract.js 'h2'            # a JavaScript file in the page: return, await, args
 $ web history 5                      # the last pages visited
@@ -85,15 +88,17 @@ letters print just it (`web --agent-help net inter`). It needs no browser.
 
 | Command | |
 |---|---|
-| `open URL [TIMEOUT]` | load a page and wait for it (seconds, 60); a bare host gets `https://`, words become a search |
+| `open URL [TIMEOUT]` | load a page and wait for it (seconds, 60); a bare host gets `https://`, words become a search; a robot check on the page is named on a last line (`challenge: cloudflare: ...`) |
 | `back`, `forward`, `reload` | history, waiting for the page |
 | `info` | address, title, loading, history, size, user agent, the last error or dialog |
 | `history [N \| --all] [TEXT]`, `history clear` | the pages visited, oldest first, the last N (30): time, title, address; TEXT: those whose address or title has it. Every committed load (links, forms, `back`, `reload`) and every move within a page (a single-page application's `pushState`); kept in the browser's data folder (`history.tsv`, the last 5000) across restarts, in memory only with `--ephemeral` |
 | `wait [load \| text STR \| selector CSS \| gone CSS] [TIMEOUT]` | until the page is so |
 | `read [MAX] [--all]` | the page as text in reading order: headings `#`, lists `-`, links with their address, fields with their value; every visible link, button and field numbered `[N]` |
 | `text`, `html [CSS]`, `links` | the page's text, HTML, links |
-| `eval JS` | JavaScript in the page; the result as JSON |
-| `run [--timeout S] FILE\|- [ARG...]` | a JavaScript file (`-`: stdin) in the page, as the body of an async function: `return` gives the result (JSON), `await` waits (up to S seconds, 120), `args` holds the ARGs as strings; an error names the file's line. `web` reads the file, so a path is the caller's |
+| `eval [--isolated] JS` | JavaScript in the page; the result as JSON. `--isolated`: in a JavaScript world of its own, the page's DOM without its variables, where the page can neither see it nor change what it calls (the browser's own scripts always run so) |
+| `run [--timeout S] [--isolated] FILE\|- [ARG...]` | a JavaScript file (`-`: stdin) in the page, as the body of an async function: `return` gives the result (JSON), `await` waits (up to S seconds, 120), `args` holds the ARGs as strings; an error names the file's line. `web` reads the file, so a path is the caller's |
+| `search WORDS... [--engine E[,E...]]` | a web search: the results page of the first engine that lets the browser in — DuckDuckGo, else Bing, Google, Brave (or those given, in order; `naver` too) — moving on from one that shows a robot check or refuses; the answer names the engine and those it passed over |
+| `challenge [status]`, `challenge solve [TIMEOUT]` | the robot check on the page (below): what it is and what gets past it; `solve` gets past it as a person does (seconds, 90): exit 0 passed (the page's address and title), 3 still there, 1 a picture puzzle or a refusal |
 | `screenshot [FILE] [--max-width N]` | PNG of the page (`gui screenshot`) |
 | `click TARGET \| X Y` (`dblclick`, `rightclick`) | a TARGET is an `[N]` from `read`, a CSS selector, or a link's or button's text; scrolled into view, clicked where it is on top; a click that loads a page waits for it |
 | `type TEXT [TARGET]` | types into TARGET (clicked first) or what has the focus: key events per character (any language) |
@@ -126,9 +131,12 @@ all.
 
 | Command | |
 |---|---|
-| `ua [PROFILE \| 'USER AGENT' \| list]` | the User-Agent: a profile — `default` (WebKit's own on desktop Linux), `safari` (Safari on a Mac: the same engine, the closest match), `chrome`, `edge`, `firefox` (on Windows), `iphone`, `android` (mobile sites; with `web resize 390x844`) — or any string. What the page's scripts see follows it (`identity.js`, at the start of every document): `navigator.platform` (WebKit's own says `Linux wasm32`), `vendor`, Firefox's `oscpu`, Chromium's `userAgentData`, a touch screen for the phones; a Chromium user agent also sends Chrome's client hints (`Sec-CH-UA`, `-Mobile`, `-Platform`) to https sites |
+| `ua [PROFILE \| 'USER AGENT' \| list]` | the User-Agent: a profile — `safari` (the default, also `default`: Safari 26 on a Mac, the same engine, the closest match), `webkit` (WebKit's own on desktop Linux), `chrome`, `edge`, `firefox` (on Windows), `iphone`, `android` (mobile sites; with `web resize 390x844`) — or any string. What the page sees follows it, answered by WebKit (patch 0012, in workers too): `navigator.platform` (WebKit's own says `Linux wasm32`), `vendor`, `hardwareConcurrency`, `maxTouchPoints`, the screen and window of a machine of that kind; Firefox's `oscpu` and Chromium's `userAgentData` by a script (`identity.js`); a Chromium user agent also sends Chrome's client hints (`Sec-CH-UA`, `-Mobile`, `-Platform`) to https sites |
+| `identity [new [SEED]]` | who the browser says it is, all of it: the user agent, the machine (screen and its available area, the window's place and the browser's bars around the page, cores, touch points), languages, time zone, human input. The machine is one of real ones of the user agent's kind (Camoufox's recorded device presets, at a scale of 1), drawn by a seed kept in the browser's data folder (`identity-seed`): the same browser stays the same machine across restarts. `new`: another one (SEED: that one) |
+| `tz [ZONE \| auto \| default]` | the time zone pages see (`Date`, `Intl`, in workers too): an IANA name (`Asia/Seoul`); `auto`: where the browser's address is (asked of ipinfo.io, else ipapi.co, once); `default`: the guest's, UTC |
+| `humanize [on \| off]` | input as a person gives it (on, the default): the pointer travels to what it acts on along a person's path (and to a point near the element's middle, not its exact center), buttons and keys are held and spaced as a person's, the wheel turns notch by notch; off: each action's events at once, as before |
 | `header [list]`, `header set NAME VALUE [--host HOST]`, `header unset NAME [--host HOST]`, `header clear` | headers put on every request pages make — the document, its images, scripts and styles, `fetch` and `XMLHttpRequest` — or, with `--host`, on those to HOST and its subdomains (do so for credentials); `set 'NAME: VALUE'` works too; an empty VALUE takes the header off the requests (curl's `-H 'NAME:'`). They replace the browser's own (`User-Agent`, `Referer`, `Accept-Language`...). Not `Cookie` (the cookie jar replaces it: `web cookie`) nor what the network stack sets (`Host`, `Content-Length`) |
-| `lang [LANGUAGES \| default]` | preferred languages, `ko-KR,en` or an Accept-Language: the `Accept-Language` header, `navigator.languages`, the default locale of `Intl` |
+| `lang [LANGUAGES \| default]` | preferred languages, `ko-KR,en` or an Accept-Language: the `Accept-Language` header, `navigator.languages`, the default locale of `Intl`. With Safari's identity, as Safari tells them: the first one to pages (`["ko-KR"]`) and with its base to servers (`ko-KR,ko;q=0.9`) |
 | `cookie [list [URL] [--all]]`, `cookie set COOKIE... [--url URL]`, `cookie delete NAME [--url URL \| --all]`, `cookie clear` | the cookie jar. A COOKIE is a Set-Cookie (`sid=1; Domain=example.com; Path=/; Max-Age=3600; Secure; HttpOnly`) or a Cookie header (`a=1; b=2`: two cookies); it is for the page's site unless `--url` or `Domain=` says, for its whole site unless `Path=` says. A list prints them as Set-Cookies |
 | `inject [list]`, `inject add FILE\|-`, `inject remove FILE`, `inject clear` | JavaScript run at the start of every page, in every frame, before the page's own scripts (Playwright's `addInitScript`): polyfills, stubs, hooks |
 | `settings` | the user agent, languages, headers, injected scripts and developer tools |
@@ -191,11 +199,12 @@ lost.
 Browser options, before the command (`web --user-agent chrome open example.com`): a browser that
 command starts gets them; one running already gets the settings among them (`--user-agent
 PROFILE|UA`, `--header 'NAME: VALUE'`, `--header-for HOST 'NAME: VALUE'`, `--lang LANGUAGES`,
-`--inject FILE`, `--devtools`; each but the user agent can be given more than once), and says the
+`--timezone ZONE|auto`, `--humanize on|off`, `--inject FILE`, `--devtools`; the headers and the
+scripts can be given more than once), and says the
 others are for its start (`--ephemeral`: no cookies, storage or history kept;
 `--ignore-tls-errors`; `--size WxH`). A browser's first settings can also come from the
 environment of the `web` that starts it: `WEB_USER_AGENT` (a profile or a user agent),
-`WEB_HEADERS` (lines `NAME: VALUE`), `WEB_LANG`, `WEB_DEVTOOLS` (`1`, or the bodies kept: `text`,
+`WEB_HEADERS` (lines `NAME: VALUE`), `WEB_LANG`, `WEB_TIMEZONE`, `WEB_HUMANIZE`, `WEB_DEVTOOLS` (`1`, or the bodies kept: `text`,
 `all`, `none`); options say last. `WEB_BROWSER_ARGS` adds options (words) to a browser `web` starts.
 
 Exit status: 0 done, 1 failed, 2 usage, 3 timed out, 4 not found, 5 no browser, 6 requests
@@ -306,18 +315,66 @@ What it takes (an aarch64 host, 6 cores; `tests/run.sh` and a few public sites):
 | | |
 |---|---|
 | the browser's first start on a computer | ~20 s (compiling it), then ~1 s in every sandbox |
-| a simple page | well under a second (`tests/run.sh`: 184 checks, ~45 s with the boot) |
+| a simple page | well under a second |
 | the developer tools on | little: English Wikipedia articles 0.6–1.3 s off, 0.5–1.9 s on (with the bodies of text: ~1.7 MB a page kept); `web network`, `web har` (12 MB) well under a second |
 | Hacker News, MDN, GitHub, X | 1–2 s; Korean Wikipedia, Naver, BBC, YouTube, Namuwiki 2–7 s; CNN ~25 s |
 | the engine's memory | ~1 GB with the add-on booted, ~1.7 GB after a few sites (3 web processes) |
+
+## Not taken for a robot
+
+Sites and search engines turn away what they take for a robot: by what the browser says it is,
+by whether that agrees with what it does, by how its input arrives, by its network traffic. The
+browser takes the way [Camoufox](https://github.com/daijro/camoufox) takes for Firefox — the
+browser is what it claims, from the inside, and a person drives it — to WebKit:
+
+- **The identity is answered natively.** The default is what the engine is: Safari 26 on a Mac.
+  WebKit itself answers `navigator.platform`, `vendor`, `hardwareConcurrency`, `maxTouchPoints`,
+  `screen.*` (and the CSS media queries that read the screen), `outerWidth`/`outerHeight`,
+  `screenX`/`screenY` and the time zone (WebKit patch 0012: a store in WebCore that each web
+  process's extension fills, `webkit_collabo_identity_set`) — so a page sees native getters
+  (`function platform() { [native code] }`), the same values in its workers, and no script of
+  the browser's. The machine is a real one: a screen from Camoufox's recorded devices (at a
+  scale of 1, as the browser draws) that holds the page's window, the window placed on it with
+  Safari's bars around the page, Safari's rule for cores (4, or 8); drawn by a seed the browser
+  keeps, so it is the same machine every visit. Safari's languages (one to pages, `ko-KR,ko;q=0.9`
+  to servers); `web tz auto` puts the clock where the address is, as Camoufox's geoip does. The
+  display says it has a mouse and a keyboard (`(pointer: fine)`, `(hover: hover)`).
+- **Nothing of the browser's in the page.** Its own scripts (reading, finding targets, counting
+  input, recognizing checks) run in a JavaScript world of their own (`AGENT_WORLD`), as Camoufox's
+  isolated world: they share the DOM, not the page's globals or prototypes, so the page sees no
+  variable, attribute (the numbers of `web read` stay in that world) or listener of theirs and
+  cannot change what they call. `eval`/`run --isolated` give the agent the same.
+- **Input as a person gives it** (`browser/human.c`, `web humanize`). Every action's events are
+  planned, then sent at their times: the pointer's path to a point near the element's middle (a
+  minimum-jerk reach along a gently bent line, as long as Fitts's law says, sometimes past a far
+  target and back; a report every 8-10 ms, whole pixels), the rest before the press, the press
+  held, the keys held and spaced, Shift around a capital, the wheel in strokes of notches —
+  drawn from the distributions Camoufox's input is fitted to (recordings of people: a click held
+  78/96/125 ms, keys 95-125 ms held and 129-235 ms apart...). A page that watches how input
+  arrives sees trusted events with a person's rhythm.
+- **Safari's network traffic.** A robot check compares the user agent with the TLS ClientHello and
+  the HTTP/2 connection. The browser's are Safari 26's on macOS (from curl-impersonate's capture):
+  its cipher suites and their order, GREASE (RFC 8701) where Safari puts it, its extensions in its
+  order, X25519MLKEM768 and X25519 key shares, its signature algorithms, zlib-compressed
+  certificates, `h2`/`http/1.1` (the add-on's own OpenSSL 3.5 with `patches/openssl`, set up by
+  glib-networking patch 0003): JA4 `t13d2013h2_a09f3c656075_…`; HTTP/2's SETTINGS
+  (`2:0;3:100;4:2097152;9:1`), window (10420225), pseudo-header and header order, `priority: u=0, i`
+  on documents (libsoup patch 0002).
+- **Robot checks** (`browser/challenge.js`, `web challenge`): Cloudflare's interstitial and
+  Turnstile (also in a closed shadow root: found by its response field), reCAPTCHA, hCaptcha,
+  DataDome, HUMAN's press and hold, AWS WAF, Akamai's refusals, search engines' checks. `solve`
+  waits for what passes by itself, clicks a checkbox once WebKit's picture of the view shows it
+  (a widget still at work takes no clicks), holds a button for 9-12 s with the hand not quite
+  still. `web search` moves on from an engine that shows a check.
 
 ## Limits
 
 - **Speed.** JavaScript is interpreted, in WebAssembly: script-heavy applications (editors, maps,
   large single-page apps) are slow, and some will time out.
 - **No video or audio, no WebGL, no WebAssembly, no WebRTC**, no PDF viewer, no spell checking,
-  no XSLT. Fonts: DejaVu and Nanum Gothic only (pages' web fonts load as usual). Sites behind a
-  robot check that runs WebAssembly (AWS WAF: Amazon) stay on the check's empty page.
+  no XSLT. Fonts: DejaVu and Nanum Gothic only (pages' web fonts load as usual). A page or robot
+  check that needs WebAssembly does not work (AWS WAF's, Amazon's, does not: its proof of work is
+  JavaScript, and passes in a few seconds).
 - **Pages that draw themselves later.** `open` answers when the document has loaded; a single-page
   application may still be filling itself in (Reddit: its splash for a few seconds more) —
   `web wait text …` or `web wait selector …` waits for what is wanted.
@@ -326,9 +383,13 @@ What it takes (an aarch64 host, 6 cores; `tests/run.sh` and a few public sites):
   was. A stapled OCSP response outside its validity period is left out rather than failing the
   connection, as browsers do (glib-networking patch 0002).
 - **Another browser's user agent** changes what sites are told, not what the engine can do: a
-  site that tests for a feature WebKit lacks here (WebAssembly, WebGL) still finds it missing, and
-  workers see WebKit's own `navigator` (the identity script runs in documents only). `safari` is the
-  most consistent choice; client hints (`Sec-CH-UA`) go to https sites only.
+  site that tests for a feature WebKit lacks here (WebAssembly, WebGL) still finds it missing,
+  JavaScriptCore behaves as itself, and the network traffic stays Safari's (TLS, HTTP/2).
+  `safari` (the default) is the consistent choice; client hints (`Sec-CH-UA`) go to https sites
+  only; `oscpu` and `userAgentData` are scripts in documents, not in workers.
+- **Robot checks.** No WebGL (a real Safari has it) and no WebAssembly are what a thorough
+  fingerprinting script still finds; a picture puzzle (reCAPTCHA's, hCaptcha's, DataDome's) is
+  left to the agent; the guest's fonts are Linux's (DejaVu, Nanum), whatever the identity says.
 - One page per browser (popups open in it); start more browsers with `-n NAME`.
 - **The developer tools** see the page's requests, its frames' and its dedicated workers', not
   those of service workers (another process) nor the browser's own (favicons, downloads). A
@@ -368,7 +429,7 @@ build takes hours on 6 cores and about 6 GB of `build/`.
 | Stage | |
 |---|---|
 | `host` | the build's tools (`tools/host-tools.sh`) |
-| `deps` | libc++, the compat library, libffi (`ffi/`), GLib, libsoup, glib-networking (OpenSSL), ICU, HarfBuzz, FreeType, fontconfig, libxml2, libpng/jpeg/webp, nghttp2, libpsl, brotli, libgcrypt, libepoxy, libxkbcommon for wasm32, static (`tools/deps.sh`, sources and hashes in `sources.lock`, patches in `patches/<name>/`) |
+| `deps` | libc++, the compat library, libffi (`ffi/`), GLib, libsoup, glib-networking, OpenSSL 3.5 (its own: zlib, Safari's ClientHello), ICU, HarfBuzz, FreeType, fontconfig, libxml2, libpng/jpeg/webp, nghttp2, libpsl, brotli, libgcrypt, libepoxy, libxkbcommon for wasm32, static (`tools/deps.sh`, sources and hashes in `sources.lock`, patches in `patches/<name>/`) |
 | `webkit` | WebKit with `patches/webkit/*` (`tools/webkit.sh`): CLoop, Skia, no JIT, no media, the collabo display |
 | `browser` | `wpe-browser.wasm`, `web.wasm` (`tools/browser.sh`) |
 | `cpio` | `out/wpe.cpio`, the fonts, `out/licenses` |
@@ -382,7 +443,13 @@ point and the caption read back from the PNG, a scroll's arrow, a missing folder
 without the display, one whose display forbids pictures); the headers, user agent and languages a page and its
 `fetch` send, the page's `navigator`, cookies, an injected script, JavaScript files (`tests/js`:
 a result, an error's line, stdin, a timeout), the history (also after a restart), options at a
-start and for a running browser, settings from the environment; the developer tools (`site/net.html`
+start and for a running browser, settings from the environment; the identity (Safari's by default,
+native getters, a worker's `navigator`, a screen that holds the window, `(pointer: fine)`, Safari's
+languages and `Accept-Language`, a seed kept, a time zone in `Date` and `Intl`, a wrong one), the
+browser's own scripts out of the page's world (no marks, no globals; `--isolated`), human input as
+`site/events.html` records it (a path before the click, held buttons, spaced keys, wheel notches;
+all at once with humanize off), robot checks (none; a Cloudflare-like checkbox drawn late in a
+closed shadow root, clicked once it shows; a press-and-hold button held), `search` with an unknown engine; the developer tools (`site/net.html`
 and the server's `/api/data`, `/api/echo`, `/redirect`, `/pixel.png` and `/ws`, a WebSocket):
 listing, filtering, a request in detail (headers as sent with cookies, query, POST body, timings),
 bodies, searching (text, headers only, a regular expression in WebSocket messages, case, a type, no
@@ -418,11 +485,18 @@ runtime that has the add-on in `app/images/addons`.
 | `0009-process-cache-and-prewarming-follow-the-cache-model` | the web process cache follows a cache model set after the start; no process started ahead below `PrimaryWebBrowser` |
 | `0010-web-process-extension-linked-in` | a web process extension linked into the program: its entry point (`webkit_web_process_extension_initialize_with_user_data`) is called with the initialization data whether or not a directory of extensions is set |
 | `0011-inspector-frontend-in-the-program` | an inspector frontend of the program's own on a web view's inspector controller (as the automation's passthrough channel): the protocol's messages as text to a C callback and from the program (the developer tools) |
+| `0012-identity-answered-natively` | who the browser says it is, answered by WebCore: a store in `NavigatorBase.cpp` (`webkit_collabo_identity_set`, any thread) that `navigator.platform`, `vendor`, `hardwareConcurrency`, `maxTouchPoints` (`Navigator.cpp`), the screen (`PlatformScreenWPE.cpp`: `screen.*`, media queries) and the window (`WebChromeClient::windowRect`: outer size, `screenX`/`screenY`) read; the time zone through WTF's override |
 
 The libraries': `glib/` 0001 (no libatomic on wasm32), 0002 (function pointer casts), 0003
 (registered callbacks called as what they are: closures, notifies, `GTask`, signals through
 libffi), 0004 (`GSource` callbacks likewise); `libsoup/` 0001 and `glib-networking/` 0001
-(function pointer casts); `glib-networking/` 0002 (stale stapled OCSP responses left out);
+(function pointer casts); `glib-networking/` 0002 (stale stapled OCSP responses left out), 0003 (Safari's ClientHello: its
+cipher suites, groups and key shares, signature algorithms, SCTs and zlib certificate compression
+asked for, `SSL_CTX_set_client_hello_safari`; `WPE_TLS_HELLO=openssl` for OpenSSL's own);
+`libsoup/` 0002 (HTTP/2 as Safari speaks it: SETTINGS, windows, ALPN `h2`/`http/1.1`, header
+order, `priority`); `openssl/` 0001 (a ClientHello in Safari's shape: GREASE in cipher suites,
+groups, key shares, versions and two extensions, Safari's extension order, the uncompressed point
+format, `rsa_pss_rsae_sha384` twice and `rsa_pkcs1_sha1` offered);
 `libgpg-error/` 0001 (the lock type of wasm32's musl: a lock of no size aborted every process
 that used libgcrypt).
 
@@ -436,6 +510,8 @@ type — ends that program, not the machine), 0011 (`WebTools` in the Dart packa
 
 WebKit: LGPL-2.1 and BSD (`out/licenses`); Skia: BSD; GLib, libsoup, glib-networking: LGPL-2.1;
 the other libraries their own (copied to `out/licenses`); DejaVu fonts: Bitstream Vera license;
-Nanum Gothic: SIL OFL 1.1. The add-on's own code (`browser/`, `compat/`, `ffi/`, `tools/`): as
+Nanum Gothic: SIL OFL 1.1; OpenSSL: Apache-2.0. The machines' screens in `browser/browser.c`
+come from Camoufox's recorded device presets (MPL-2.0), as do the human input's figures
+(`browser/human.c`). The add-on's own code (`browser/`, `compat/`, `ffi/`, `tools/`): as
 collaboCore (GPL-3.0); the collabo WPE backend in patch 0005: BSD-2-Clause, as the WebKit files
 around it, and the display's client library it compiles in (`tools/gui/client`): MIT.

@@ -218,6 +218,22 @@ if want base && stage base "$P/lib/pkgconfig/sqlite3.pc"; then
   printf 'prefix=%s\n\nName: OpenSSL\nDescription: OpenSSL\nVersion: %s\nRequires: libssl libcrypto\n' "$P" "$ov" > "$P/lib/pkgconfig/openssl.pc"
 fi
 
+# ── openssl: the browser's own, over the python step's — with zlib (Safari's ClientHello asks
+# for zlib-compressed certificates) and patches/openssl (a ClientHello in Safari's shape: GREASE,
+# its extension order; glib-networking turns it on). Options as python/build-deps.sh's, and the 3DES
+# suites Safari still offers (enable-weak-ssl-ciphers: only what a cipher list names is offered).
+if want openssl && stage openssl "$P/include/openssl/.client-hello-safari"; then
+  S="$(src openssl)"
+  LOG="$W/openssl.log"; : > "$LOG"
+  (cd "$S" && log_run "$LOG" perl ./Configure linux-generic32 CC="$CC" AR="$AR" RANLIB="$RANLIB" \
+     -DHAVE_FORK=0 --prefix="$P" --libdir=lib --openssldir=/etc/ssl \
+     no-shared no-dso no-dynamic-engine no-async no-afalgeng no-secure-memory no-tests no-apps no-docs \
+     enable-weak-ssl-ciphers zlib --with-zlib-include="$P/include" --with-zlib-lib="$P/lib")
+  log_run "$LOG" make -C "$S" -j"$JOBS" build_libs
+  log_run "$LOG" make -C "$S" install_dev
+  touch "$P/include/openssl/.client-hello-safari"
+fi
+
 # ── small libraries ────────────────────────────────────────────────────────────────────────────
 if want pcre2 && stage pcre2 "$P/lib/libpcre2-8.a"; then
   S="$(src pcre2)"

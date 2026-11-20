@@ -122,8 +122,58 @@ check("settings", contains=("user agent: chrome", "languages: ko-KR, en", "X-Onl
 check("runerr", 1, contains=("TypeError", "bad.js:2"), absent=("bad.js:4",))
 check("runstdin", contains=("44",))
 check("runtimeout", 3, contains=("not finished within 2 s",))
-check("uadefault", contains=("user agent: default",))
+check("uadefault", contains=("user agent: webkit",))
 check("platform", contains=("Linux x86_64",), absent=("wasm",))
+check("uasafari", contains=("user agent: safari", "Version/26.0.1 Safari/605.1.15", "MacIntel", "device: screen"))
+check("identity", contains=("user agent: safari", "device: screen", "cores", "humanize: on", "time zone: the guest's"))
+check("natives", contains=("MacIntel Apple Computer, Inc.", "native=true", "worker=MacIntel", "screen-holds-window=true",
+                           "outer>inner=true", "pointer-fine=true", "languages=ko-KR ", "marks=0", "globals=0"))
+check("isolated", contains=("object ",), absent=("undefined",))
+check("isorun", contains=("undefined object",))
+check("safarilang", contains=('"accept-language": "ko-KR,ko;q=0.9"', "Version/26.0.1"))
+check("idnew", contains=("(seed 12345)",))
+check("idsame", contains=("(seed 12345)",))
+check("tz", contains=("time zone: Asia/Seoul",))
+check("tzpage", contains=("Asia/Seoul -540",))
+check("tzbad", 2, contains=('"Mars/Base" is not a time zone',))
+check("tzback", contains=("time zone: the guest's",))
+check("humanclick", contains=("clicked", '"tag":"button"'))
+check("humantype", contains=("typed 8 characters",))
+check("humanwheel", contains=("scrolled down 3",))
+check("rawtype", contains=("typed 8 characters",))
+check("humanoff", contains=("humanize: off",))
+check("humanon", contains=("humanize: on",))
+check("checknone", contains=("no robot check on this page",))
+check("checkopen", contains=("checkbox.html", "challenge: cloudflare:"))
+check("checkbox", contains=("passed (cloudflare)", "second.html?verified=1"))
+check("holdstatus", contains=("press-and-hold:", "web challenge solve presses and holds it"))
+check("hold", contains=("passed (press-and-hold)", "second.html?held="))
+check("enginebad", 2, contains=('no search engine "nope"',))
+
+
+def numbers(name):
+    return {k: v for k, v in re.findall(r"(\w+)=([^ \n]*)", get(name, "out") or "")}
+
+
+def input_timing_ok():
+    """With humanize the pointer travels and buttons and keys are held and spaced as a person's;
+    without it, all at once"""
+    problems = []
+    h, r = numbers("human"), numbers("raw")
+    try:
+        if int(h["moves"]) < 10:
+            problems.append(f"human: {h['moves']} moves before the click")
+        if int(h["minhold"]) < 40:
+            problems.append(f"human: a button held {h['minhold']} ms")
+        if int(h["mingap"]) < 20 or int(h["maxgap"]) > 1500:
+            problems.append(f"human: keys {h['mingap']}-{h['maxgap']} ms apart")
+        if int(h["wheels"]) != 3 or h["trusted"] != "true" or h["value"] != "Hi":
+            problems.append(f"human: wheels {h['wheels']}, trusted {h['trusted']}, value {h['value']!r}")
+        if int(r["moves"]) > 3 or int(r["minhold"]) > 15 or int(r["maxgap"]) > 30 or r["value"] != "Hi":
+            problems.append(f"raw: {r}")
+    except (KeyError, ValueError) as e:
+        problems.append(f"no numbers: {e}: {h} {r}")
+    return problems
 check("history", contains=("index.html", "second.html", "/headers", "Second"))
 check("historyq", contains=("second.html",), absent=("/headers",))
 check("close", contains=("closing",))
@@ -490,6 +540,10 @@ def shots_ok():
         problems.append("shot-denied.png written though capture is off")
     return problems
 
+
+problems = input_timing_ok()
+print(f"{'ok  ' if not problems else 'FAIL'} input timing{': ' + '; '.join(problems) if problems else ''}")
+failed += bool(problems)
 
 problems = shots_ok()
 print(f"{'ok  ' if not problems else 'FAIL'} screenshot marks{': ' + '; '.join(problems) if problems else ''}")

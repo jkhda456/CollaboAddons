@@ -42,6 +42,10 @@ declare -A TOPICS=(
   [0010-web-process-extension-linked-in]="Source/WebKit/WebProcess/InjectedBundle/API/glib/WebProcessExtensionManager.cpp"
   # an inspector frontend in the program: the browser's developer tools (browser/devtools.js)
   [0011-inspector-frontend-in-the-program]="Source/WebKit/UIProcess/API/glib/WebKitWebView.cpp"
+  # who the browser says it is, answered natively (navigator, screen, window, time zone): set by
+  # browser/extension.c through webkit_collabo_identity_set
+  [0012-identity-answered-natively]="Source/WebCore/page/NavigatorBase.cpp Source/WebCore/page/Navigator.cpp
+      Source/WebCore/platform/wpe/PlatformScreenWPE.cpp Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp"
 )
 
 git -C "$S" add -N -- Source/WebKit/WPEPlatform/wpe/collabo   # new files show in the diff

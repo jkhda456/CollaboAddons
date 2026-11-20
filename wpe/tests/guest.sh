@@ -77,8 +77,43 @@ step settings    web settings
 step runerr      web run /t/js/bad.js
 step runstdin    sh -c 'echo "return args.length + 6 * 7" | web run - x y'
 step runtimeout  sh -c 'echo "await new Promise(done => setTimeout(done, 20000))" | web run --timeout 2 -'
-step uadefault   web ua default
+step uadefault   web ua webkit
 step platform    sh -c 'web reload >/dev/null && web eval navigator.platform'
+# who it says it is, answered by WebKit (patch 0012): a Mac of the recorded ones, its screen and
+# window, Safari's languages, a time zone; the browser's own scripts in a world of their own
+step uasafari    web ua default
+step identity    web identity
+step natives     sh -c 'web open http://127.0.0.1:8000/index.html 60 >/dev/null && web read >/dev/null && web run /t/js/natives.js'
+step isolated    web eval --isolated 'typeof globalThis.__wpeRefs + " " + globalThis.__wpeRefs.length'
+step isorun      sh -c 'echo "return typeof window.keys + \" \" + typeof globalThis.__wpeRefs" | web run --isolated -'
+step safarilang  sh -c 'web open http://127.0.0.1:8000/headers 60 >/dev/null && web text'
+step idnew       web identity new 12345
+step idsame      web identity
+step tz          web tz Asia/Seoul
+step tzpage      sh -c 'web reload >/dev/null && web eval "Intl.DateTimeFormat().resolvedOptions().timeZone + \" \" + new Date(2026, 0, 1).getTimezoneOffset()"'
+step tzbad       web tz Mars/Base
+step tzback      web tz default
+# input as a person gives it: the pointer's path, held buttons and keys, spaced keys, the wheel's
+# notches; and all at once with humanize off
+step humanpage   web open http://127.0.0.1:8000/events.html 60
+step humanclick  web click Press
+step humantype   web type 'Hi there' '#field'
+step humanwheel  web scroll down 3
+step human       web run /t/js/events.js
+step humanoff    web humanize off
+step rawpage     web reload
+step rawclick    web click Press
+step rawtype     web type 'Hi there' '#field'
+step raw         web run /t/js/events.js
+step humanon     web humanize on
+# robot checks: recognized, and got past as a person does (a checkbox once it shows, a button held)
+step checknone   web challenge
+step checkopen   web open http://127.0.0.1:8000/checkbox.html 60
+step checkbox    web challenge solve 60
+step holdopen    web open http://127.0.0.1:8000/hold-check.html 60
+step holdstatus  web challenge
+step hold        web challenge solve 90
+step enginebad   web search x --engine nope
 # history
 step history     web history
 step historyq    web history second

@@ -1,0 +1,268 @@
+diff --git a/Source/WebCore/page/Navigator.cpp b/Source/WebCore/page/Navigator.cpp
+index ae4bfda7..c4b4fbfa 100644
+--- a/Source/WebCore/page/Navigator.cpp
++++ b/Source/WebCore/page/Navigator.cpp
+@@ -453,8 +453,12 @@ void Navigator::clearAppBadge(ScriptExecutionContext& callingContext, Ref<Deferr
+     setAppBadge(callingContext, 0, WTF::move(promise));
+ }
+ 
++int collaboMaxTouchPoints(); // NavigatorBase.cpp: the browser's identity
++
+ int Navigator::maxTouchPoints() const
+ {
++    if (int points = collaboMaxTouchPoints(); points >= 0)
++        return points;
+ #if ENABLE(IOS_TOUCH_EVENTS) && !PLATFORM(MACCATALYST)
+     RefPtr document = this->document();
+     if (!document || !document->quirks().needsZeroMaxTouchPointsQuirk())
+diff --git a/Source/WebCore/page/NavigatorBase.cpp b/Source/WebCore/page/NavigatorBase.cpp
+index 93a8e71c..5a4930fc 100644
+--- a/Source/WebCore/page/NavigatorBase.cpp
++++ b/Source/WebCore/page/NavigatorBase.cpp
+@@ -40,6 +40,9 @@
+ #include <wtf/Language.h>
+ #include <wtf/NeverDestroyed.h>
+ #include <wtf/NumberOfCores.h>
++#include <wtf/Lock.h>
++#include <wtf/TimeZone.h>
++#include <wtf/text/CString.h>
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/UniqueRef.h>
+ #include <wtf/WeakRandom.h>
+@@ -73,6 +76,131 @@
+ 
+ namespace WebCore {
+ 
++// Collabo: who the browser says it is, answered here in WebCore rather than by a script in the
++// page, so that what a page reads is native (getters, workers, CSS media queries alike). The
++// browser's web process extension sets it (addons/wpe browser/extension.c); unset, WebKit's own.
++struct CollaboIdentity {
++    Lock lock;
++    CString platform;
++    CString vendor;
++    int hardwareConcurrency { 0 };
++    int maxTouchPoints { -1 };
++    bool hasScreen { false };
++    int screen[7] { }; // width, height, availLeft, availTop, availWidth, availHeight, depth
++    bool hasWindow { false };
++    int window[4] { }; // screenX, screenY, outer width - view width, outer height - view height
++};
++
++static CollaboIdentity& collaboIdentity()
++{
++    static NeverDestroyed<CollaboIdentity> identity;
++    return identity;
++}
++
++String collaboNavigatorPlatform()
++{
++    auto& identity = collaboIdentity();
++    Locker locker { identity.lock };
++    return identity.platform.isNull() ? String() : String::fromUTF8(identity.platform.span());
++}
++
++String collaboNavigatorVendor()
++{
++    auto& identity = collaboIdentity();
++    Locker locker { identity.lock };
++    return identity.vendor.isNull() ? String() : String::fromUTF8(identity.vendor.span());
++}
++
++int collaboHardwareConcurrency()
++{
++    auto& identity = collaboIdentity();
++    Locker locker { identity.lock };
++    return identity.hardwareConcurrency;
++}
++
++int collaboMaxTouchPoints()
++{
++    auto& identity = collaboIdentity();
++    Locker locker { identity.lock };
++    return identity.maxTouchPoints;
++}
++
++bool collaboScreen(int values[7])
++{
++    auto& identity = collaboIdentity();
++    Locker locker { identity.lock };
++    for (int i = 0; i < 7; i++)
++        values[i] = identity.screen[i];
++    return identity.hasScreen;
++}
++
++bool collaboWindow(int values[4])
++{
++    auto& identity = collaboIdentity();
++    Locker locker { identity.lock };
++    for (int i = 0; i < 4; i++)
++        values[i] = identity.window[i];
++    return identity.hasWindow;
++}
++
++static bool collaboNumbers(const char* text, int* values, int count)
++{
++    for (int i = 0; i < count; i++) {
++        char* end = nullptr;
++        long value = strtol(text, &end, 10);
++        if (end == text)
++            return false;
++        values[i] = static_cast<int>(value);
++        text = end;
++    }
++    return true;
++}
++
++} // namespace WebCore
++
++// KEY VALUE: "platform", "vendor", "hardwareConcurrency", "maxTouchPoints", "screen" ("W H AVAIL_LEFT
++// AVAIL_TOP AVAIL_W AVAIL_H DEPTH"), "window" ("X Y EXTRA_W EXTRA_H"), "timeZone" (an IANA name).
++// A null VALUE gives WebKit's own back, and so does an empty one but for the strings (Firefox's vendor
++// is ""). Any thread; returns false for what it cannot take.
++extern "C" bool webkit_collabo_identity_set(const char* key, const char* value)
++{
++    using namespace WebCore;
++    if (!key)
++        return false;
++    bool unset = !value || !*value;
++    if (!strcmp(key, "timeZone"))
++        return WTF::setHostTimeZoneForTesting(unset ? emptyString() : String::fromUTF8(value));
++    auto& identity = collaboIdentity();
++    Locker locker { identity.lock };
++    if (!strcmp(key, "platform"))
++        identity.platform = value ? CString(value) : CString();
++    else if (!strcmp(key, "vendor"))
++        identity.vendor = value ? CString(value) : CString();
++    else if (!strcmp(key, "hardwareConcurrency"))
++        identity.hardwareConcurrency = unset ? 0 : std::max(0, atoi(value));
++    else if (!strcmp(key, "maxTouchPoints"))
++        identity.maxTouchPoints = unset ? -1 : std::max(0, atoi(value));
++    else if (!strcmp(key, "screen")) {
++        int values[7];
++        if (!unset && !collaboNumbers(value, values, 7))
++            return false;
++        identity.hasScreen = !unset;
++        for (int i = 0; i < 7; i++)
++            identity.screen[i] = unset ? 0 : values[i];
++    } else if (!strcmp(key, "window")) {
++        int values[4];
++        if (!unset && !collaboNumbers(value, values, 4))
++            return false;
++        identity.hasWindow = !unset;
++        for (int i = 0; i < 4; i++)
++            identity.window[i] = unset ? 0 : values[i];
++    } else
++        return false;
++    return true;
++}
++
++namespace WebCore {
++
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(NavigatorBase);
+ 
+ NavigatorBase::NavigatorBase(ScriptExecutionContext* context)
+@@ -96,6 +224,8 @@ String NavigatorBase::appVersion() const
+ 
+ String NavigatorBase::platform() const
+ {
++    if (auto platform = collaboNavigatorPlatform(); !platform.isNull())
++        return platform;
+ #if OS(LINUX)
+     static NeverDestroyed<String> platformName = [] {
+         struct utsname osname;
+@@ -132,6 +262,8 @@ String NavigatorBase::productSub()
+ 
+ String NavigatorBase::vendor()
+ {
++    if (auto vendor = collaboNavigatorVendor(); !vendor.isNull())
++        return vendor;
+     return WEBCORE_NAVIGATOR_VENDOR;
+ }
+ 
+@@ -189,6 +321,9 @@ int NavigatorBase::hardwareConcurrency(ScriptExecutionContext& context)
+         return 1 + WeakRandom { randomSeed }.getUint32(63);
+     }
+ 
++    if (int cores = collaboHardwareConcurrency())
++        return cores;
++
+     // Enforce a maximum for the number of cores reported to mitigate
+     // fingerprinting for the minority of machines with large numbers of cores.
+     // If machines with more than 8 cores become commonplace, we should bump this number.
+diff --git a/Source/WebCore/platform/wpe/PlatformScreenWPE.cpp b/Source/WebCore/platform/wpe/PlatformScreenWPE.cpp
+index a1ec57e8..443018f9 100644
+--- a/Source/WebCore/platform/wpe/PlatformScreenWPE.cpp
++++ b/Source/WebCore/platform/wpe/PlatformScreenWPE.cpp
+@@ -36,6 +36,8 @@
+ 
+ namespace WebCore {
+ 
++bool collaboScreen(int values[7]); // NavigatorBase.cpp: the browser's identity
++
+ #if ENABLE(WPE_PLATFORM)
+ static PlatformDisplayID widgetDisplayID(Widget* widget)
+ {
+@@ -56,6 +58,8 @@ static PlatformDisplayID widgetDisplayID(Widget* widget)
+ 
+ int screenDepth(Widget* widget)
+ {
++    if (int values[7]; collaboScreen(values))
++        return values[6];
+ #if ENABLE(WPE_PLATFORM)
+     Ref platformScreen = PlatformScreen::singleton();
+     auto* data = platformScreen->screenData(widgetDisplayID(widget));
+@@ -69,6 +73,8 @@ int screenDepth(Widget* widget)
+ 
+ int screenDepthPerComponent(Widget* widget)
+ {
++    if (int values[7]; collaboScreen(values))
++        return values[6] >= 30 ? 10 : 8;
+ #if ENABLE(WPE_PLATFORM)
+     Ref platformScreen = PlatformScreen::singleton();
+     auto* data = platformScreen->screenData(widgetDisplayID(widget));
+@@ -122,6 +128,8 @@ double fontDPI()
+ 
+ FloatRect screenRect(Widget* widget)
+ {
++    if (int values[7]; collaboScreen(values))
++        return FloatRect(0, 0, values[0], values[1]);
+ #if ENABLE(WPE_PLATFORM)
+     Ref platformScreen = PlatformScreen::singleton();
+     if (auto* data = platformScreen->screenData(widgetDisplayID(widget)))
+@@ -137,6 +145,8 @@ FloatRect screenRect(Widget* widget)
+ 
+ FloatRect screenAvailableRect(Widget* widget)
+ {
++    if (int values[7]; collaboScreen(values))
++        return FloatRect(values[2], values[3], values[4], values[5]);
+ #if ENABLE(WPE_PLATFORM)
+     Ref platformScreen = PlatformScreen::singleton();
+     if (auto* data = platformScreen->screenData(widgetDisplayID(widget)))
+diff --git a/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp b/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp
+index 9f6380b3..e3a59a41 100644
+--- a/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp
++++ b/Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp
+@@ -211,6 +211,10 @@
+ #include <WebCore/PictureInPictureSupport.h>
+ #endif
+ 
++namespace WebCore {
++bool collaboWindow(int values[4]); // NavigatorBase.cpp: the browser's identity
++}
++
+ namespace WebKit {
+ using namespace WebCore;
+ using namespace HTMLNames;
+@@ -260,6 +264,12 @@ FloatRect WebChromeClient::windowRect() const
+     RefPtr page = m_page.get();
+     if (!page)
+         return { };
++    // A window as the browser's identity has it: where on the screen, and the browser's own
++    // toolbars around the view (outerWidth, outerHeight, screenX, screenY)
++    if (int values[4]; collaboWindow(values)) {
++        auto size = page->size();
++        return FloatRect(values[0], values[1], size.width() + values[2], size.height() + values[3]);
++    }
+ #if PLATFORM(MAC)
+     if (page->hasCachedWindowFrame())
+         return page->windowFrameInUnflippedScreenCoordinates();

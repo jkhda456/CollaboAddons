@@ -1,0 +1,13 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>events</title></head>
+<body>
+<!-- what a page sees of the browser's input: every pointer, key and wheel event, with its time -->
+<button id="press" style="margin: 300px 0 0 400px; width: 120px; height: 40px">Press</button>
+<input id="field" style="display: block; margin: 20px 400px">
+<div style="height: 3000px"></div>
+<script>
+  window.log = [];
+  for (const t of ['mousemove', 'mousedown', 'mouseup', 'click', 'keydown', 'keyup', 'wheel'])
+    addEventListener(t, e => log.push([t, e.timeStamp, e.clientX | 0, e.clientY | 0, e.isTrusted, e.key || '']), true);
+</script>
+</body></html>

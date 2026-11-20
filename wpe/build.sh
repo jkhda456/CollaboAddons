@@ -66,8 +66,10 @@ for step in "${steps[@]}"; do
       cp "$S/Source/ThirdParty/skia/LICENSE" "$L/addon-wpe-skia.txt"
       cp "$F/dejavu/LICENSE" "$L/addon-wpe-dejavu-fonts.txt"
       cp "$(fetch nanum-ofl)" "$L/addon-wpe-nanum-gothic-ofl.txt"
+      # Camoufox's device presets and input figures (browser/browser.c, human.c): MPL-2.0
+      cp "$A/browser/camoufox-MPL-2.0.txt" "$L/addon-wpe-camoufox-mpl-2.0.txt"
       for d in glib libsoup glib-networking libxml2 harfbuzz freetype fontconfig icu libpsl nghttp2 libpng \
-               libjpeg-turbo libwebp brotli pcre2 expat libgcrypt libgpg-error libtasn1 libepoxy libxkbcommon; do
+               libjpeg-turbo libwebp brotli pcre2 expat libgcrypt libgpg-error libtasn1 libepoxy libxkbcommon openssl; do
         for lic in COPYING LICENSE LICENSE.txt LICENSE.md COPYING.LIB COPYING.LESSER docs/LICENSE.TXT LICENSES/LGPL-2.1-or-later.txt; do
           [[ -f "$B/deps/$d-src/$lic" ]] && { cp "$B/deps/$d-src/$lic" "$L/addon-wpe-$d.txt"; break; }
         done

@@ -7,6 +7,7 @@ glib https://download.gnome.org/sources/glib/2.88/glib-2.88.4.tar.xz 25fd169f3b2
 libsoup https://download.gnome.org/sources/libsoup/3.8/libsoup-3.8.0.tar.xz bbf08fa3e03a88c31a3d27a0d87cb422e9490f2d08e149211103df6d638a2238
 glib-networking https://download.gnome.org/sources/glib-networking/2.80/glib-networking-2.80.1.tar.xz b80e2874157cd55071f1b6710fa0b911d5ac5de106a9ee2a4c9c7bee61782f8e
 libxml2 https://download.gnome.org/sources/libxml2/2.15/libxml2-2.15.4.tar.xz 98087fd181d9070724f3fbc65c7377db03038eb92bd882374daff44940138821
+openssl https://github.com/openssl/openssl/releases/download/openssl-3.5.7/openssl-3.5.7.tar.gz a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8
 libpsl https://github.com/rockdaboot/libpsl/releases/download/0.23.3/libpsl-0.23.3.tar.gz 93941f85a1e7bd593fa94f299233cb5dfc91cd144fd9a78a6ceb75001c5b03be
 nghttp2 https://github.com/nghttp2/nghttp2/releases/download/v1.70.0/nghttp2-1.70.0.tar.xz e05cb1388eaca3830aded4ccf20044b6e1ac1a61411dcca11b0437c4285c8bc2
 brotli https://github.com/google/brotli/archive/refs/tags/v1.2.0.tar.gz 816c96e8e8f193b40151dad7e8ff37b1221d019dbcb9c35cd3fadbfe6477dfec
