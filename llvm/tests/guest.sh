@@ -6,7 +6,7 @@ rm -rf /tmp/llvmtest && mkdir -p /tmp/llvmtest && cd /tmp/llvmtest && cp /work/s
 tools() {
   for t in clang clang++ opt llc llvm-mc lld ld.lld wasm-ld ld llvm-ar llvm-ranlib ar ranlib llvm-nm nm \
            llvm-objcopy llvm-strip strip objcopy llvm-objdump objdump llvm-readobj llvm-readelf readelf \
-           llvm-dwarfdump llvm-symbolizer llvm-addr2line addr2line cc c++ cpp; do
+           llvm-dwarfdump llvm-symbolizer llvm-addr2line addr2line llvm-lipo lipo cc c++ cpp; do
     command -v $t >/dev/null || echo "missing $t"
   done
   clang --version | head -1
@@ -40,6 +40,23 @@ strip_shared() {
   cp lib.so lib.stripped.so && cp libxx.so libxx.stripped.so && strip lib.stripped.so && llvm-strip libxx.stripped.so \
     && objdump -h lib.stripped.so | grep -c dylink.0 && ./dlmain ./lib.stripped.so ./libxx.stripped.so | head -1
 }
+# llvm-lipo (and lipo): Mach-O universal files of objects and archives clang builds for x86_64 and
+# arm64 macOS: made, listed, checked, thinned, an architecture removed and one replaced
+lipo_fat() {
+  printf 'int add(int a, int b) { return a + b; }\n' > add.c
+  for t in x86_64 arm64; do
+    clang --target=$t-apple-macos11 -O2 -c add.c -o add_$t.o && llvm-ar rcs libadd_$t.a add_$t.o || return 1
+  done
+  llvm-lipo add_x86_64.o add_arm64.o -create -output add.fat && llvm-lipo -info add.fat && lipo -archs add.fat \
+    && llvm-lipo -info add_arm64.o \
+    && llvm-lipo add.fat -verify_arch arm64 x86_64 && echo "verify_arch: both there" \
+    && if llvm-lipo add.fat -verify_arch armv7; then echo "verify_arch: armv7 there?"; else echo "verify_arch: no armv7"; fi \
+    && llvm-lipo add.fat -thin arm64 -output thin.o && cmp thin.o add_arm64.o && echo "thin: the arm64 object" \
+    && lipo add.fat -remove x86_64 -output rm.fat && llvm-lipo -info rm.fat \
+    && llvm-lipo add.fat -replace arm64 add_arm64.o -output rep.fat && cmp rep.fat add.fat && echo "replace: the same file" \
+    && lipo -create libadd_x86_64.a libadd_arm64.a -output libadd.a && lipo -info libadd.a \
+    && if llvm-lipo -info add.c 2>/dev/null; then echo "add.c: taken?"; else echo "add.c: refused"; fi
+}
 probes() {
   cc -dumpmachine
   test -f "$(cc -print-libgcc-file-name)" && echo "compiler-rt: found"
@@ -50,7 +67,7 @@ probes() {
   c++ -v 2>&1 | head -1
 }
 
-for s in tools hello cfeatures cxx_hello cxx_features shared ld_options archive main_envp lto strip_shared probes; do
+for s in tools hello cfeatures cxx_hello cxx_features shared ld_options archive main_envp lto strip_shared lipo_fat probes; do
   echo "### $s"
   ( $s ) 2>&1
   echo "### status $?"

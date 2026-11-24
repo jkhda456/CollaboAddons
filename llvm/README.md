@@ -29,6 +29,7 @@ cc -c a.c b.c && ar rcs libab.a a.o b.o        # archives, nm, strip, objdump, .
 | `llvm-readobj`, `llvm-readelf`, `readelf` | object-file headers, sections, symbols |
 | `llvm-dwarfdump` | DWARF debug info |
 | `llvm-symbolizer`, `llvm-addr2line`, `addr2line` | address → function, file, line |
+| `llvm-lipo`, `lipo` | Mach-O universal ("fat") files: create, list (`-info`, `-archs`), `-verify_arch`, `-thin`, `-extract`, `-remove`, `-replace` |
 | `/usr/include` | the C library's headers (musl, with Linux's uapi headers), libc++'s (`c++/v1`) |
 | `/usr/lib` | `libc.a`, `crt1.o`, `libc.exports` (the userspace step's C library, with dlopen); `libc++.a`, `libc++abi.a`, `libunwind.a` (with C++ exceptions, position-independent); empty `libm.a`, `libpthread.a`, `libdl.a`, ... |
 | `/usr/lib/clang/24` | clang's own headers; compiler-rt's builtins, and the copy `-shared` links |
@@ -119,7 +120,7 @@ addons/llvm/tests/run.sh            # the checks, in the guest
 
 The host needs clang-19 and lld-19, and the llvm-project clone at `../org/llvm-project` (beside
 `CollaboCore`) with `LLVM_REV` in it — a shallow fetch of that one commit is enough, nothing is
-checked out:
+checked out; only the `src` stage reads it, so with `build/src` up to date it may be gone:
 
 ```sh
 git init ../org/llvm-project
@@ -140,7 +141,9 @@ Stages, each skipped when up to date (redo one with `FORCE=stage[,stage]`); logs
 `native` and `cross` are the long stages (about 3,300 and 3,700 build steps); the cross build's
 links run one at a time to keep memory down. `JOBS=N` and `NINJA_FLAGS="-k 0"` (keep going, to see
 every error at once) are passed to their ninja. A change to the cross build's configuration
-reconfigures its tree in place (`build/cross.config`).
+reconfigures its tree in place (`build/cross.config`); a tool added to `LLVM_TOOLS` is built
+(`build/cross.tools`), and the tools are linked again when `userspace`'s `libc.a` or compiler-rt
+changed (ninja does not know of them).
 
 `addons/llvm/build.sh dist [ARCHIVE]` builds nothing: it packs the code and `out/` — not `build/`
 (gigabytes) — into `dist/llvm-addon-YYYYMMDD.tar.gz` (about 120 MB), as `llvm/` with the add-ons'
@@ -159,7 +162,9 @@ rethrow, `exception_ptr` across threads, RTTI, static constructors, threads, `st
 libc++ and an exception thrown and caught in a library); a library linked with GNU ld's options;
 `ar`/`ranlib`/`nm`/`strip`/`objdump`/`cc -r`; `main(argc, argv, envp)` (the C library's
 `userspace/patches/musl-main-envp.patch`); C++ exceptions and setjmp/longjmp through `-flto` and
-`-flto=thin`; `strip` of shared libraries that still load; the compiler's answers to build systems
+`-flto=thin`; `strip` of shared libraries that still load; `llvm-lipo`/`lipo` on universal files of
+x86_64 and arm64 macOS objects and archives clang builds (create, `-info`, `-archs`, `-verify_arch`,
+`-thin`, `-remove`, `-replace`); the compiler's answers to build systems
 (`-dumpmachine`, `-print-libgcc-file-name`, the predefined macros, `cpp`, a program from standard
 input, `cc -Wl,--version` as meson asks, `c++ -v`). Then `tests/pyext.sh`, with the Python image
 and the interpreter's headers (`python/stage`) mounted at `/usr/include/python3.13`: a C extension

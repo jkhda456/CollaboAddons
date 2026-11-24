@@ -45,6 +45,18 @@ EXPECTED = {
     "main_envp": ["envp: argc 3, ENVP_CHECK there"],
     "lto": ["lto caught: deep 3", "lto longjmp: 7", "lto caught: deep 3", "lto longjmp: 7"],
     "strip_shared": ["1", "lib_add: 45"],
+    "lipo_fat": [
+        "Architectures in the fat file: add.fat are: x86_64 arm64",
+        "x86_64 arm64",
+        "Non-fat file: add_arm64.o is architecture: arm64",
+        "verify_arch: both there",
+        "verify_arch: no armv7",
+        "thin: the arm64 object",
+        "Architectures in the fat file: rm.fat are: arm64",
+        "replace: the same file",
+        "Architectures in the fat file: libadd.a are: x86_64 arm64",
+        "add.c: refused",
+    ],
     "cxx_features": [
         "static constructor",
         "unwound frame 0",

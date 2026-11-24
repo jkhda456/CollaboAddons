@@ -3,9 +3,9 @@
 # guest's own programs and shared libraries there, packed as out/llvm.cpio (an overlay):
 #
 #   /usr/bin           clang, opt, llc, llvm-mc, lld, llvm-ar, llvm-readobj, llvm-objdump, llvm-nm,
-#                      llvm-dwarfdump, llvm-symbolizer, llvm-objcopy and their other names (clang++,
-#                      ld.lld, wasm-ld, llvm-ranlib, llvm-strip, ...; ar, ranlib, nm, strip, objcopy,
-#                      objdump, readelf, addr2line); cc, c++, cpp and ld (scripts, guest/)
+#                      llvm-dwarfdump, llvm-symbolizer, llvm-objcopy, llvm-lipo and their other names
+#                      (clang++, ld.lld, wasm-ld, llvm-ranlib, llvm-strip, ...; ar, ranlib, nm, strip,
+#                      objcopy, objdump, readelf, addr2line, lipo); cc, c++, cpp and ld (scripts, guest/)
 #   /usr/include       the C library's headers (musl, with Linux's uapi), libc++'s (c++/v1)
 #   /usr/lib           libc.a, crt1.o, libc.exports (the userspace step's), libc++.a, libc++abi.a,
 #                      libunwind.a
@@ -21,7 +21,8 @@
 #
 # Needs: ./build.sh tools userspace (cmake/ninja, the musl sysroot, compiler-rt), clang-19 and lld-19
 # on the host (they build the native stage), and the llvm-project clone at ../org/llvm-project with
-# LLVM_REV in it (a shallow fetch of that one commit is enough; nothing is checked out).
+# LLVM_REV in it (a shallow fetch of that one commit is enough; nothing is checked out) for the src
+# stage only.
 #
 #   FORCE=src,native,runtimes,cross,cpio  re-run the named stages
 #   JOBS=N, NINJA_FLAGS="-k 0"            passed to the native and cross builds' ninja
@@ -60,7 +61,7 @@ LLVM_TARGETS="WebAssembly;X86;AArch64;ARM;RISCV"
 LLVM_PROJECTS="clang;lld"
 
 # Tools to install into /usr/bin in the guest
-LLVM_TOOLS="clang;opt;llc;llvm-mc;lld;llvm-ar;llvm-readobj;llvm-objdump;llvm-nm;llvm-dwarfdump;llvm-symbolizer;llvm-objcopy"
+LLVM_TOOLS="clang;opt;llc;llvm-mc;lld;llvm-ar;llvm-readobj;llvm-objdump;llvm-nm;llvm-dwarfdump;llvm-symbolizer;llvm-objcopy;llvm-lipo"
 
 FORCE=",${FORCE:-},"
 
@@ -101,11 +102,6 @@ check "$SYSROOT/lib/libc.exports"  "run: ./build.sh userspace (with dlopen: FORC
 check "$RT_LIB"                    "run: ./build.sh userspace"
 check "$CMAKE"                     ".tools/cmake missing; run: ./build.sh tools"
 check "$NINJA"                     ".tools/cmake (ninja) missing; run: ./build.sh tools"
-git -C "$LLVM_SRC" cat-file -e "$LLVM_REV^{commit}" 2>/dev/null || {
-  echo "missing: llvm-project $LLVM_REV in $LLVM_SRC" >&2
-  echo "  git init $LLVM_SRC && git -C $LLVM_SRC fetch --depth 1 https://github.com/llvm/llvm-project.git $LLVM_REV" >&2
-  exit 1
-}
 for t in clang-19 clang++-19 ld.lld-19; do
   command -v "$t" >/dev/null 2>&1 || { echo "missing: $t (apt install clang-19 lld-19)" >&2; exit 1; }
 done
@@ -144,6 +140,12 @@ SRC_PATHS="llvm clang lld cmake third-party libc runtimes libunwind libcxxabi li
 SRC_EXCLUDE="libc/test libc/docs libc/benchmarks libc/fuzzing llvm/test clang/test lld/test llvm/unittests
 clang/unittests lld/unittests libcxx/test libcxxabi/test libunwind/test"
 if stage src "$SRC/.stamp" "$A"/patches/*.patch "$(record "$B/src.paths" "$LLVM_REV $SRC_PATHS $SRC_EXCLUDE")"; then
+  # the clone is needed only here: with build/src up to date, the stages after it build without it
+  git -C "$LLVM_SRC" cat-file -e "$LLVM_REV^{commit}" 2>/dev/null || {
+    echo "missing: llvm-project $LLVM_REV in $LLVM_SRC" >&2
+    echo "  git init $LLVM_SRC && git -C $LLVM_SRC fetch --depth 1 https://github.com/llvm/llvm-project.git $LLVM_REV" >&2
+    exit 1
+  }
   rm -rf "$SRC"; mkdir -p "$SRC"
   excl=(); for p in $SRC_EXCLUDE; do excl+=(":(exclude)$p"); done
   # shellcheck disable=SC2086
@@ -348,8 +350,16 @@ CROSS_CONFIG=(
 )
 CROSS_RECORD="$(record "$B/cross.config" "${CROSS_CONFIG[*]}")"
 
-if stage cross "$CROSS_BUILD/.stamp" "$SRC/.stamp" "$RTI/lib/libc++.a" "$CROSS_RECORD"; then
+# The tool list is an input too (a tool added to LLVM_TOOLS is built), and so are the C library and
+# compiler-rt the tools are linked with, which ninja does not know of: a tool linked before they
+# changed is removed, and so linked again.
+if stage cross "$CROSS_BUILD/.stamp" "$SRC/.stamp" "$RTI/lib/libc++.a" "$CROSS_RECORD" \
+     "$(record "$B/cross.tools" "$LLVM_TOOLS")" "$SYSROOT/lib/libc.a" "$RT_LIB"; then
   LOG="$B/cross.log"
+  for name in ${LLVM_TOOLS//;/ }; do
+    bin="$(readlink -f "$CROSS_BUILD/bin/$name" 2>/dev/null || true)"   # clang: bin/clang-24
+    if [[ -f "$bin" && ( "$SYSROOT/lib/libc.a" -nt "$bin" || "$RT_LIB" -nt "$bin" ) ]]; then rm -f "$bin"; fi
+  done
   # Configured when there is no tree yet or its configuration changed; otherwise ninja rebuilds
   # incrementally (after a patch, say).
   if [[ ! -f "$CROSS_BUILD/build.ninja" || "$CROSS_RECORD" -nt "$CROSS_BUILD/build.ninja" ]]; then
@@ -385,7 +395,7 @@ if stage cpio "$CPIO_OUT" "$CROSS_BUILD/.stamp" "$A"/guest/* "$SYSROOT/lib/libc.
   for l in clang++=clang ld.lld=lld wasm-ld=lld llvm-ranlib=llvm-ar llvm-readelf=llvm-readobj \
            llvm-strip=llvm-objcopy llvm-addr2line=llvm-symbolizer \
            ar=llvm-ar ranlib=llvm-ar nm=llvm-nm strip=llvm-objcopy objcopy=llvm-objcopy \
-           objdump=llvm-objdump readelf=llvm-readobj addr2line=llvm-symbolizer; do
+           objdump=llvm-objdump readelf=llvm-readobj addr2line=llvm-symbolizer lipo=llvm-lipo; do
     ln -s "${l#*=}" "$STAGE/usr/bin/${l%%=*}"
   done
   # cc, c++ (cc by another name), cpp, ld: what builds the guest's own programs and libraries
