@@ -99,6 +99,20 @@ static const char *help_text =
     "                           JavaScript run at the start of every page, before the page's own\n"
     "  settings                 all of the above\n"
     "\n"
+    "Proxy: where this browser's requests go (each browser, -n NAME, its own)\n"
+    "  proxy [status]           straight to the sites (the default), or through which proxy\n"
+    "  proxy URL [--bypass HOSTS|none|default]   from now on through URL: http://HOST:PORT,\n"
+    "                           https://..., socks5://... (socks5h), socks4://, socks4a://, with\n"
+    "                           USER:PASSWORD@ for one that asks; every request (pages, frames,\n"
+    "                           workers, WebSockets, downloads, tz auto). HOSTS go straight\n"
+    "                           (a,*.b,10.0.0.0/8; default: localhost, 127.0.0.0/8, ::1; none:\n"
+    "                           every host through it). Loads under way are stopped\n"
+    "  proxy off                straight to the sites again\n"
+    "  proxy bypass HOSTS|none|default   only the hosts that go straight\n"
+    "  proxy ca [FILE | clear]  trust FILE's certificate authority (PEM or DER) besides the\n"
+    "                           guest's, from the next connection on: a proxy's that reads\n"
+    "                           HTTPS (Burp, mitmproxy); ca: the ones trusted\n"
+    "\n"
     "Developer tools: the network, as a browser's developer tools record it (off by default)\n"
     "  devtools [on [--bodies text|all|none] | off | toggle]   record every request the page\n"
     "                           and its frames and workers make: headers as sent (cookies too),\n"
@@ -124,27 +138,38 @@ static const char *help_text =
     "                           it); --type T, --status S, --failed narrow them\n"
     "  har export FILE N... [--as FORMAT] [-o OUT]   the same from a HAR file of any browser\n"
     "\n"
-    "Intercept: the page's requests wait for approval, each sent, dropped or answered here\n"
+    "Intercept: the browser's requests wait for approval, each sent, dropped or answered here\n"
     "  intercept on [TEXT...] [--regex] [--case] [--type T[,T]] [--method M[,M]]\n"
-    "               [--stage request|response|both]   from now on, the requests the page\n"
-    "                           makes (TEXT: whose address has it; T: document, script, fetch...)\n"
-    "                           pause before they go (response: their responses, before the\n"
-    "                           page gets them); turns the developer tools on (also: pause)\n"
+    "               [--stage STAGE[,STAGE]]   from now on, the requests the page, its frames\n"
+    "                           and workers make (also synchronous XHR, beacons and pings,\n"
+    "                           service and shared workers', each hop of a redirect; TEXT: whose\n"
+    "                           address has it; T: document, script, fetch, xhr, beacon, ping,\n"
+    "                           websocket, sync, redirect, service-worker...) pause. STAGE:\n"
+    "                           request (the default: before it goes; a WebSocket's handshake),\n"
+    "                           response (status and headers), body (the response with its\n"
+    "                           whole body, to read and change), send, receive (a WebSocket's\n"
+    "                           messages), both, messages, all; turns the developer tools on\n"
     "  intercept [status] | off   the rules; off: the paused ones go as they are\n"
-    "  intercept list           the paused requests (N: the number web network has too)\n"
-    "  intercept show N         one: what would go (method, address, headers, body), or the\n"
-    "                           response that would reach the page (status, headers)\n"
+    "  intercept list [--json]  the paused requests and messages (N: the number web network\n"
+    "                           has too; a message's own number)\n"
+    "  intercept show N [--json]   one: what would go (method, address, headers, body), the\n"
+    "                           response that would reach the page, or a WebSocket message\n"
+    "  intercept body N [FILE]  its body (request, response with --stage body) or message data\n"
     "  intercept send N... [--url U] [--method M] [--header 'NAME: VALUE']... [--unset NAME]...\n"
     "                 [--body TEXT | --body-file FILE]   let it go, changed so; a response:\n"
-    "                           [--status S] [--header ...] [--mime TYPE] --body TEXT\n"
+    "                           [--status S] [--header ...] [--mime TYPE] [--body TEXT]; a\n"
+    "                           message: [--body TEXT | --body-file FILE] [--opcode text|binary]\n"
     "  intercept drop N... [--error general|access|cancel|timeout]   stop it: the page gets a\n"
-    "                           network error (also: stop)\n"
+    "                           network error (a message: not delivered) (also: stop)\n"
     "  intercept respond N... [--status S] [--header 'NAME: VALUE']... [--mime TYPE]\n"
     "                 [--body TEXT | --body-file FILE]   answer it here, nothing sent\n"
     "  intercept wait [TIMEOUT]   until a request pauses (seconds, 30)\n"
     "                           N: a number, all, or a part of the address. While requests are\n"
-    "                           paused, a command waiting on the page (open, click, wait, run)\n"
-    "                           ends with them listed, exit 6; web wait load after deciding\n"
+    "                           paused, a command waiting on the page (open, click, wait, run;\n"
+    "                           eval: a synchronous XHR) ends with them listed, exit 6; web wait\n"
+    "                           load after deciding.\n"
+    "                           What a request cannot have done: exit 7 (web --capabilities)\n"
+    "  --capabilities           (an option, no browser needed) what can be intercepted, as JSON\n"
     "\n"
     "Browsers\n"
     "  list                     the running browsers\n"
@@ -155,17 +180,83 @@ static const char *help_text =
     "already gets the settings among them (the others are for a start: `web close` first)\n"
     "  --user-agent PROFILE|UA   --header 'NAME: VALUE'   --header-for HOST 'NAME: VALUE'\n"
     "  --lang LANGUAGES   --timezone ZONE|auto   --humanize on|off   --inject FILE   --devtools\n"
-    "  (settings: --header, --header-for and --inject can be given more than once)\n"
+    "  --proxy URL|off   --proxy-bypass HOSTS|none   --proxy-ca FILE\n"
+    "  (settings: --header, --header-for, --inject and --proxy-ca can be given more than once)\n"
     "  --ephemeral (no cookies or storage kept)   --ignore-tls-errors   --size WxH\n"
     "\n"
     "Exit status: 0 done, 1 failed, 2 usage, 3 timed out, 4 not found, 5 no browser,\n"
-    "6 requests are paused for approval (web intercept).\n"
+    "6 requests are paused for approval (web intercept), 7 not supported (web --capabilities).\n"
     "WEB_START_TIMEOUT (seconds, 300) bounds the start of a browser; WEB_BROWSER_ARGS adds\n"
     "options to it (words). The first settings of a browser this command starts, unless options\n"
     "say: WEB_USER_AGENT (a profile or a user agent), WEB_HEADERS (lines NAME: VALUE), WEB_LANG,\n"
     "WEB_TIMEZONE (a zone or auto), WEB_HUMANIZE (on, off),\n"
-    "WEB_DEVTOOLS (1, or the bodies kept: text, all, none).\n"
+    "WEB_DEVTOOLS (1, or the bodies kept: text, all, none), WEB_PROXY (a URL), WEB_PROXY_BYPASS,\n"
+    "WEB_PROXY_CA (FILE[:FILE...]).\n"
     "WPE_BROWSER_DEBUG=1 logs its loads (`gui logs NAME`).\n";
+
+
+/* web --capabilities: what this browser can intercept and record, for programs (JSON). A client
+ * checks "protocol" and the stages and actions it needs; asked for something not here, the
+ * browser fails with exit status 7. Keep in step with devtools.js (PROTOCOL, netDecision1). */
+static const char *capabilities_json =
+    "{\n"
+    " \"name\": \"web\",\n"
+    " \"browser\": \"wpe-browser (WPE WebKit 2.54.1)\",\n"
+    " \"protocol\": 2,\n"
+    " \"exitStatus\": {\"0\": \"done\", \"1\": \"failed\", \"2\": \"usage\", \"3\": \"timed out\", \"4\": \"not found\",\n"
+    "   \"5\": \"no browser\", \"6\": \"requests are paused (web intercept)\", \"7\": \"not supported (this file says what is)\"},\n"
+    " \"intercept\": {\n"
+    "  \"version\": 2,\n"
+    "  \"commands\": [\"on\", \"off\", \"status\", \"list\", \"list --json\", \"show\", \"show --json\", \"body\", \"wait\", \"send\", \"drop\", \"respond\"],\n"
+    "  \"stages\": {\n"
+    "   \"request\": \"an HTTP request before it goes (each hop of a redirect); a WebSocket's opening handshake\",\n"
+    "   \"response\": \"a response's status and headers before the page gets them (its body has not come)\",\n"
+    "   \"body\": \"a response with its whole body read first, to read and change (up to 32 MB)\",\n"
+    "   \"send\": \"a WebSocket message the page sends, before it goes\",\n"
+    "   \"receive\": \"a WebSocket message the page receives, before the page gets it\"\n"
+    "  },\n"
+    "  \"stageAliases\": {\"both\": [\"request\", \"response\"], \"messages\": [\"send\", \"receive\"],\n"
+    "   \"all\": [\"request\", \"response\", \"body\", \"send\", \"receive\"]},\n"
+    "  \"types\": [\"document\", \"script\", \"stylesheet\", \"image\", \"font\", \"fetch\", \"xhr\", \"beacon\", \"ping\", \"websocket\", \"other\",\n"
+    "   \"sync\", \"redirect\", \"worker\", \"service-worker\", \"shared-worker\"],\n"
+    "  \"http\": {\n"
+    "   \"from\": [\"page\", \"frames\", \"dedicated-workers\", \"sync-xhr\", \"beacon\", \"ping\", \"service-workers\", \"shared-workers\", \"redirect-hops\"],\n"
+    "   \"request\": {\"send\": [\"url\", \"method\", \"headers\", \"body\"], \"drop\": [\"general\", \"access\", \"cancel\", \"timeout\"],\n"
+    "     \"respond\": [\"status\", \"headers\", \"mime\", \"body\"]},\n"
+    "   \"response\": {\"send\": [\"status\", \"headers\", \"mime\", \"body\"], \"respond\": [\"status\", \"headers\", \"mime\", \"body\"],\n"
+    "     \"drop\": \"held by the network process only (via: network-process); the page's own loads are held by its inspector, which"
+    " cannot fail a response (exit 7): respond instead\"},\n"
+    "   \"body\": {\"send\": [\"status\", \"headers\", \"mime\", \"body\"], \"drop\": [\"general\", \"access\", \"cancel\", \"timeout\"],\n"
+    "     \"respond\": [\"status\", \"headers\", \"mime\", \"body\"], \"read\": \"web intercept body N [FILE]; show N --json (base64)\",\n"
+    "     \"maxBytes\": 33554432},\n"
+    "   \"bodies\": \"base64 in JSON; --body-file sends bytes as they are\"\n"
+    "  },\n"
+    "  \"websocket\": {\n"
+    "   \"handshake\": {\"stage\": \"request\", \"send\": [\"url\", \"headers\"], \"drop\": [], \"respond\": \"not supported (exit 7)\"},\n"
+    "   \"messages\": {\"stages\": [\"send\", \"receive\"], \"send\": [\"data\", \"opcode\"], \"drop\": [], \"respond\": \"not supported (exit 7)\",\n"
+    "     \"order\": \"each way, a message waits behind those held before it\", \"binary\": \"base64 (encoding: base64)\"}\n"
+    "  },\n"
+    "  \"paused\": {\"id\": \"a number (a request's is its web network number; a message's its own)\",\n"
+    "   \"fields\": [\"id\", \"record\", \"stage\", \"via\", \"kind\", \"type\", \"tags\", \"method\", \"url\", \"waitedMs\", \"page\", \"frame\", \"worker\", \"hop\",\n"
+    "     \"redirectedFrom\", \"chain\", \"actions\", \"changes\", \"headers\", \"body\", \"bodyEncoding\", \"bodyFromFiles\", \"status\", \"statusText\",\n"
+    "     \"mimeType\", \"direction\", \"seq\", \"opcode\", \"size\", \"encoding\", \"data\"]},\n"
+    "  \"notHeld\": [\"data: and blob: addresses\", \"file: addresses\", \"CORS preflights\",\n"
+    "   \"a response the network process serves from its disk cache (body stage)\",\n"
+    "   \"a service worker's answer from its CacheStorage or one it made (recorded, marked: no network request)\"]\n"
+    " },\n"
+    " \"record\": {\"har\": \"1.2\", \"serviceWorkerResponses\": [\"cache-storage\", \"synthesized\", \"network\"],\n"
+    "   \"serviceWorkerRequests\": true, \"sharedWorkerRequests\": true, \"redirectChains\": true,\n"
+    "   \"webSocketMessages\": \"recorded by the page's inspector: text as it is, binary as base64\"},\n"
+    " \"proxy\": {\"commands\": [\"proxy\", \"proxy URL\", \"proxy off\", \"proxy bypass\", \"proxy ca\"],\n"
+    "   \"options\": [\"--proxy\", \"--proxy-bypass\", \"--proxy-ca\"], \"environment\": [\"WEB_PROXY\", \"WEB_PROXY_BYPASS\", \"WEB_PROXY_CA\"],\n"
+    "   \"schemes\": [\"http\", \"https\", \"socks5\", \"socks5h\", \"socks4a\", \"socks4\", \"socks\"],\n"
+    "   \"auth\": {\"http\": [\"basic\"], \"socks5\": [\"username/password\"], \"how\": \"USER:PASSWORD@ in the URL\"},\n"
+    "   \"bypass\": {\"default\": [\"localhost\", \"127.0.0.0/8\", \"::1\"], \"forms\": [\"host\", \"*.domain\", \".domain\", \"address/bits\", \"host:port\"]},\n"
+    "   \"scope\": \"every request of one browser (-n NAME): pages, frames, workers, WebSockets, downloads, tz auto\",\n"
+    "   \"runtime\": \"changes apply at once; loads under way are stopped\",\n"
+    "   \"ca\": {\"formats\": [\"pem\", \"der\"], \"from\": \"the next TLS connection\", \"clear\": \"one used already stays trusted until the browser restarts\"},\n"
+    "   \"notSupported\": [\"PAC files (proxy auto-config)\", \"a proxy per URL scheme\"]}\n"
+    "}\n";
 
 static const char *name = "web";
 
@@ -656,7 +747,8 @@ int main(int argc, char **argv)
         int values = !strcmp(option, "--header-for") ? 2
                    : !strcmp(option, "--user-agent") || !strcmp(option, "--header") || !strcmp(option, "--lang")
                      || !strcmp(option, "--inject") || !strcmp(option, "--size") || !strcmp(option, "--timezone")
-                     || !strcmp(option, "--humanize") ? 1 : 0;
+                     || !strcmp(option, "--humanize") || !strcmp(option, "--proxy") || !strcmp(option, "--proxy-bypass")
+                     || !strcmp(option, "--proxy-ca") ? 1 : 0;
         if (values && i + values >= argc)
             die(2, "%s needs %s", option, values == 2 ? "a host and 'NAME: VALUE'" : "a value");
         if ((!strcmp(option, "-n") || !strcmp(option, "--name")) && i + 1 < argc)
@@ -668,7 +760,7 @@ int main(int argc, char **argv)
             add_word(&start_options, &start_count, option);
         else if (!strcmp(option, "--devtools"))
             add_word(&settings, &settings_count, option);
-        else if (!strcmp(option, "--inject")) {
+        else if (!strcmp(option, "--inject") || !strcmp(option, "--proxy-ca")) {
             add_word(&settings, &settings_count, option);
             add_word(&settings, &settings_count, absolute(argv[++i]));
         } else if (values) {
@@ -680,6 +772,10 @@ int main(int argc, char **argv)
             return 0;
         } else if (!strcmp(option, "--agent-help"))
             return agent_help(argc - i - 1, argv + i + 1);
+        else if (!strcmp(option, "--capabilities")) {
+            fputs(capabilities_json, stdout);
+            return 0;
+        }
         else
             die(2, "unknown option %s (web help)", argv[i]);
     }
@@ -689,6 +785,10 @@ int main(int argc, char **argv)
     }
     if (!strcmp(argv[i], "agent-help"))
         return agent_help(argc - i - 1, argv + i + 1);
+    if (!strcmp(argv[i], "capabilities")) {
+        fputs(capabilities_json, stdout);
+        return 0;
+    }
     if (!getenv("COLLABO_WEB_NAME") && strchr(name, '/'))
         die(2, "a browser's name has no '/'");
     char **words = argv + i;
@@ -816,6 +916,8 @@ int main(int argc, char **argv)
             words = har;
             count = n;
         }
+    } else if (!strcmp(command, "intercept") && count == 4 && !strcmp(words[1], "body")) {
+        words[3] = absolute(words[3]); /* the browser writes it */
     } else if (!strcmp(command, "intercept")) {
         /* --body-file FILE (-: stdin): web reads it, the browser gets its bytes as base64 */
         for (int j = 2; j + 1 < count; j++) {
@@ -825,6 +927,9 @@ int main(int argc, char **argv)
                 j++;
             }
         }
+    } else if (!strcmp(command, "proxy") && count == 3 && !strcmp(words[1], "ca") && strcmp(words[2], "clear")
+               && strcmp(words[2], "list")) {
+        words[2] = absolute(words[2]); /* the browser reads it */
     } else if (!strcmp(command, "inject") && count > 1 && (!strcmp(words[1], "add") || !strcmp(words[1], "remove"))) {
         int adding = !strcmp(words[1], "add");
         if (count != 3)

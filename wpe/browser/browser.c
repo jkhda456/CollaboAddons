@@ -4,7 +4,8 @@
  *
  *   wpe-browser [--name NAME] [--size WxH] [--ephemeral] [--data-dir DIR] [--ignore-tls-errors]
  *               [--user-agent UA|PROFILE] [--header 'NAME: VALUE'] [--header-for HOST 'NAME: VALUE']
- *               [--lang LANGUAGES] [--timezone ZONE|auto] [--humanize on|off] [--inject FILE] [--devtools] [URL]
+ *               [--lang LANGUAGES] [--timezone ZONE|auto] [--humanize on|off] [--inject FILE] [--devtools]
+ *               [--proxy URL] [--proxy-bypass HOSTS] [--proxy-ca FILE] [URL]
  *
  * The socket is $COLLABO_WEB_DIR/NAME.sock (/tmp/.collabo-web by default). A request is a list of
  * words: "N\n" then N times "LENGTH\n" and the bytes; the answer is "STATUS LENGTH\n" and the
@@ -24,16 +25,21 @@
 #define _GNU_SOURCE
 #include <ctype.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include <gio/gio.h>
 #include <gio/gunixsocketaddress.h>
+#include <glib/gstdio.h>
+#include <glib-unix.h>
 #include <math.h>
 #include <png.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 #include <unicode/ucal.h>
 #include <wpe/webkit.h>
@@ -54,7 +60,12 @@ extern void *webkit_web_view_connect_inspector_frontend(WebKitWebView *view, voi
 extern void webkit_inspector_frontend_send(void *frontend, const char *message);
 extern void webkit_inspector_frontend_disconnect(void *frontend);
 
-enum { ST_OK = 0, ST_FAILED = 1, ST_USAGE = 2, ST_TIMEOUT = 3, ST_NOT_FOUND = 4, ST_PAUSED = 6 };
+/* tls.c: certificate authorities trusted besides the guest's (web proxy ca) */
+extern void wpe_tls_trust_dir(const char *dir);
+extern gboolean wpe_tls_trust_file(const char *dir, const char *file, char **subjects, char **error);
+extern void wpe_tls_untrust_all(const char *dir);
+
+enum { ST_OK = 0, ST_FAILED = 1, ST_USAGE = 2, ST_TIMEOUT = 3, ST_NOT_FOUND = 4, ST_PAUSED = 6, ST_UNSUPPORTED = 7 };
 
 typedef struct Browser Browser;
 typedef struct Request Request;
@@ -186,8 +197,23 @@ struct Browser {
     gboolean intercepting;
     unsigned pause_serial;      /* how many requests paused so far */
     unsigned paused_count;      /* how many wait now */
+    unsigned blocking_count;    /* of them, synchronous requests: the page's main thread waits for those */
     guint pause_wake_id;
     GList *pause_waiters;       /* Requests that end when a request pauses (run, intercept wait) */
+    /* web intercept in the network process (WebKit patch 0013, netintercept.c): its socket */
+    char *net_socket_path;
+    int net_listen_fd, net_fd;  /* -1: none */
+    GString *net_in, *net_out;
+    guint net_read_id, net_write_id;
+    unsigned net_connections;   /* network processes that connected (one at a time) */
+    /* where the requests go (web proxy): through a proxy, or straight to the sites */
+    char *proxy;                /* its address (USER:PASSWORD@ in it for one that asks), NULL: none */
+    char **proxy_bypass;        /* the hosts that go straight; NULL: the default (the machine itself) */
+    char *proxy_sent;           /* what the network session has (NULL: WebKit's default, which is none) */
+    unsigned proxy_refused_load; /* the load (generation) the proxy refused to carry: why, in last_load_error */
+    gboolean proxy_refused;     /* the proxy refused (407) since it was set: libsoup does not ask again */
+    char *ca_dir;               /* certificate authorities trusted besides the guest's (tls.c) */
+    GPtrArray *ca_trusted;      /* their lines (FILE: SUBJECT) */
 };
 
 struct Request {
@@ -676,12 +702,16 @@ static void on_load_changed(WebKitWebView *view, WebKitLoadEvent event, gpointer
     }
 }
 
+static char *proxy_shown(const char *address);
+
 static gboolean on_load_failed(WebKitWebView *view, WebKitLoadEvent event, const char *uri, GError *error, gpointer data)
 {
     (void)view; (void)event; (void)data;
     DEBUG("load failed: %s: %s (%s %d)\n", uri, error->message, g_quark_to_string(error->domain), error->code);
     if (g_error_matches(error, WEBKIT_NETWORK_ERROR, WEBKIT_NETWORK_ERROR_CANCELLED))
         return FALSE;
+    if (browser.last_load_error && browser.proxy_refused_load == browser.load_generation)
+        return TRUE; /* why: the proxy wanted credentials (on_authenticate) */
     g_free(browser.last_load_error);
     if (error->domain == G_TLS_ERROR) {
         /* certificates and the status responses servers staple to them are checked against the
@@ -692,9 +722,21 @@ static gboolean on_load_failed(WebKitWebView *view, WebKitLoadEvent event, const
                                                   uri, error->message, when);
         g_free(when);
         g_date_time_unref(now);
+        if (error->code == G_TLS_ERROR_BAD_CERTIFICATE) { /* a certificate authority the guest does not know: a proxy's? */
+            char *with = g_strdup_printf("%s; web proxy ca FILE trusts a proxy's or your own certificate authority",
+                                         browser.last_load_error);
+            g_free(browser.last_load_error);
+            browser.last_load_error = with;
+        }
     } else if (strstr(error->message, "Blocked by Web Inspector")) /* the inspector's failure: web intercept drop */
         browser.last_load_error = g_strdup_printf("failed to load %s: dropped (web intercept drop)", uri);
-    else
+    else if (browser.proxy && !strstr(error->message, "Blocked by web intercept")) {
+        char *shown = proxy_shown(browser.proxy);
+        browser.last_load_error = g_strdup_printf("failed to load %s: %s (through the proxy %s%s: web proxy%s)", uri, error->message, shown,
+                                                  browser.proxy_refused ? ", which refused the user and password given (407)" : "",
+                                                  browser.proxy_refused ? " SCHEME://USER:PASSWORD@HOST:PORT" : "");
+        g_free(shown);
+    } else
         browser.last_load_error = g_strdup_printf("failed to load %s: %s", uri, error->message);
     g_printerr("wpe-browser: %s\n", browser.last_load_error);
     /* handled: WebKit's error page would be a load of its own, which would end the waits as a
@@ -707,8 +749,49 @@ static gboolean on_tls_errors(WebKitWebView *view, const char *uri, GTlsCertific
     (void)view; (void)certificate; (void)data;
     g_free(browser.last_load_error);
     browser.last_load_error = g_strdup_printf("failed to load %s: the server's certificate is not trusted (TLS errors 0x%x; "
-                                              "wpe-browser --ignore-tls-errors to load it anyway)", uri, errors);
+                                              "web proxy ca FILE trusts a proxy's or your own certificate authority, "
+                                              "web --ignore-tls-errors at a browser's start any certificate)", uri, errors);
     return FALSE;
+}
+
+/* A user and password asked for. The proxy's (407): libsoup answers with the proxy address's own
+ * (web proxy http://USER:PASSWORD@HOST:PORT; here when it did not); refused, or none given, the
+ * load fails saying so. A site's (401): not answered (WPE would keep the load waiting for an
+ * answer that never comes): the page gets the site's answer, as a browser whose dialog was closed.
+ * Not answering is going on without credentials (cancelling would cancel the load). */
+static gboolean on_authenticate(WebKitWebView *view, WebKitAuthenticationRequest *request, gpointer data)
+{
+    (void)view; (void)data;
+    if (!webkit_authentication_request_is_for_proxy(request)) {
+        DEBUG("%s:%u asks for a user and password (realm \"%s\"): not given\n", webkit_authentication_request_get_host(request),
+              webkit_authentication_request_get_port(request), webkit_authentication_request_get_realm(request));
+        webkit_authentication_request_authenticate(request, NULL);
+        return TRUE;
+    }
+    char *user = NULL, *password = NULL;
+    if (browser.proxy)
+        g_uri_split_with_user(browser.proxy, G_URI_FLAGS_HAS_PASSWORD, NULL, &user, &password, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+    if (user && !webkit_authentication_request_is_retry(request)) {
+        WebKitCredential *credential = webkit_credential_new(user, password ? password : "", WEBKIT_CREDENTIAL_PERSISTENCE_FOR_SESSION);
+        webkit_authentication_request_authenticate(request, credential);
+        webkit_credential_free(credential);
+    } else {
+        char *shown = browser.proxy ? proxy_shown(browser.proxy)
+                                    : g_strdup_printf("%s:%u", webkit_authentication_request_get_host(request),
+                                                      webkit_authentication_request_get_port(request));
+        g_free(browser.last_load_error);
+        browser.last_load_error = g_strdup_printf("the proxy %s %s (407 Proxy Authentication Required): web proxy "
+                                                  "SCHEME://USER:PASSWORD@HOST:PORT", shown,
+                                                  user ? "refused the user and password given" : "wants a user and password");
+        g_printerr("wpe-browser: %s\n", browser.last_load_error);
+        browser.proxy_refused_load = browser.load_generation; /* the load's own failure does not replace it */
+        browser.proxy_refused = TRUE;
+        g_free(shown);
+        webkit_authentication_request_authenticate(request, NULL);
+    }
+    g_free(user);
+    g_free(password);
+    return TRUE;
 }
 
 static char *normalize_uri(const char *text)
@@ -1987,6 +2070,8 @@ static char *json_field(const char *text, const char *name)
     return end ? g_strndup(p + 1, end - p - 1) : NULL;
 }
 
+static const char *const *proxy_bypass_hosts(void);
+
 /* The time zone of the address the browser's requests come from, as Camoufox's geoip does (a page
  * compares the clock it is shown with where the address is): asked of ipinfo.io, else ipapi.co.
  * *about: where it was found. */
@@ -1997,6 +2082,12 @@ static char *time_zone_lookup(char **about, char **error)
         { "https://ipapi.co/json/", "timezone", "ip", "country_code" },
     };
     SoupSession *session = soup_session_new_with_options("timeout", 10, "user-agent", browser.identity.user_agent, NULL);
+    /* the address the pages' requests come from: the proxy's, when there is one */
+    if (browser.proxy) {
+        GProxyResolver *resolver = g_simple_proxy_resolver_new(browser.proxy, (char **)proxy_bypass_hosts());
+        soup_session_set_proxy_resolver(session, resolver);
+        g_object_unref(resolver);
+    }
     char *zone = NULL;
     GString *failures = g_string_new(NULL);
     for (size_t i = 0; i < G_N_ELEMENTS(services) && !zone; i++) {
@@ -2079,12 +2170,282 @@ static char *humanize_text(void)
         : "off (each action's events at once)");
 }
 
+/* ── where the requests go (web proxy) ─────────────────────────────────────────────────────────
+ * Every request of the browser's network session (pages, frames, workers, WebSockets, downloads)
+ * goes through the proxy, as WebKit's proxy settings send it: an HTTP proxy gets http:// requests
+ * whole and a CONNECT for the others (https, wss), a SOCKS one a connection to each host (named,
+ * not looked up here). Per browser (-n NAME: its own network process). */
+
+/* what goes straight unless said: the machine itself, as Chrome and Firefox do (a proxy elsewhere
+ * cannot reach the guest's own servers) */
+static const char *const proxy_loopback[] = { "localhost", "127.0.0.0/8", "::1", NULL };
+
+static const char *const *proxy_bypass_hosts(void)
+{
+    return browser.proxy_bypass ? (const char *const *)browser.proxy_bypass : proxy_loopback;
+}
+
+/* A proxy's address as given (HOST:PORT alone: an HTTP proxy's), checked and written out whole;
+ * NULL with *error */
+static char *proxy_address(const char *text, char **error)
+{
+    static const char *const schemes[] = { "http", "https", "socks", "socks4", "socks4a", "socks5", "socks5h", NULL };
+    char *whole = strstr(text, "://") ? g_strdup(text) : g_strconcat("http://", text, NULL);
+    char *scheme = NULL, *userinfo = NULL, *host = NULL, *path = NULL, *query = NULL, *fragment = NULL;
+    int port = -1;
+    GError *e = NULL;
+    char *result = NULL;
+    if (!g_uri_split(whole, G_URI_FLAGS_ENCODED, &scheme, &userinfo, &host, &port, &path, &query, &fragment, &e)) {
+        *error = g_strdup_printf("%s is not a proxy's address (%s): http://HOST:PORT, socks5://HOST:PORT...", text, e->message);
+        g_error_free(e);
+    } else {
+        char *lower = g_ascii_strdown(scheme, -1);
+        if (!g_strv_contains(schemes, lower))
+            *error = g_strdup_printf("a proxy is http://, https://, socks5:// (socks5h://), socks4://, socks4a:// or socks:// (any of the"
+                                     " SOCKS ones), not %s://", scheme);
+        else if (!host || !*host)
+            *error = g_strdup_printf("%s names no host: %s://HOST:PORT", text, lower);
+        else if (port <= 0)
+            *error = g_strdup_printf("give the proxy's port: %s://%s:PORT", lower, host);
+        else if ((path && *path && strcmp(path, "/")) || query || fragment)
+            *error = g_strdup_printf("a proxy's address is SCHEME://[USER:PASSWORD@]HOST:PORT, without a path (%s)", text);
+        else /* socks5h (curl's: the proxy looks the names up) is what socks5 does here */
+            result = g_uri_join(G_URI_FLAGS_ENCODED, !strcmp(lower, "socks5h") ? "socks5" : lower, userinfo, host, port, "", NULL, NULL);
+        g_free(lower);
+    }
+    g_free(whole);
+    g_free(scheme);
+    g_free(userinfo);
+    g_free(host);
+    g_free(path);
+    g_free(query);
+    g_free(fragment);
+    return result;
+}
+
+/* an address as it is shown: its password hidden */
+static char *proxy_shown(const char *address)
+{
+    char *scheme = NULL, *userinfo = NULL, *host = NULL;
+    int port = -1;
+    if (!g_uri_split(address, G_URI_FLAGS_ENCODED, &scheme, &userinfo, &host, &port, NULL, NULL, NULL, NULL))
+        return g_strdup(address);
+    char *user = userinfo ? (strchr(userinfo, ':') ? g_strdup_printf("%.*s:****", (int)strcspn(userinfo, ":"), userinfo)
+                                                   : g_strdup(userinfo))
+                          : NULL;
+    char *shown = g_uri_join(G_URI_FLAGS_ENCODED, scheme, user, host, port, "", NULL, NULL);
+    g_free(scheme);
+    g_free(userinfo);
+    g_free(host);
+    g_free(user);
+    return shown;
+}
+
+/* URL, or off (none, direct, ""): straight to the sites (*address NULL); FALSE with *error */
+static gboolean proxy_parse(const char *text, char **address, char **error)
+{
+    *address = NULL;
+    if (!text || !*text || !g_ascii_strcasecmp(text, "off") || !g_ascii_strcasecmp(text, "none") || !g_ascii_strcasecmp(text, "direct"))
+        return TRUE;
+    return (*address = proxy_address(text, error)) != NULL;
+}
+
+static gboolean proxy_set(const char *text, char **error)
+{
+    char *address = NULL;
+    if (!proxy_parse(text, &address, error))
+        return FALSE;
+    g_free(browser.proxy);
+    browser.proxy = address;
+    return TRUE;
+}
+
+/* HOST[,HOST...] (names, *.domain, .domain, ADDRESS/BITS, HOST:PORT), none (every host through
+ * the proxy), or default (the machine itself) */
+static gboolean proxy_bypass_set(const char *text, char **error)
+{
+    if (!g_ascii_strcasecmp(text, "default")) {
+        g_strfreev(browser.proxy_bypass);
+        browser.proxy_bypass = NULL;
+        return TRUE;
+    }
+    GPtrArray *hosts = g_ptr_array_new();
+    if (g_ascii_strcasecmp(text, "none")) {
+        char **words = g_strsplit_set(text, ", ", -1);
+        for (char **w = words; *w; w++) {
+            if (**w)
+                g_ptr_array_add(hosts, g_strdup(*w));
+        }
+        g_strfreev(words);
+        if (!hosts->len) {
+            g_ptr_array_free(hosts, TRUE);
+            *error = g_strdup("--bypass takes hosts (a,b,*.c,10.0.0.0/8), none or default");
+            return FALSE;
+        }
+    }
+    g_ptr_array_add(hosts, NULL);
+    g_strfreev(browser.proxy_bypass);
+    browser.proxy_bypass = (char **)g_ptr_array_free(hosts, FALSE);
+    return TRUE;
+}
+
+/* the folder of the certificate authorities this browser trusts besides the guest's, beside its
+ * socket: made empty at the start, before WebKit's network process starts (it inherits where) */
+static void ca_start(void)
+{
+    const char *dir = g_getenv("COLLABO_WEB_DIR");
+    browser.ca_dir = g_strdup_printf("%s/%s.ca", dir && *dir ? dir : "/tmp/.collabo-web", browser.name);
+    g_mkdir_with_parents(browser.ca_dir, 0700);
+    wpe_tls_untrust_all(browser.ca_dir); /* a browser of this name before */
+    wpe_tls_trust_dir(browser.ca_dir);
+    browser.ca_trusted = g_ptr_array_new_with_free_func(g_free);
+}
+
+/* trusts FILE's certificates from the next connection on; *about: their subjects */
+static gboolean ca_add(const char *file, char **about, char **error)
+{
+    char *subjects = NULL;
+    if (!wpe_tls_trust_file(browser.ca_dir, file, &subjects, error))
+        return FALSE;
+    char **lines = g_strsplit(subjects, "\n", -1);
+    for (char **l = lines; *l; l++) {
+        if (!**l)
+            continue;
+        char *line = g_strdup_printf("%s: %s", file, *l);
+        gboolean known = FALSE;
+        for (guint i = 0; i < browser.ca_trusted->len && !known; i++)
+            known = !strcmp(g_ptr_array_index(browser.ca_trusted, i), line);
+        if (known)
+            g_free(line);
+        else
+            g_ptr_array_add(browser.ca_trusted, line);
+    }
+    g_strfreev(lines);
+    if (about)
+        *about = subjects;
+    else
+        g_free(subjects);
+    return TRUE;
+}
+
+static char *ca_text(void)
+{
+    if (!browser.ca_trusted || !browser.ca_trusted->len)
+        return g_strdup("certificate authorities trusted besides the guest's: none (web proxy ca FILE: a TLS-reading proxy's)\n");
+    GString *s = g_string_new("certificate authorities trusted besides the guest's (web proxy ca):\n");
+    for (guint i = 0; i < browser.ca_trusted->len; i++)
+        g_string_append_printf(s, "  %s\n", (char *)g_ptr_array_index(browser.ca_trusted, i));
+    return g_string_free(s, FALSE);
+}
+
+static char *proxy_text(void)
+{
+    GString *s = g_string_new(NULL);
+    if (browser.proxy) {
+        char *shown = proxy_shown(browser.proxy);
+        const char *const *hosts = proxy_bypass_hosts();
+        char *joined = g_strjoinv(", ", (char **)hosts);
+        g_string_append_printf(s, "proxy: %s (every request of the browser: pages, frames, workers, WebSockets, downloads;"
+                                  " web tz auto)\n  straight to the sites: %s (--bypass HOSTS | none | default)\n",
+                               shown, *hosts ? joined : "none, every host through the proxy");
+        g_free(shown);
+        g_free(joined);
+    } else
+        g_string_append(s, "proxy: none (requests go straight to the sites; web proxy URL)\n");
+    char *ca = ca_text();
+    g_string_append(s, ca);
+    g_free(ca);
+    return g_string_free(s, FALSE);
+}
+
+/* the proxy to the network session, when it changed: WebKit stops the loads under way (soup
+ * aborts its session) and the next requests go the new way */
+static gboolean proxy_apply(void)
+{
+    if (!browser.session)
+        return FALSE;
+    char *hosts = g_strjoinv(",", (char **)proxy_bypass_hosts());
+    char *now = browser.proxy ? g_strdup_printf("%s %s", browser.proxy, hosts) : g_strdup("");
+    g_free(hosts);
+    if (!strcmp(now, browser.proxy_sent ? browser.proxy_sent : "")) {
+        g_free(now);
+        return FALSE;
+    }
+    if (browser.proxy) {
+        WebKitNetworkProxySettings *settings = webkit_network_proxy_settings_new(browser.proxy, proxy_bypass_hosts());
+        webkit_network_session_set_proxy_settings(browser.session, WEBKIT_NETWORK_PROXY_MODE_CUSTOM, settings);
+        webkit_network_proxy_settings_free(settings);
+    } else
+        webkit_network_session_set_proxy_settings(browser.session, WEBKIT_NETWORK_PROXY_MODE_NO_PROXY, NULL);
+    if (debugging) {
+        char *shown = browser.proxy ? proxy_shown(browser.proxy) : NULL;
+        DEBUG("proxy: %s\n", shown ? shown : "none");
+        g_free(shown);
+    }
+    browser.proxy_refused = FALSE;
+    g_free(browser.proxy_sent);
+    browser.proxy_sent = now;
+    return TRUE;
+}
+
+/* one of the proxy's options; FALSE with *error */
+static gboolean proxy_option(const char *option, const char *value, char **error)
+{
+    if (!strcmp(option, "--proxy"))
+        return proxy_set(value, error);
+    if (!strcmp(option, "--proxy-bypass"))
+        return proxy_bypass_set(value, error);
+    if (!strcmp(option, "--proxy-ca")) {
+        /* several: FILE:FILE (WEB_PROXY_CA), or the option again */
+        char **files = g_strsplit(value, ":", -1);
+        gboolean ok = TRUE;
+        for (char **f = files; *f && ok; f++) {
+            if (**f)
+                ok = ca_add(*f, NULL, error);
+        }
+        g_strfreev(files);
+        return ok;
+    }
+    return TRUE;
+}
+
+static gboolean is_proxy_option(const char *option)
+{
+    return !strcmp(option, "--proxy") || !strcmp(option, "--proxy-bypass") || !strcmp(option, "--proxy-ca");
+}
+
+/* The proxy's options among the arguments, before the other settings: a --timezone auto with them
+ * asks where the browser's address is through the proxy. FALSE with *error. */
+static gboolean proxy_options(int argc, char **argv, char **error)
+{
+    for (int i = 1; i < argc; i++) {
+        if (!is_proxy_option(argv[i]))
+            continue;
+        if (i + 1 >= argc) {
+            *error = g_strdup_printf("%s needs a value", argv[i]);
+            return FALSE;
+        }
+        if (!proxy_option(argv[i], argv[i + 1], error))
+            return FALSE;
+        i++;
+    }
+    return TRUE;
+}
+
 /* A setting among the arguments at argv[i] (the browser's options, `web set`): applied (the view
- * sees it at settings_changed); how many words it took, 0 if it is not one, -1 with *error. */
+ * sees it at settings_changed); how many words it took, 0 if it is not one, -1 with *error. The
+ * proxy's are applied before (proxy_options): taken here, not applied again. */
 static int setting_option(int argc, char **argv, int i, char **error)
 {
     const char *option = argv[i];
     char *about = NULL;
+    if (is_proxy_option(option)) {
+        if (i + 2 > argc) {
+            *error = g_strdup_printf("%s needs a value", option);
+            return -1;
+        }
+        return 2;
+    }
     int words = !strcmp(option, "--header-for") ? 3
               : !strcmp(option, "--user-agent") || !strcmp(option, "--header") || !strcmp(option, "--lang")
                 || !strcmp(option, "--inject") || !strcmp(option, "--timezone") || !strcmp(option, "--humanize") ? 2
@@ -2115,6 +2476,7 @@ static gboolean devtools_on(void);
 /* What the settings say, to the view and the web processes (each only when it changed) */
 static void settings_changed(void)
 {
+    proxy_apply(); /* before the first load: its requests go through it too */
     if (browser.devtools_wanted && browser.page_started) {
         browser.devtools_wanted = FALSE;
         devtools_on();
@@ -2242,6 +2604,179 @@ static char *devtools_call(const char *method, const char *arg1, const char *arg
 }
 
 static void pauses_check(void);
+static void net_flush_outbox(void);
+static void devtools_pump(void);
+
+/* ── web intercept in the network process ────────────────────────────────────────────────────
+ * WebKit's network process (patch 0013) connects to $WPE_BROWSER_NET_SOCKET at its start
+ * (netintercept.c) and holds what the browser asks it to — every HTTP hop, responses with their
+ * bodies, WebSockets' handshakes and messages — until devtools.js decides. Lines both ways:
+ * E ID JSON (held), N JSON (a note), F ID (gone), A SERIAL (settings taken) from it; C MASK SERIAL
+ * (what to hold) and D ID JSON (a decision) to it. One network process per browser: its own
+ * requests only. The socket is $COLLABO_WEB_DIR/NAME.network. */
+
+static void net_drop_connection(void);
+
+static gboolean net_writable(int fd, GIOCondition condition, gpointer data)
+{
+    (void)condition;
+    (void)data;
+    while (browser.net_out->len) {
+        ssize_t n = send(fd, browser.net_out->str, browser.net_out->len, MSG_NOSIGNAL);
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            return G_SOURCE_CONTINUE;
+        if (n <= 0) {
+            browser.net_write_id = 0;
+            net_drop_connection();
+            return G_SOURCE_REMOVE;
+        }
+        g_string_erase(browser.net_out, 0, n);
+    }
+    browser.net_write_id = 0;
+    return G_SOURCE_REMOVE;
+}
+
+static void net_send(const char *text)
+{
+    if (browser.net_fd < 0 || !text || !*text)
+        return;
+    g_string_append(browser.net_out, text);
+    if (text[strlen(text) - 1] != '\n')
+        g_string_append_c(browser.net_out, '\n');
+    if (!browser.net_write_id)
+        browser.net_write_id = g_unix_fd_add(browser.net_fd, G_IO_OUT, net_writable, NULL);
+}
+
+/* what devtools.js has for the network process (settings, decisions) */
+static void net_flush_outbox(void)
+{
+    char *out = browser.devtools ? devtools_call("takeNetOutbox", NULL, NULL) : NULL;
+    if (out && *out)
+        net_send(out);
+    g_free(out);
+}
+
+static void net_drop_connection(void)
+{
+    if (browser.net_fd < 0)
+        return;
+    if (browser.net_read_id)
+        g_source_remove(browser.net_read_id);
+    if (browser.net_write_id)
+        g_source_remove(browser.net_write_id);
+    browser.net_read_id = browser.net_write_id = 0;
+    close(browser.net_fd);
+    browser.net_fd = -1;
+    g_string_truncate(browser.net_in, 0);
+    g_string_truncate(browser.net_out, 0);
+    /* what it held went on as it was (its process ended, or it lets go when the socket closes) */
+    g_free(devtools_call("netGone", NULL, NULL));
+    pauses_check();
+}
+
+static void net_lines(void)
+{
+    char *newline;
+    gboolean any = FALSE;
+    while ((newline = memchr(browser.net_in->str, '\n', browser.net_in->len))) {
+        size_t length = newline - browser.net_in->str;
+        char *line = g_strndup(browser.net_in->str, length);
+        g_string_erase(browser.net_in, 0, length + 1);
+        if (!browser.devtools) {
+            /* nothing to decide it: on as it was */
+            unsigned long long id = 0;
+            if (line[0] == 'E' && sscanf(line + 1, "%llu", &id) == 1) {
+                char *decision = g_strdup_printf("D %llu {}", id);
+                net_send(decision);
+                g_free(decision);
+            }
+        } else {
+            if (!any)
+                devtools_pump(); /* what the inspector said first: a record it made is then there for this */
+            g_free(devtools_call("netReceive", line, NULL));
+            any = TRUE;
+        }
+        g_free(line);
+    }
+    if (any) {
+        net_flush_outbox();
+        pauses_check();
+    }
+}
+
+static gboolean net_readable(int fd, GIOCondition condition, gpointer data)
+{
+    (void)condition;
+    (void)data;
+    char buffer[65536];
+    for (;;) {
+        ssize_t n = read(fd, buffer, sizeof buffer);
+        if (n > 0) {
+            g_string_append_len(browser.net_in, buffer, n);
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+            continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
+            break;
+        net_lines();
+        browser.net_read_id = 0;
+        net_drop_connection();
+        return G_SOURCE_REMOVE;
+    }
+    net_lines();
+    return G_SOURCE_CONTINUE;
+}
+
+/* a network process connects (WebKit starts another after a crash): it takes the settings now */
+static gboolean net_accept(int fd, GIOCondition condition, gpointer data)
+{
+    (void)condition;
+    (void)data;
+    int connection = accept(fd, NULL, NULL);
+    if (connection < 0)
+        return G_SOURCE_CONTINUE;
+    net_drop_connection();
+    fcntl(connection, F_SETFD, FD_CLOEXEC);
+    fcntl(connection, F_SETFL, fcntl(connection, F_GETFL) | O_NONBLOCK);
+    browser.net_fd = connection;
+    browser.net_connections++;
+    browser.net_read_id = g_unix_fd_add(connection, G_IO_IN | G_IO_HUP | G_IO_ERR, net_readable, NULL);
+    char *config = browser.devtools ? devtools_call("netConnected", NULL, NULL) : NULL;
+    net_send(config ? config : "C 0 0");
+    g_free(config);
+    return G_SOURCE_CONTINUE;
+}
+
+/* the socket WebKit's network process (started later, by WebKit) finds in its environment */
+static void start_net_socket(void)
+{
+    browser.net_fd = browser.net_listen_fd = -1;
+    browser.net_in = g_string_new(NULL);
+    browser.net_out = g_string_new(NULL);
+    const char *dir = g_getenv("COLLABO_WEB_DIR");
+    /* NAME.network: not NAME.sock, which web list takes for a browser's (and would connect to) */
+    browser.net_socket_path = g_strdup_printf("%s/%s.network", dir && *dir ? dir : "/tmp/.collabo-web", browser.name);
+    struct sockaddr_un address = { .sun_family = AF_UNIX };
+    if (strlen(browser.net_socket_path) >= sizeof address.sun_path)
+        return;
+    strcpy(address.sun_path, browser.net_socket_path);
+    unlink(browser.net_socket_path);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return;
+    if (bind(fd, (struct sockaddr *)&address, sizeof address) < 0 || listen(fd, 4) < 0) {
+        g_printerr("wpe-browser: no socket for the network process (%s): web intercept holds the page's requests only\n", g_strerror(errno));
+        close(fd);
+        return;
+    }
+    chmod(browser.net_socket_path, 0600);
+    browser.net_listen_fd = fd;
+    g_unix_fd_add(fd, G_IO_IN, net_accept, NULL);
+    g_setenv("WPE_BROWSER_NET_SOCKET", browser.net_socket_path, TRUE);
+}
 
 /* what the inspector said, to devtools.js; what devtools.js has to say, to the inspector */
 static void devtools_pump(void)
@@ -2265,6 +2800,7 @@ static void devtools_pump(void)
             any = TRUE;
         }
         g_free(out);
+        net_flush_outbox();
         if (!any)
             break;
     }
@@ -2334,6 +2870,12 @@ static gboolean devtools_on(void)
     if (!devtools_load())
         return FALSE;
     devtools_start();
+    /* the network process connected already: devtools.js tells it what to hold (and record) */
+    if (browser.net_fd >= 0) {
+        char *config = devtools_call("netConnected", NULL, NULL);
+        net_send(config);
+        g_free(config);
+    }
     browser.inspector = webkit_web_view_connect_inspector_frontend(browser.view, on_inspector_message, NULL);
     devtools_pump();
     return TRUE;
@@ -2364,6 +2906,7 @@ static void devtools_off(void)
     browser.inspector = NULL;
     g_queue_clear_full(browser.inspector_messages, g_free);
     g_free(devtools_call("stop", NULL, NULL));
+    net_flush_outbox(); /* the network process holds nothing more, and lets go of what it held */
     pauses_check();
 }
 
@@ -2397,6 +2940,7 @@ static void reply_paused(Request *r)
     char *list = devtools_call("pausedList", waited_for ? "" : "paused: ", NULL);
     const char *after = waited_for ? ""
                       : !strcmp(r->argv[0], "run") ? "the script goes on in the page; what it returns is lost (run it once they are decided)\n"
+                      : !strcmp(r->argv[0], "eval") ? "the script goes on in the page once they are decided; what it returns is lost\n"
                       : browser.loading ? "the page waits for them (web wait load, once they are decided)\n" : "";
     replyf(r, waited_for ? ST_OK : ST_PAUSED, "%s%s%s", r->done_text ? r->done_text : "", list ? list : "", after);
     g_free(list);
@@ -2411,6 +2955,9 @@ static gboolean pauses_wake(gpointer data)
     GList *waiting = g_list_concat(g_list_copy(browser.load_waiters), g_list_copy(browser.pause_waiters));
     for (GList *l = waiting; l; l = l->next) {
         Request *r = l->data;
+        /* eval is not held up by what it starts (a fetch), only by a synchronous request that stops the page */
+        if (!strcmp(r->argv[0], "eval") && !browser.blocking_count)
+            continue;
         if (r->pause_base < browser.pause_serial && (g_list_find(browser.load_waiters, r) || g_list_find(browser.pause_waiters, r)))
             reply_paused(r);
     }
@@ -2422,10 +2969,11 @@ static gboolean pauses_wake(gpointer data)
 static void pauses_check(void)
 {
     char *state = devtools_call("pauseState", NULL, NULL);
-    unsigned serial = 0, count = 0, on = 0;
-    if (state && sscanf(state, "%u %u %u", &serial, &count, &on) == 3) {
+    unsigned serial = 0, count = 0, on = 0, blocking = 0;
+    if (state && sscanf(state, "%u %u %u %u", &serial, &count, &on, &blocking) >= 3) {
         browser.paused_count = count;
         browser.intercepting = on;
+        browser.blocking_count = blocking;
         if (serial != browser.pause_serial) {
             browser.pause_serial = serial;
             if (!browser.pause_wake_id)
@@ -2539,6 +3087,8 @@ static void cmd_eval(Request *r)
     }
     webkit_web_view_evaluate_javascript(browser.view, r->argv[1 + isolated], -1, isolated ? AGENT_WORLD : NULL, NULL, NULL,
                                         eval_finished, js_call_new(r, reply_js_text));
+    /* a synchronous XMLHttpRequest it makes may pause (the page waits for it: so would this) */
+    browser.pause_waiters = g_list_prepend(browser.pause_waiters, r);
 }
 
 /* run NAME SOURCE TIMEOUT_SECONDS [ARG...] (web.c reads the file): the file as the body of an async
@@ -4010,16 +4560,24 @@ static void cmd_resize(Request *r)
 }
 
 /* set OPTION...: the browser's setting options (--user-agent, --header, --header-for, --lang,
- * --inject, --devtools), as `web` gives them to a browser that is running already */
+ * --inject, --devtools, --proxy...), as `web` gives them to a browser that is running already */
 static void cmd_set(Request *r)
 {
+    char *proxy_error = NULL;
+    if (!proxy_options(r->argc, r->argv, &proxy_error)) {
+        settings_changed();
+        replyf(r, ST_USAGE, "%s\n", proxy_error);
+        g_free(proxy_error);
+        return;
+    }
     for (int i = 1; i < r->argc;) {
         char *error = NULL;
         int n = setting_option(r->argc, r->argv, i, &error);
         if (n <= 0) {
             settings_changed(); /* the ones before it */
             if (n == 0)
-                replyf(r, ST_USAGE, "unknown setting %s (--user-agent, --header, --header-for, --lang, --timezone, --humanize, --inject, --devtools)\n", r->argv[i]);
+                replyf(r, ST_USAGE, "unknown setting %s (--user-agent, --header, --header-for, --lang, --timezone, --humanize, --inject, --devtools,"
+                       " --proxy, --proxy-bypass, --proxy-ca)\n", r->argv[i]);
             else
                 replyf(r, ST_USAGE, "%s\n", error);
             g_free(error);
@@ -4284,10 +4842,94 @@ static void cmd_visits(Request *r)
     g_array_free(matches, TRUE);
 }
 
+/* proxy [status] | [set] URL [--bypass HOSTS|none|default] | off | bypass HOSTS|none|default
+ * | ca [list] | ca FILE (web.c makes it whole) | ca clear */
+static void cmd_proxy(Request *r)
+{
+    const char *what = r->argc > 1 ? r->argv[1] : "status";
+    static const char *const usage_text = "usage: proxy [status] | URL [--bypass HOSTS|none|default] | off | bypass HOSTS|none|default"
+                                          " | ca [FILE | clear]\n";
+    char *error = NULL;
+    if (!strcmp(what, "status") || !strcmp(what, "show") || !strcmp(what, "list")) {
+        if (r->argc > 2)
+            reply(r, ST_USAGE, usage_text);
+        else
+            reply_setting(r, proxy_text(), FALSE);
+        return;
+    }
+    if (!strcmp(what, "ca")) {
+        if (r->argc == 2 || (r->argc == 3 && !strcmp(r->argv[2], "list")))
+            reply_setting(r, ca_text(), FALSE);
+        else if (r->argc == 3 && !strcmp(r->argv[2], "clear")) {
+            wpe_tls_untrust_all(browser.ca_dir);
+            g_ptr_array_set_size(browser.ca_trusted, 0);
+            reply(r, ST_OK, "certificate authorities trusted besides the guest's: none from the next connection on (one used already"
+                            " stays trusted until the browser starts again: web close)\n");
+        } else if (r->argc == 3) {
+            char *about = NULL;
+            if (!ca_add(r->argv[2], &about, &error)) {
+                replyf(r, ST_FAILED, "%s\n", error);
+                g_free(error);
+                return;
+            }
+            char *text = ca_text();
+            replyf(r, ST_OK, "trusted from the next connection on:\n%s%s", about, text);
+            g_free(about);
+            g_free(text);
+        } else
+            reply(r, ST_USAGE, usage_text);
+        return;
+    }
+    const char *address = NULL, *bypass = NULL;
+    gboolean bypass_only = !strcmp(what, "bypass");
+    if (bypass_only) {
+        if (r->argc != 3) {
+            reply(r, ST_USAGE, usage_text);
+            return;
+        }
+        bypass = r->argv[2];
+    } else {
+        for (int i = !strcmp(what, "set") ? 2 : 1; i < r->argc; i++) {
+            if (!strcmp(r->argv[i], "--bypass") && i + 1 < r->argc)
+                bypass = r->argv[++i];
+            else if (!address && r->argv[i][0] != '-')
+                address = r->argv[i];
+            else {
+                reply(r, ST_USAGE, usage_text);
+                return;
+            }
+        }
+        if (!address) {
+            reply(r, ST_USAGE, usage_text);
+            return;
+        }
+    }
+    /* the address checked before the hosts are taken */
+    char *checked = NULL;
+    if ((address && !proxy_parse(address, &checked, &error)) || (bypass && !proxy_bypass_set(bypass, &error))) {
+        g_free(checked);
+        replyf(r, ST_USAGE, "%s\n", error);
+        g_free(error);
+        return;
+    }
+    if (address) {
+        g_free(browser.proxy);
+        browser.proxy = checked;
+    }
+    char *was = g_strdup(browser.proxy_sent ? browser.proxy_sent : "");
+    settings_changed();
+    gboolean changed = g_strcmp0(was, browser.proxy_sent ? browser.proxy_sent : "") != 0;
+    g_free(was);
+    char *text = proxy_text();
+    replyf(r, ST_OK, "%s%s", text, changed ? "(from now on: the loads under way were stopped; web reload loads this page the new way)\n" : "");
+    g_free(text);
+}
+
 static void cmd_settings(Request *r)
 {
-    char *parts[] = { identity_text(), languages_text(), time_zone_text(), humanize_text(), headers_text(), scripts_text(), devtools_text() };
-    replyf(r, ST_OK, "%s%s%s%s%s%s%s", parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]);
+    char *parts[] = { identity_text(), languages_text(), time_zone_text(), humanize_text(), headers_text(), scripts_text(), devtools_text(),
+                      proxy_text() };
+    replyf(r, ST_OK, "%s%s%s%s%s%s%s%s", parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6], parts[7]);
     for (size_t i = 0; i < G_N_ELEMENTS(parts); i++)
         g_free(parts[i]);
 }
@@ -4646,6 +5288,50 @@ static gboolean decision_poll(gpointer data)
     return G_SOURCE_REMOVE;
 }
 
+/* intercept on: answered once the network process holds what the rules take (2 s at most) */
+static gboolean intercept_on_settled(gpointer data)
+{
+    Request *r = data;
+    r->poll_id = 0;
+    devtools_pump();
+    char *settled = devtools_call("netSettled", NULL, NULL);
+    gboolean done = !settled || settled[0] == '1' || g_get_monotonic_time() >= r->deadline;
+    g_free(settled);
+    if (!done) {
+        r->poll_id = g_timeout_add(20, intercept_on_settled, r);
+        return G_SOURCE_REMOVE;
+    }
+    reply(r, ST_OK, r->done_text);
+    return G_SOURCE_REMOVE;
+}
+
+/* intercept body N|TEXT [FILE]: a paused request's body, a response's (--stage body), a message's data */
+static void intercept_body(Request *r)
+{
+    char *answer = devtools_call("pausedBody", r->argv[2], NULL);
+    char kind = answer ? answer[0] : 'E';
+    const char *file = r->argc > 3 ? r->argv[3] : NULL;
+    if (kind == 'E' || kind == 'N')
+        replyf(r, ST_NOT_FOUND, "%s\n", answer ? answer + 1 : "devtools.js failed");
+    else if (!file && kind == 'B')
+        replyf(r, ST_FAILED, "it is binary (%zu bytes of base64): web intercept body %s FILE writes it\n", strlen(answer + 1), r->argv[2]);
+    else if (!file)
+        reply(r, ST_OK, answer + 1);
+    else {
+        gsize length = 0;
+        guchar *bytes = kind == 'B' ? g_base64_decode(answer + 1, &length) : NULL;
+        GError *error = NULL;
+        if (g_file_set_contents(file, bytes ? (const char *)bytes : answer + 1, bytes ? (gssize)length : -1, &error))
+            replyf(r, ST_OK, "%s: %zu bytes\n", file, bytes ? (size_t)length : strlen(answer + 1));
+        else {
+            replyf(r, ST_FAILED, "cannot write %s: %s\n", file, error->message);
+            g_error_free(error);
+        }
+        g_free(bytes);
+    }
+    g_free(answer);
+}
+
 static gboolean intercept_wait_over(gpointer data)
 {
     Request *r = data;
@@ -4682,11 +5368,14 @@ static void cmd_intercept(Request *r)
         char *answer = devtools_call("interceptOn", words, NULL);
         g_free(words);
         devtools_pump();
-        if (answer && answer[0] == 'T')
-            replyf(r, ST_OK, "%s%s%s", was_on ? "" : "developer tools: on (web network records the requests too)\n", answer + 1,
-                   "web intercept lists the paused requests; a command waiting on the page (open, click, wait, run) ends as one pauses (exit 6)\n");
-        else
-            replyf(r, ST_USAGE, "%s\n", answer ? answer + 1 : "devtools.js failed (gui logs NAME)");
+        if (answer && answer[0] == 'T') {
+            /* the answer once the network process holds what the rules take too */
+            r->done_text = g_strdup_printf("%s%s%s", was_on ? "" : "developer tools: on (web network records the requests too)\n", answer + 1,
+                                           "web intercept lists the paused requests; a command waiting on the page (open, click, wait, run) ends as one pauses (exit 6)\n");
+            r->deadline = g_get_monotonic_time() + 2 * G_USEC_PER_SEC;
+            intercept_on_settled(r);
+        } else
+            replyf(r, answer && answer[0] == 'U' ? ST_UNSUPPORTED : ST_USAGE, "%s\n", answer ? answer + 1 : "devtools.js failed (gui logs NAME)");
         g_free(answer);
         return;
     }
@@ -4694,22 +5383,43 @@ static void cmd_intercept(Request *r)
         if (!strcmp(what, "status") || !strcmp(what, "off"))
             reply(r, ST_OK, "intercept: off (web intercept on: the page's requests pause until sent, dropped or answered)\n");
         else if (!strcmp(what, "list") || !strcmp(what, "show") || !strcmp(what, "wait") || !strcmp(what, "send")
-                 || !strcmp(what, "drop") || !strcmp(what, "respond"))
+                 || !strcmp(what, "drop") || !strcmp(what, "respond") || !strcmp(what, "body"))
             reply(r, ST_FAILED, "intercept: off, so nothing is paused (web intercept on)\n");
         else
             replyf(r, ST_USAGE, "unknown intercept command %s (web help)\n", what);
         return;
     }
     devtools_pump();
+    gboolean json = r->argc > 2 && !strcmp(r->argv[r->argc - 1], "--json");
     if (!strcmp(what, "status")) {
         char *text = devtools_call("interceptStatus", NULL, NULL);
-        reply(r, ST_OK, text);
+        char *net = devtools_call("netStatus", NULL, NULL);
+        replyf(r, ST_OK, "%s%s", text ? text : "", net ? net : "");
+        g_free(net);
         g_free(text);
     } else if (!strcmp(what, "off")) {
         char *text = devtools_call("interceptOff", NULL, NULL);
         devtools_pump();
         reply(r, text ? ST_OK : ST_FAILED, text ? text : "devtools.js failed (gui logs NAME)\n");
         g_free(text);
+    } else if (!strcmp(what, "list") && json) {
+        char *text = devtools_call("pausedJson", "all", "0");
+        reply(r, text ? ST_OK : ST_FAILED, text ? text + 1 : "devtools.js failed (gui logs NAME)\n");
+        g_free(text);
+    } else if (!strcmp(what, "show") && json) {
+        if (r->argc != 4) {
+            reply(r, ST_USAGE, "usage: intercept show N|TEXT --json\n");
+            return;
+        }
+        char *answer = devtools_call("pausedJson", r->argv[2], "1");
+        replyf(r, answer && answer[0] == 'T' ? ST_OK : ST_NOT_FOUND, "%s%s", answer ? answer + 1 : "devtools.js failed", answer && answer[0] == 'T' ? "" : "\n");
+        g_free(answer);
+    } else if (!strcmp(what, "body")) {
+        if (r->argc != 3 && r->argc != 4) {
+            reply(r, ST_USAGE, "usage: intercept body N|TEXT [FILE] (a paused request's body, a response's with --stage body, a WebSocket message's data)\n");
+            return;
+        }
+        intercept_body(r);
     } else if (!strcmp(what, "list")) {
         char *text = devtools_call("pausedList", "", NULL);
         char *state = devtools_call("interceptStatus", NULL, NULL);
@@ -4744,12 +5454,13 @@ static void cmd_intercept(Request *r)
             devtools_pump();
             decision_poll(r);
         } else
-            replyf(r, answer && answer[0] == 'N' ? ST_NOT_FOUND : ST_USAGE, "%s\n", answer ? answer + 1 : "devtools.js failed (gui logs NAME)");
+            replyf(r, !answer ? ST_USAGE : answer[0] == 'N' ? ST_NOT_FOUND : answer[0] == 'U' ? ST_UNSUPPORTED : ST_USAGE, "%s\n",
+                   answer ? answer + 1 : "devtools.js failed (gui logs NAME)");
         g_free(answer);
     } else
         reply(r, ST_USAGE, "usage: intercept [status] | on [TEXT...] [--regex] [--case] [--type T[,T]] [--method M[,M]] "
-                           "[--stage request|response|both] | off | list | show N | wait [TIMEOUT] | send N... [CHANGES] | drop N... "
-                           "| respond N... [--status S] [--header 'NAME: VALUE'] [--mime TYPE] [--body TEXT]\n");
+                           "[--stage request|response|body|send|receive|both|messages|all] | off | list [--json] | show N [--json] | body N [FILE] "
+                           "| wait [TIMEOUT] | send N... [CHANGES] | drop N... | respond N... [--status S] [--header 'NAME: VALUE'] [--mime TYPE] [--body TEXT]\n");
 }
 
 /* ── cookies: cookie [list [URL] [--all]] | set COOKIE... [--url URL] | delete NAME [--url URL] | clear
@@ -5054,6 +5765,18 @@ static void run_request(Request *r)
             i--;
         }
     }
+    /* web intercept: a synchronous request of the page is paused, so the page's main thread waits for
+     * it: what needs the page would wait as long. It ends at once, the paused ones listed (exit 6). */
+    static const char *const page_commands[] = { "open", "goto", "back", "forward", "reload", "wait", "read", "text", "html", "links",
+                                                 "eval", "run", "click", "dblclick", "rightclick", "hover", "type", "select", "key", "press",
+                                                 "scroll", "search", "challenge", NULL };
+    if (browser.blocking_count && g_strv_contains(page_commands, cmd)) {
+        char *list = devtools_call("pausedList", "paused: ", NULL);
+        replyf(r, ST_PAUSED, "%sthe page waits for a synchronous request that is paused (its main thread is stopped): "
+                             "decide it first (web intercept send|drop|respond N)\n", list ? list : "");
+        g_free(list);
+        return;
+    }
     if (!strcmp(cmd, "open") || !strcmp(cmd, "goto"))
         cmd_open(r);
     else if (!strcmp(cmd, "back") || !strcmp(cmd, "forward") || !strcmp(cmd, "reload"))
@@ -5097,6 +5820,8 @@ static void run_request(Request *r)
         cmd_cookie(r);
     else if (!strcmp(cmd, "settings"))
         cmd_settings(r);
+    else if (!strcmp(cmd, "proxy"))
+        cmd_proxy(r);
     else if (!strcmp(cmd, "history"))
         cmd_visits(r);
     else if (!strcmp(cmd, "devtools"))
@@ -5379,7 +6104,7 @@ static void usage(void)
     g_printerr("usage: wpe-browser [--name NAME] [--size WxH] [--ephemeral] [--data-dir DIR] [--ignore-tls-errors]\n"
                "                   [--user-agent UA|PROFILE] [--header 'NAME: VALUE'] [--header-for HOST 'NAME: VALUE']\n"
                "                   [--lang LANGUAGES] [--timezone ZONE|auto] [--humanize on|off] [--inject FILE]\n"
-               "                   [--devtools] [URL]\n"
+               "                   [--devtools] [--proxy URL] [--proxy-bypass HOSTS] [--proxy-ca FILE] [URL]\n"
                "Usually started by the `web` command; `web help` says more.\n");
 }
 
@@ -5410,9 +6135,32 @@ int wpe_browser_main(int argc, char **argv)
     g_free(joined);
     browser.default_user_agent = g_strjoinv("Linux x86_64", parts);
     g_strfreev(parts);
+    /* its name first: the folder of the certificate authorities it trusts is named by it */
+    for (int i = 1; i + 1 < argc; i++) {
+        if (!strcmp(argv[i], "--name")) {
+            g_free(browser.name);
+            browser.name = g_strdup(argv[++i]);
+        }
+    }
+    ca_start();
+    /* the proxy before what may ask the network (WEB_TIMEZONE=auto, --timezone auto): WEB_PROXY,
+     * WEB_PROXY_BYPASS, WEB_PROXY_CA, then the options */
+    char *error_text = NULL;
+    static const char *const proxy_env[][2] = { { "WEB_PROXY", "--proxy" }, { "WEB_PROXY_BYPASS", "--proxy-bypass" },
+                                                { "WEB_PROXY_CA", "--proxy-ca" } };
+    for (size_t i = 0; i < G_N_ELEMENTS(proxy_env); i++) {
+        const char *value = g_getenv(proxy_env[i][0]);
+        if (value && *value && !proxy_option(proxy_env[i][1], value, &error_text)) {
+            g_printerr("wpe-browser: %s: %s\n", proxy_env[i][0], error_text);
+            return 2;
+        }
+    }
+    if (!proxy_options(argc, argv, &error_text)) {
+        g_printerr("wpe-browser: %s\n", error_text);
+        return 2;
+    }
     /* the environment's settings, before the options': WEB_USER_AGENT, WEB_HEADERS (lines
      * NAME: VALUE), WEB_LANG (the Dart package's WebTools gives a browser its first ones so) */
-    char *error_text = NULL;
     if (!identity_set(g_getenv("WEB_USER_AGENT"), &error_text)) {
         g_printerr("wpe-browser: WEB_USER_AGENT: %s\n", error_text);
         return 2;
@@ -5483,6 +6231,8 @@ int wpe_browser_main(int argc, char **argv)
         g_printerr("wpe-browser: %s\n", error->message);
         return 1;
     }
+    /* before WebKit starts its network process: it inherits where to find the browser */
+    start_net_socket();
 
     if (ephemeral) {
         browser.session = webkit_network_session_new_ephemeral();
@@ -5550,6 +6300,7 @@ int wpe_browser_main(int argc, char **argv)
     g_signal_connect(webkit_web_view_get_back_forward_list(browser.view), "changed", G_CALLBACK(on_back_forward_changed), NULL);
     g_signal_connect(browser.view, "load-failed", G_CALLBACK(on_load_failed), NULL);
     g_signal_connect(browser.view, "load-failed-with-tls-errors", G_CALLBACK(on_tls_errors), NULL);
+    g_signal_connect(browser.view, "authenticate", G_CALLBACK(on_authenticate), NULL);
     g_signal_connect(browser.view, "create", G_CALLBACK(on_create), NULL);
     g_signal_connect(browser.view, "script-dialog", G_CALLBACK(on_script_dialog), NULL);
     g_signal_connect(browser.view, "permission-request", G_CALLBACK(on_permission_request), NULL);
@@ -5593,6 +6344,10 @@ int wpe_browser_main(int argc, char **argv)
 
     g_socket_service_stop(browser.service);
     unlink(browser.socket_path);
+    if (browser.net_socket_path)
+        unlink(browser.net_socket_path);
+    wpe_tls_untrust_all(browser.ca_dir);
+    g_rmdir(browser.ca_dir);
     history_save();
     devtools_off();
     /* the web and network processes end when their connections close */

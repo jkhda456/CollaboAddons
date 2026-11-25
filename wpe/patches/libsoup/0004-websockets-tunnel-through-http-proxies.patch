@@ -1,0 +1,96 @@
+A WebSocket (ws://) through an HTTP proxy: in a tunnel (CONNECT), as Chrome and Firefox make it,
+not as a request to the proxy for the whole ws:// URI (GET ws://HOST/PATH), which proxies (Squid,
+mitmproxy, Burp) refuse. wss:// was tunnelled already (TLS). For `web proxy` (addons/wpe).
+
+--- a/libsoup/soup-connection.h
++++ b/libsoup/soup-connection.h
+@@ -46,6 +46,7 @@
+ 							 GCancellable   *cancellable,
+ 							 GError        **error);
+ void            soup_connection_disconnect     (SoupConnection   *conn);
++void            soup_connection_set_tunnel     (SoupConnection   *conn);
+ 
+ GSocket        *soup_connection_get_socket     (SoupConnection   *conn);
+ GIOStream      *soup_connection_get_iostream   (SoupConnection   *conn);
+--- a/libsoup/soup-connection.c
++++ b/libsoup/soup-connection.c
+@@ -35,6 +35,7 @@
+ 
+ 	GUri *proxy_uri;
+ 	gboolean ssl;
++	gboolean tunnel;        /* through an HTTP proxy in a tunnel (CONNECT) even without TLS: a WebSocket's */
+ 
+ 	SoupMessage *proxy_msg;
+         SoupClientMessageIO *io_data;
+@@ -902,7 +903,30 @@
+ 	g_return_val_if_fail (SOUP_IS_CONNECTION (conn), FALSE);
+ 	priv = soup_connection_get_instance_private (conn);
+ 
+-	return priv->ssl && priv->proxy_uri != NULL;
++	return (priv->ssl || priv->tunnel) && priv->proxy_uri != NULL;
++}
++
++/* A WebSocket's connection (ws://): through an HTTP proxy, in a tunnel as
++ * browsers make it (CONNECT), not as a request to the proxy with the whole
++ * ws:// URI, which proxies refuse */
++void
++soup_connection_set_tunnel (SoupConnection *conn)
++{
++        SoupConnectionPrivate *priv = soup_connection_get_instance_private (conn);
++
++        priv->tunnel = TRUE;
++}
++
++/* the tunnel made (the proxy said 200 to CONNECT), with no TLS in it: HTTP/1.1
++ * as it is, read and written anew (the connection said it was complete when it
++ * connected: soup_connection_complete) */
++static void
++plain_tunnel_ready (SoupConnection *conn)
++{
++        SoupConnectionPrivate *priv = soup_connection_get_instance_private (conn);
++
++        g_clear_pointer (&priv->io_data, soup_client_message_io_destroy);
++        priv->io_data = soup_client_message_io_http1_new (conn);
+ }
+ 
+ static void
+@@ -953,6 +977,14 @@
+         g_task_set_source_tag (task, soup_connection_tunnel_handshake_async);
+         g_task_set_priority (task, io_priority);
+ 
++        if (!priv->ssl) {
++                g_clear_object (&priv->cancellable);
++                plain_tunnel_ready (conn);
++                g_task_return_boolean (task, TRUE);
++                g_object_unref (task);
++                return;
++        }
++
+         tls_connection = new_tls_connection (conn, G_SOCKET_CONNECTION (priv->connection), &error);
+         if (!tls_connection) {
+ 		g_clear_object (&priv->cancellable);
+@@ -994,6 +1026,11 @@
+         g_return_val_if_fail (G_IS_SOCKET_CONNECTION (priv->connection), FALSE);
+         g_return_val_if_fail (priv->cancellable == NULL, FALSE);
+ 
++        if (!priv->ssl) {
++                plain_tunnel_ready (conn);
++                return TRUE;
++        }
++
+         tls_connection = new_tls_connection (conn, G_SOCKET_CONNECTION (priv->connection), error);
+         if (!tls_connection)
+                 return FALSE;
+--- a/libsoup/soup-connection-manager.c
++++ b/libsoup/soup-connection-manager.c
+@@ -506,6 +506,10 @@
+                              "force-http-version", force_http_version,
+                              NULL);
+ 
++        /* a WebSocket's (ws://): in a tunnel through an HTTP proxy */
++        if (!g_strcmp0 (g_uri_get_scheme (soup_message_get_uri (item->msg)), "ws"))
++                soup_connection_set_tunnel (conn);
++
+         g_signal_connect (conn, "disconnected",
+                           G_CALLBACK (connection_disconnected),
+                           manager);

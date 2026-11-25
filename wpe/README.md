@@ -43,6 +43,12 @@ $ web open example.com               # exit 6: it ends as the document's request
 $ web intercept show 1               # what would go: method, address, headers, body
 $ web intercept send 1 --header 'X-Debug: 1'   # let it go (changed); or drop 1, respond 1 --body ...
 $ web wait load                      # until the page has loaded, or the next request pauses (6)
+$ web intercept on api --stage body,messages   # responses with their bodies; WebSocket messages
+$ web intercept body 7               # a response's own body, before the page gets it
+$ web --capabilities                 # what can be intercepted, as JSON (for programs)
+
+$ web proxy http://127.0.0.1:8080    # this browser's requests through a proxy (socks5://..., USER:PASSWORD@)
+$ web proxy ca burp-ca.der           # and trust a TLS-reading proxy's certificate authority
 ```
 
 | In the guest | |
@@ -139,7 +145,7 @@ all.
 | `lang [LANGUAGES \| default]` | preferred languages, `ko-KR,en` or an Accept-Language: the `Accept-Language` header, `navigator.languages`, the default locale of `Intl`. With Safari's identity, as Safari tells them: the first one to pages (`["ko-KR"]`) and with its base to servers (`ko-KR,ko;q=0.9`) |
 | `cookie [list [URL] [--all]]`, `cookie set COOKIE... [--url URL]`, `cookie delete NAME [--url URL \| --all]`, `cookie clear` | the cookie jar. A COOKIE is a Set-Cookie (`sid=1; Domain=example.com; Path=/; Max-Age=3600; Secure; HttpOnly`) or a Cookie header (`a=1; b=2`: two cookies); it is for the page's site unless `--url` or `Domain=` says, for its whole site unless `Path=` says. A list prints them as Set-Cookies |
 | `inject [list]`, `inject add FILE\|-`, `inject remove FILE`, `inject clear` | JavaScript run at the start of every page, in every frame, before the page's own scripts (Playwright's `addInitScript`): polyfills, stubs, hooks |
-| `settings` | the user agent, languages, headers, injected scripts and developer tools |
+| `settings` | the user agent, languages, headers, injected scripts, developer tools and proxy |
 
 The developer tools: the network as a browser's developer tools (WebKit's Web Inspector, Chrome's
 DevTools) record it, for seeing what a page asks for and gets, and saving it as an HTTP Archive
@@ -163,53 +169,96 @@ also to other sites (another page process) and after a crash of the page's proce
 | `network export N... [--as FORMAT] [-o FILE] [--no-cookies] [--type T] [--status S] [--failed]` | requests one by one, as commands and files of other tools: printed, or into FILE (a script starts with its `#!` line and is made executable). Each as it went over the wire — the headers the network process sent, the cookies among them (`--no-cookies` leaves them out), its body — less what the tool sets itself (`Host`, `Content-Length`, `Connection`; `Accept-Encoding` becomes curl's `--compressed`). FORMAT: `curl` (the default, as a browser's *Copy as cURL*: POSIX shell quoting, `--data-raw`, `--globoff` for an address with `[]{}`), `fetch` (as *Copy as fetch*, for a page's console or `web run`: what a script may set, the cookies as `credentials`), `node` (Node.js's `fetch`, every header, printing the response), `python` (the standard library's `urllib`, no pip; prints the response, a 4xx/5xx too), `http` (a `.http` file of VS Code's REST Client and JetBrains' HTTP Client), `raw` (the HTTP/1.1 message itself, CRLF: Burp's Repeater, `nc`), `har` (a HAR of just those, with their pages and bodies: Postman, Insomnia, a browser's import). N: a number, `N-M`, `all`, or a part of the address (the last request that has it); several can be given; the options narrow them. A WebSocket goes in `raw`, `http` and `har` only (its handshake); a body WebKit did not give as text (an uploaded file) is left out, and said so |
 | `har export FILE N... [--as FORMAT] [-o OUT] [...]` | the same from a HAR file of any browser (Chrome's, Firefox's, Safari's, this one's): its entries by number, as `har view` lists them |
 
-Intercept: the page's requests wait for approval, as in an intercepting proxy (Burp's
+Intercept: the browser's requests wait for approval, as in an intercepting proxy (Burp's
 *Intercept*, the Web Inspector's request interception), but inside the browser — so HTTPS needs no
 certificate of a proxy's, and the agent sees each request as the page made it. While it is on, each
 request the rules take is **paused** before it goes (or, with `--stage response`, its response
-before the page gets it) until the agent **sends** it (as it was or changed), **drops** it (the
-page gets a network error) or **answers** it itself. The rest go as usual. It needs the developer
-tools and turns them on; a paused request is in `web network` too (status `paused`), by the same
-number, and what was decided for it shows there and in the HAR (`_intercepted`).
+before the page gets it; `--stage body`, with its whole body) until the agent **sends** it (as it
+was or changed), **drops** it (the page gets a network error) or **answers** it itself. The rest go
+as usual. What it holds: the page's requests, its frames' and its dedicated workers' (beacons and
+hyperlink pings among them) — and, held in WebKit's network process (patch 0013), a synchronous
+`XMLHttpRequest`, reports (CSP's), what a service or shared worker loads itself, every hop of a
+redirect (linked to the hops before),
+WebSockets' opening handshakes and, with `--stage send`/`receive`, their messages each way (in
+their order). It needs the developer tools and turns them on; a paused request is in `web network`
+too (status `paused`), by the same number, and what was decided for it shows there and in the HAR
+(`_intercepted`). Each browser (`-n NAME`) has its own network process: one's requests never pause
+in another.
 
 | Command | |
 |---|---|
 | `intercept [status]`, `intercept off` | the rules and how many are paused; off: those paused go as they were (`devtools off` does the same) |
-| `intercept on [TEXT...] [--regex] [--case] [--type T[,T]] [--method M[,M]] [--stage request\|response\|both]` | from now on, the requests of the page, its frames and its workers that the rules take pause: TEXT, a part of the address (any of them; any case unless `--case`; a regular expression with `--regex`), the types as `network --type` names them (`document`, `script`, `stylesheet`, `image`, `font`, `fetch`, `xhr`, `api` = both...), the methods; all of them without rules. `--stage`: `request` (the default) pauses before it goes, `response` when its response has come and before the page gets it, `both` at each. Again with other rules: they replace these. Also `pause` |
-| `intercept list` | the paused requests: number, stage (`request`, `response 200`), method, type, how long it waited, address |
-| `intercept show N\|TEXT` | one in detail: at the request stage what would go (method, address, the headers as the page made them — the network adds `Cookie`, `Host`, `Accept-Encoding` after —, query, body); at the response stage the status and headers that came (not the body: it has not yet) |
-| `intercept send N... [--url U] [--method M] [--header 'NAME: VALUE']... [--unset NAME]... [--body TEXT \| --body-file FILE]` | let it go, changed so: an address (relative to its own: `/api?x=1`, `?x=2`), a method, headers (`NAME:` with no value takes one off), a body. At the response stage: `[--status S] [--header ...] [--unset ...] [--mime TYPE] --body TEXT` gives the page the response changed — whole: its own body has not come, so the page gets `--body` (or none). Also `continue`, `forward` |
-| `intercept drop N... [--error general\|access\|cancel\|timeout]` | stop it: never sent, the page gets a network error (`fetch` rejects, a document's load fails: `web info` says so); `cancel` cancels it as the page's own abort would. WebKit cannot fail a response: at the response stage, `respond` gives another. Also `stop`, `block`, `abort` |
+| `intercept on [TEXT...] [--regex] [--case] [--type T[,T]] [--method M[,M]] [--stage STAGE[,STAGE]]` | from now on, the requests that the rules take pause: TEXT, a part of the address (any of them; any case unless `--case`; a regular expression with `--regex`), the types as `network --type` names them (`document`, `script`, `stylesheet`, `image`, `font`, `fetch`, `xhr`, `api` = both, `beacon`, `ping`, `websocket`...) or what loads them (`sync`: a synchronous `XMLHttpRequest`, `redirect`: a hop after the first, `worker`, `service-worker`, `shared-worker`), the methods; all of them without rules. `--stage`: `request` (the default) pauses before it goes (a WebSocket: its handshake), `response` when its status and headers have come and before the page gets them, `body` the same with its whole body read first (to read and change), `send` / `receive` a WebSocket's messages; `both` = `request,response`, `messages` = `send,receive`, `all`; several by commas. Again with other rules: they replace these. Also `pause` |
+| `intercept list [--json]` | what is paused: number, stage (`request`, `response 200`, `body 200`, `handshake`, `send 3`, `receive 4`: a WebSocket's third message sent, fourth received), method, type, how long it waited, address, and what is unusual about it (`(synchronous)`, `(a service worker's)`, `(redirect hop 1 after #12)`, `(11 B on WebSocket #20)`). `--json`: the same as JSON (`protocol`, `paused`: id, record, stage, via `inspector` or `network-process`, kind, type, tags, method, url, page, frame, worker, hop, chain, the actions it takes) |
+| `intercept show N\|TEXT [--json]` | one in detail: at the request stage what would go (method, address, the headers as WebKit made them — the network adds `Cookie`, `Host`, `Accept-Encoding` after —, query, body; who loads it, a redirect's hop and chain); at the response stage the status and headers that came (`body`: and the body); a WebSocket message's direction, number, kind and data. `--json`: all of it, bodies and binary messages as base64 |
+| `intercept body N\|TEXT [FILE]` | its body as it is: a request's, a response's (at `--stage body`), a WebSocket message's data; a binary one into FILE |
+| `intercept send N... [--url U] [--method M] [--header 'NAME: VALUE']... [--unset NAME]... [--body TEXT \| --body-file FILE]` | let it go, changed so: an address (relative to its own: `/api?x=1`, `?x=2`), a method, headers (`NAME:` with no value takes one off), a body. At the response stage: `[--status S] [--header ...] [--unset ...] [--mime TYPE] [--body TEXT]` gives the page the response changed: with `--body`, that body; without, its own (at `--stage response` of a request the network process holds it is read first; one the page's inspector holds gets none). A WebSocket's handshake: `--url`, `--header`, `--unset`; a message: `--body TEXT \| --body-file FILE` and `--opcode text\|binary`. Also `continue`, `forward` |
+| `intercept drop N... [--error general\|access\|cancel\|timeout]` | stop it: never sent, the page gets a network error (`fetch` rejects, a document's load fails: `web info` says so); `cancel` cancels it as the page's own abort would; a response the network process holds: the page gets an error instead of it; a WebSocket's handshake: the socket fails; a message: it is not delivered (the ones after it go on). A response the page's inspector holds cannot be failed (exit 7): `respond` gives another. Also `stop`, `block`, `abort` |
 | `intercept respond N... [--status S] [--header 'NAME: VALUE']... [--mime TYPE] [--body TEXT \| --body-file FILE]` | answer it here, nothing sent (a mock): status 200 unless said, the type from `--mime`, else `Content-Type`, else what the request is for (`text/html` for a document, `application/json` for `fetch`, ...); at the response stage, in its response's place. Also `fulfill` |
 | `intercept wait [TIMEOUT]` | until a request pauses (or at once, if one is), seconds (30); exit 3 when none did |
 
-N is a number from `intercept list` (or `web network`: the same), `all`, or a part of the address
-(every paused one that has it); several can be given. `web` reads a `--body-file` (`-`: stdin), so
-its path is the caller's, and sends its bytes as they are. The answer of `send`, `drop` and
-`respond` comes once WebKit has taken the decision, and says what is still paused.
+N is a number from `intercept list` (or `web network`: the same; a WebSocket message has a number of
+its own), `all`, or a part of the address (every paused one that has it); several can be given.
+`web` reads a `--body-file` (`-`: stdin), so its path is the caller's, and sends its bytes as they
+are. The answer of `send`, `drop` and `respond` comes once WebKit has taken the decision, and says
+what is still paused. What WebKit cannot do with one (answer a WebSocket's handshake or message,
+fail a response the page's inspector holds) is refused with exit status **7** before anything is
+decided; `web --capabilities` (no browser needed) says, as JSON, which stages, kinds, actions and
+changes there are and the protocol's version (2), for a program to check before it relies on them.
 
 A command that waits on the page would wait for nothing while the page waits for the agent: `open`,
 `back`, `forward`, `reload`, a `click` or `key` that loads a page, `wait` and `run` end as soon as
-a request pauses (and `wait` at once while one is), with exit status **6** and the paused requests
-listed; once they are decided, `web wait load` waits for the page again (it, too, ends at the next
-pause). A load that finished while a request was paused (a `fetch` does not hold the page's load)
-says so in a last line. A `run` that ended so leaves its script running in the page, its result
-lost.
+a request pauses (and `wait` at once while one is), `eval` as a synchronous request it makes pauses,
+with exit status **6** and the paused requests listed; once they are decided, `web wait load` waits for the page again (it, too, ends at
+the next pause). A load that finished while a request was paused (a `fetch` does not hold the page's
+load) says so in a last line. A `run` or `eval` that ended so leaves its script running in the page
+(an `eval` once the request is decided), its result lost. A paused synchronous `XMLHttpRequest` stops its page's main thread: until it is
+decided, every command that needs the page (`open`, `read`, `click`, `eval`...) ends at once with
+exit 6 and says so, while `intercept`, `network`, `info` and the rest answer as usual.
+
+A proxy: where one browser's requests go (straight to the sites by default; each browser, `-n
+NAME`, has its own). Every request of its network session goes through it — the pages and their
+frames, workers (dedicated, shared, service), `fetch`, WebSockets, downloads, and the question
+`web tz auto` asks — as WebKit's proxy settings send it: an HTTP proxy gets an `http://` request
+whole and a tunnel (`CONNECT`) for `https://`, `wss://` and `ws://`; a SOCKS proxy a connection to
+each host, by name (the proxy looks it up). It applies at once (WebKit stops the loads under way:
+`web reload`); `web intercept`, the developer tools and the rest work as before, through it.
+
+| Command | |
+|---|---|
+| `proxy [status]` | where the requests go, the hosts that go straight, the certificate authorities trusted besides the guest's |
+| `proxy URL [--bypass HOSTS\|none\|default]` | through URL from now on: `http://HOST:PORT` (a bare `HOST:PORT` too), `https://` (TLS to the proxy itself), `socks5://` (`socks5h://` is the same: the proxy looks the names up), `socks4a://`, `socks4://`, `socks://` (5, else 4a, else 4); `USER:PASSWORD@` (percent-encoded) for one that asks: an HTTP proxy's Basic challenge (a 407), SOCKS 5's username and password. Shown with the password hidden. `--bypass`: the hosts that go straight, comma-separated: a name (`example.com`), its subdomains (`*.example.com`, `.example.com`), addresses (`10.0.0.0/8`, `::1`), with a port (`host:8080`); `default`: `localhost, 127.0.0.0/8, ::1` (the machine itself, as Chrome and Firefox: a proxy elsewhere cannot reach the guest's own servers); `none`: every host through the proxy. Without `--bypass` the hosts stay as they were. Also `set URL` |
+| `proxy off` | straight to the sites again (also `none`, `direct`) |
+| `proxy bypass HOSTS\|none\|default` | only the hosts that go straight |
+| `proxy ca [FILE \| clear]` | trust the certificate authority in FILE (PEM, one or more, or DER as Burp exports it) besides the guest's, from the next TLS connection on: the one of a proxy that reads HTTPS (Burp, mitmproxy, a company's), or your own server's. Without it such a page fails with `Unacceptable TLS certificate ...; web proxy ca FILE trusts ...`. `ca`: the ones trusted; `clear` takes them out (one used already stays trusted until the browser starts again). `web` makes FILE's path whole |
+
+The options `--proxy URL|off`, `--proxy-bypass HOSTS|none|default` and `--proxy-ca FILE` (more than
+once), or `WEB_PROXY`, `WEB_PROXY_BYPASS`, `WEB_PROXY_CA` (`FILE[:FILE...]`), give a browser its
+proxy from its start, before `--timezone auto` asks where its address is; to a running browser the
+options apply as `web proxy` would (unchanged ones change nothing). A load that fails through a
+proxy says so (`failed to load URL: Could not connect to proxy server 127.0.0.1: Connection refused
+(through the proxy http://127.0.0.1:8199: web proxy)`); a proxy that wants a user and password, or
+refuses the ones given, fails the load: `the proxy http://agent:****@127.0.0.1:8101 refused the user
+and password given (407 Proxy Authentication Required): web proxy SCHEME://USER:PASSWORD@HOST:PORT`.
+`web --capabilities` describes it (`proxy`).
 
 Browser options, before the command (`web --user-agent chrome open example.com`): a browser that
 command starts gets them; one running already gets the settings among them (`--user-agent
 PROFILE|UA`, `--header 'NAME: VALUE'`, `--header-for HOST 'NAME: VALUE'`, `--lang LANGUAGES`,
-`--timezone ZONE|auto`, `--humanize on|off`, `--inject FILE`, `--devtools`; the headers and the
-scripts can be given more than once), and says the
+`--timezone ZONE|auto`, `--humanize on|off`, `--inject FILE`, `--devtools`, `--proxy URL|off`,
+`--proxy-bypass HOSTS`, `--proxy-ca FILE`; the headers, the scripts and the certificate
+authorities can be given more than once), and says the
 others are for its start (`--ephemeral`: no cookies, storage or history kept;
 `--ignore-tls-errors`; `--size WxH`). A browser's first settings can also come from the
 environment of the `web` that starts it: `WEB_USER_AGENT` (a profile or a user agent),
 `WEB_HEADERS` (lines `NAME: VALUE`), `WEB_LANG`, `WEB_TIMEZONE`, `WEB_HUMANIZE`, `WEB_DEVTOOLS` (`1`, or the bodies kept: `text`,
-`all`, `none`); options say last. `WEB_BROWSER_ARGS` adds options (words) to a browser `web` starts.
+`all`, `none`), `WEB_PROXY`, `WEB_PROXY_BYPASS`, `WEB_PROXY_CA`; options say last. `WEB_BROWSER_ARGS` adds options (words) to a browser `web` starts.
 
 Exit status: 0 done, 1 failed, 2 usage, 3 timed out, 4 not found, 5 no browser, 6 requests
-are paused for the agent's approval (`web intercept`). Dialogs
-(`alert`, `confirm`, `prompt`) are accepted and their text kept for `info`; permission requests
+are paused for the agent's approval (`web intercept`), 7 not supported (`web --capabilities`). Dialogs
+(`alert`, `confirm`, `prompt`) are accepted and their text kept for `info`; a site that asks for a
+user and password (HTTP authentication, 401) is not answered: the page shows the site's answer, as
+a browser whose dialog was closed (WPE would keep the load waiting for an answer); permission requests
 (location, notifications, camera) are denied; what the page would open in a new window opens in
 the same one; downloads go to `~/Downloads`. By default the browser says it is WebKit on desktop
 Linux (`X11; Linux x86_64`: the guest's own `wasm` is a platform sites do not know).
@@ -305,6 +354,43 @@ The browser is also an ordinary program on the display: `gui list`, `gui view we
   (each use is a request of its own).
   The browser learns from devtools.js, after the inspector's messages, that a request paused, and
   ends the waits on the page from its run loop.
+- **Intercept in the network process.** What the page's inspector does not hold goes through WebKit's
+  network process: a synchronous load (the web process waits on it in a synchronous message),
+  reports (`PingLoad`; beacons and `<a ping>` are the page's own keepalive loads in WebKit2, its
+  inspector holds them), the loads of service and shared workers (processes of their own,
+  with no inspector here), each hop after a redirect, WebSockets. Patch 0013 holds them there, at the
+  two places every one passes: `NetworkDataTaskSoup` (an HTTP hop just before libsoup sends it, a
+  response before its client gets it, with its body read into memory first if asked) and
+  `WebSocketTaskSoup` (the handshake before it connects, each message each way, in order behind the
+  ones held before it). The loaders say who loads (`NetworkLoadParameters::collaboContext`: the
+  page's and frame's ids, the resource's id — the inspector's request is `0.<id>` on the target
+  `page-<id>` —, the worker, the destination, synchronous or not); the hooks are four C functions the
+  program links in (`browser/netintercept.c`): the network process connects at its start to a
+  socket the browser made (`$WPE_BROWSER_NET_SOCKET`: `NAME.network` beside its `NAME.sock`, inherited), takes the
+  settings (what to hold: the stages the rules ask for), sends what it holds as JSON lines and gets
+  the decisions back; held work waits on the run loop, so nothing blocks — a paused synchronous
+  `XMLHttpRequest` stops only its page. devtools.js applies the rules, joins what the network process
+  tells of with the inspector's records (by those ids; a beacon's and a WebSocket's by page and
+  address), links a redirect's hops, and records what service and shared workers load and where a
+  service worker's answers came from (`ServiceWorkerFetchTask` sees the response's source before
+  marking it the worker's: CacheStorage, one it made, the network). A request the network process
+  holds is not held by the inspector too: the page's own first hops are left to the inspector
+  (which holds them before the cache), the rest to the network process.
+- **A proxy per browser.** `web proxy` gives WebKit's network session its proxy settings
+  (`webkit_network_session_set_proxy_settings`: a `GSimpleProxyResolver` in the network process,
+  libsoup's session aborted so the next requests take it); each browser has its own network process,
+  so its own proxy. libsoup speaks to an HTTP proxy (whole URLs, `CONNECT`), GIO to an HTTPS or SOCKS
+  one (`GHttpsProxy`, `GSocks5Proxy`...). Two libsoup patches: 0003 answers a 407 with the proxy
+  address's user and password without making the message's own address the proxy's (libsoup did:
+  the request went to the proxy itself), once, and forgets a proxy's credentials when the proxy
+  changes; 0004 tunnels a `ws://` WebSocket through an HTTP proxy (`CONNECT`, as Chrome and Firefox
+  do) instead of asking the proxy for `GET ws://...`, which proxies refuse. A 407 libsoup did not
+  answer reaches the browser's `authenticate` handler, which refuses it (the load fails, saying why).
+  The certificate authorities of `web proxy ca`: the TLS backend checks a chain against an OpenSSL
+  store made at its start from the guest's bundle and the folders of `SSL_CERT_DIR`, where OpenSSL
+  looks up an issuer it does not know by its name's hash each time; the browser puts its own folder
+  (`NAME.ca` beside its socket, emptied at the start and the end) first there before WebKit starts
+  its network process, and `ca FILE` writes each certificate into it as `HASH.N` (`browser/tls.c`).
 - **Compiled once per computer.** The browser is 170 MB of WebAssembly; compiling it takes the host
   about 20 s. The engine keeps large compiled programs on disk (`addons/mod` 0012:
   `~/.cache/collabo-core/programs`), so that is paid once per computer and version of the
@@ -391,22 +477,40 @@ browser is what it claims, from the inside, and a person drives it — to WebKit
   fingerprinting script still finds; a picture puzzle (reCAPTCHA's, hCaptcha's, DataDome's) is
   left to the agent; the guest's fonts are Linux's (DejaVu, Nanum), whatever the identity says.
 - One page per browser (popups open in it); start more browsers with `-n NAME`.
-- **The developer tools** see the page's requests, its frames' and its dedicated workers', not
-  those of service workers (another process) nor the browser's own (favicons, downloads). A
+- **The developer tools** see the page's requests, its frames' and its dedicated workers', and
+  (from the network process) what service and shared workers load themselves — those without
+  timings or kept bodies — and where a service worker's answers came from; not the browser's own
+  (favicons, downloads). A
   redirect's hop has no detailed timing (as in the Web Inspector). A request body is what WebKit
   gives as text (UTF-8, else Latin-1): a form's, JSON, text; not files an upload reads from disk. While they are on, each page process keeps the
   bodies it loaded for them (WPE's inspector keeps up to 50 MB), and the browser what it was asked
   to keep. Everything is in memory: `web har` saves it.
-- **Intercept** holds what a page's process loads through the network process: documents (also
-  of another site), frames, scripts, styles, images, fonts, `fetch`, `XMLHttpRequest`, a worker's
-  requests (its page holds them). Not WebSockets, a synchronous `XMLHttpRequest`, `sendBeacon`
-  and pings, `data:` addresses, service workers' requests, nor a redirect's next hop (the request
-  pauses once, before its first). A response pauses before its body has come: its body can be
-  replaced, not read or changed in place. A request's headers at the request stage are the page's
-  (the network process adds cookies after: a `Cookie` header put on is the jar's). A document
-  answered here has the type `--mime` says, without a charset: a page that is not ASCII says
-  `<meta charset="utf-8">`. Nothing pauses on its own end: a paused request waits until decided,
-  `intercept off`, `devtools off`, or the page goes (a navigation gives its requests up).
+- **Intercept** holds what the browser loads over HTTP(S) and WebSockets: documents (also of
+  another site), frames, scripts, styles, images, fonts, `fetch`, `XMLHttpRequest` (also
+  synchronous), beacons and pings, workers' requests (a service worker's own fetches too), each hop
+  of a redirect, WebSocket handshakes and messages. Not `data:`, `blob:` or `file:` addresses, CORS
+  preflights, nor (at `--stage body`) a response the network process serves from its disk cache;
+  what a service worker answers from its CacheStorage or makes itself is no request: it is
+  recorded and marked so, not held. A response at `--stage response` pauses before its body has
+  come; `--stage body` reads it first (32 MB at most: a larger one pauses without it). A response
+  the page's inspector holds (the page's own loads at `--stage response`) cannot be dropped. A
+  request's headers at the request stage are WebKit's (the network process adds cookies after: a
+  `Cookie` header put on is the jar's). A document answered by the page's inspector has the type
+  `--mime` says, without a charset (a page that is not ASCII says `<meta charset="utf-8">`); one
+  the network process answers is UTF-8 when nothing says otherwise. A WebSocket's handshake or
+  message cannot be answered here (exit 7), only sent on (changed) or dropped. Nothing pauses on
+  its own end: a paused request waits until decided, `intercept off`, `devtools off`, or the page
+  or worker goes (a navigation gives its requests up; a paused synchronous request must be decided
+  first, its page waits for it).
+- **A proxy** is one for all of a browser's requests: no proxy auto-config (PAC) file, no proxy per
+  scheme or per site other than the hosts that go straight. Its credentials go in its address (an
+  HTTP proxy's Basic challenge, SOCKS 5's username and password); a site's own HTTP authentication
+  (401) is not answered. `<link rel="dns-prefetch">` hints are still looked up by the guest's own
+  resolver (WebKit asks the system's proxy settings there, not the browser's: names only, no
+  request goes). A certificate authority taken out (`proxy ca clear`) stays trusted where it was
+  used already, until the browser starts again; trust is the browser's alone (`curl` and the
+  rest of the guest are not changed). `web network export` writes commands without the proxy (curl:
+  add `-x URL`).
 
 Debugging: `WPE_BROWSER_DEBUG=1` (in the environment of the first `web` command, which starts the
 browser) logs loads and waits to `gui logs web`; a crash of any of its processes is reported by
@@ -462,9 +566,26 @@ start, after the page's process crashed; intercept (`site/hold.html` and its req
 other): a document paused (`open` ends with 6), listed and shown, sent; a fetch sent to another
 address, a POST sent with another body and a header (the server echoes them), one dropped (the
 page's `fetch` rejects), one answered here (201); the page's results; their records and HAR entries;
-the response stage (shown, not droppable, sent changed: the page gets the new body); a worker's
+the response stage (shown, not droppable there: exit 7, sent changed: the page gets the new body); a worker's
 request; a click whose fetch pauses (`click` ends with 6); a `run` ended by its pause; a document answered from a file; off and `devtools off`
-releasing a paused document; closing. The Dart
+releasing a paused document; in the network process (`site/more.html`, `site/sw/`; the server's
+`/api/seen` says what reached it, so a held request must not be there yet and a dropped one never):
+`web --capabilities`; a synchronous `XMLHttpRequest` paused (`eval` ends with 6, `read` at once,
+`network` answers), its JSON and body, sent with another header and body; a beacon dropped, another
+sent to another address; a redirect's next hop held after the first went (its chain), sent
+elsewhere; a WebSocket's handshake (not answerable: 7) sent with a header to another path; its
+messages each way: text changed both ways, a binary one's bytes read and sent, the answer dropped,
+the order kept; a response with its body read, replaced, dropped (the page's `fetch` fails), its
+own body kept with a header added; another browser's (`-n other`) synchronous request not held;
+a page move while a synchronous request is paused (exit 6 at once, then dropped); a service
+worker's own request held and sent changed, its answers from CacheStorage, made by it and fetched
+marked in the recording; a proxy (`tests/proxy.py`: HTTP, `CONNECT`, SOCKS 4/4a/5, Basic and SOCKS 5
+credentials, logging what it forwarded; the server also over HTTPS with a certificate of
+`tests/certs/ca.pem`): a page, a `ws://` WebSocket in a tunnel, HTTPS refused until `proxy ca` (DER),
+`wss://`, another browser and the bypassed loopback straight, `socks5h` with the name, `socks4`, a
+proxy wanting credentials, wrong ones (no retries), right ones (HTTP, HTTPS, WebSocket, SOCKS 5),
+the password hidden, a site's 401 shown, an intercepted request sent through it, a proxy down, off,
+from the environment and as an option to a running browser, `--capabilities`; closing. The Dart
 package's `web tools` test (`dart/collabo_core/test`) drives the same through `WebTools`, with a
 runtime that has the add-on in `app/images/addons`.
 
@@ -486,6 +607,7 @@ runtime that has the add-on in `app/images/addons`.
 | `0010-web-process-extension-linked-in` | a web process extension linked into the program: its entry point (`webkit_web_process_extension_initialize_with_user_data`) is called with the initialization data whether or not a directory of extensions is set |
 | `0011-inspector-frontend-in-the-program` | an inspector frontend of the program's own on a web view's inspector controller (as the automation's passthrough channel): the protocol's messages as text to a C callback and from the program (the developer tools) |
 | `0012-identity-answered-natively` | who the browser says it is, answered by WebCore: a store in `NavigatorBase.cpp` (`webkit_collabo_identity_set`, any thread) that `navigator.platform`, `vendor`, `hardwareConcurrency`, `maxTouchPoints` (`Navigator.cpp`), the screen (`PlatformScreenWPE.cpp`: `screen.*`, media queries) and the window (`WebChromeClient::windowRect`: outer size, `screenX`/`screenY`) read; the time zone through WTF's override |
+| `0013-network-process-interception` | `web intercept` in the network process: `NetworkDataTaskSoup` holds each HTTP hop before it goes and each response before its client gets it (its body read first if asked; answered, changed or failed there), `WebSocketTaskSoup` the handshake and the messages each way; the loaders say who loads (`collaboContext`: page, frame, resource, worker, kind); `ServiceWorkerFetchTask` tells where a worker's answer came from; the hooks (`CollaboNetIntercept.h`) are weak C functions the program provides (`browser/netintercept.c`) |
 
 The libraries': `glib/` 0001 (no libatomic on wasm32), 0002 (function pointer casts), 0003
 (registered callbacks called as what they are: closures, notifies, `GTask`, signals through
@@ -494,7 +616,9 @@ libffi), 0004 (`GSource` callbacks likewise); `libsoup/` 0001 and `glib-networki
 cipher suites, groups and key shares, signature algorithms, SCTs and zlib certificate compression
 asked for, `SSL_CTX_set_client_hello_safari`; `WPE_TLS_HELLO=openssl` for OpenSSL's own);
 `libsoup/` 0002 (HTTP/2 as Safari speaks it: SETTINGS, windows, ALPN `h2`/`http/1.1`, header
-order, `priority`); `openssl/` 0001 (a ClientHello in Safari's shape: GREASE in cipher suites,
+order, `priority`), 0003 (a proxy's credentials from its address: the 407 answered without the
+message's address becoming the proxy's, once; forgotten when the proxy changes), 0004 (a `ws://`
+WebSocket through an HTTP proxy in a `CONNECT` tunnel); `openssl/` 0001 (a ClientHello in Safari's shape: GREASE in cipher suites,
 groups, key shares, versions and two extensions, Safari's extension order, the uncompressed point
 format, `rsa_pss_rsae_sha384` twice and `rsa_pkcs1_sha1` offered);
 `libgpg-error/` 0001 (the lock type of wasm32's musl: a lock of no size aborted every process

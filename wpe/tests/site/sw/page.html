@@ -1,0 +1,27 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>Worker page</title></head>
+<body>
+<h1>Worker page</h1>
+<p id="out">-</p>
+<script>
+// a service worker for /sw/ (sw.js): what it answers from its CacheStorage, what it makes itself,
+// what it fetches from the network (its own request, in its own process)
+window.said = [];
+function say(text) {
+    said.push(text);
+    document.getElementById('out').textContent = said.join(' | ');
+}
+async function start() {
+    await navigator.serviceWorker.register('/sw/sw.js', { scope: '/sw/' });
+    await navigator.serviceWorker.ready;
+    if (!navigator.serviceWorker.controller)
+        await new Promise(done => navigator.serviceWorker.addEventListener('controllerchange', done, { once: true }));
+    say('controlled');
+}
+async function ask(path) {
+    const response = await fetch(path);
+    say(path + ' ' + response.status + ' ' + await response.text());
+}
+start().catch(e => say('no worker: ' + e));
+</script>
+</body></html>

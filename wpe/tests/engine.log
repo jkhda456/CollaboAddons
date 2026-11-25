@@ -59,13 +59,13 @@ TCP bind hash table entries: 32768 (order: 4, 786432 bytes, linear)
 TCP: Hash tables configured (established 32768 bind 32768)
 UDP hash table entries: 2048 (order: 1, 114688 bytes, linear)
 NET: Registered PF_UNIX/PF_LOCAL protocol family
-Unpacking initramfs...
-Freeing initrd memory: 1472K
 workingset: timestamp_bits=30 (anon: 26) max_order=16 bucket_order=0 (anon: 0)
 squashfs: version 4.0 (2009/01/31) Phillip Lougher
 fuse: init (API version 7.45)
+Unpacking initramfs...
 io scheduler mq-deadline registered
 io scheduler kyber registered
+Freeing initrd memory: 1472K
 NET: Registered PF_PACKET protocol family
 NET: Registered PF_VSOCK protocol family
 printk: legacy console [hvc0] enabled

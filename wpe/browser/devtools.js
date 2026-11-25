@@ -7,7 +7,11 @@
 // sends to the inspector it leaves in an outbox that browser.c sends.
 // With `web intercept` on, the requests it is asked to (and their responses, if so) wait before they
 // go, as the Web Inspector's interception has them wait (Network.setInterceptionEnabled): each until
-// the agent sends it (changed or not), drops it or answers it itself.
+// the agent sends it (changed or not), drops it or answers it itself. What the page's inspector
+// cannot hold — a synchronous XMLHttpRequest, beacons and pings, service and shared workers'
+// requests, a redirect's next hops, responses with their bodies, WebSockets' handshakes and
+// messages — WebKit's network process holds (WebKit patch 0013): browser.c passes its lines
+// (netReceive) and sends what is decided (takeNetOutbox).
 (() => {
     const MAX_BODY = 8 * 1000 * 1000;      // a response body kept: up to 8 MB
     const MAX_BODIES = 64 * 1000 * 1000;   // and 64 MB in all (the oldest go first)
@@ -15,7 +19,14 @@
     const MAX_FRAMES = 2000;               // messages kept per WebSocket
     const LISTED = 100;                    // `web network` lists the last 100
     // the short names of types `--type` takes (of `web network`, `web intercept on`)
-    const TYPE_NAMES = { css: 'stylesheet', js: 'script', doc: 'document', img: 'image', ws: 'websocket', xhr: 'xhr|fetch', api: 'xhr|fetch' };
+    const TYPE_NAMES = { css: 'stylesheet', js: 'script', doc: 'document', img: 'image', ws: 'websocket', xhr: 'xhr|fetch', api: 'xhr|fetch',
+                         sw: 'service-worker', 'shared': 'shared-worker', 'sync-xhr': 'sync', synchronous: 'sync', redirects: 'redirect',
+                         'beacons': 'beacon', pings: 'ping', message: 'websocket', messages: 'websocket' };
+    // what the network process holds (CollaboNetIntercept.h's bits)
+    const NET = { REQUEST: 1, RESPONSE: 2, BODY: 4, WS_HANDSHAKE: 8, WS_SENT: 16, WS_RECEIVED: 32,
+                  PAGE_REQUESTS: 64, PAGE_RESPONSES: 128, RECORD: 256 };
+    // web --capabilities says the same (web.c): what a client can count on
+    const PROTOCOL = 2;
 
     let bodies = 'text';                   // which response bodies are kept: text, all, none
     let nextCommand = 1;
@@ -32,6 +43,13 @@
     const decisions = new Map();           // a decision's id: {lines, waiting} until WebKit has answered it
     let nextDecision = 1;
     let version = '';                      // WebKit's, for the archives (browser.c says)
+    let recording = false;                 // the developer tools are on (start .. stop)
+    // the network process (WebKit patch 0013): its socket, what it holds for us, what it told of
+    const net = { connected: false, connections: 0, mask: -1, serial: 0, acked: 0, pid: '' };
+    const netOutbox = [];                  // lines for it, sent by browser.c
+    const netTasks = new Map();            // its data task: the record of the hop it is on
+    const netSockets = new Map();          // its WebSocket: the record
+    const workerSources = new Map();       // "target requestId": where a service worker's answer came from
 
     // ── talking to the inspector ─────────────────────────────────────────────────────────────
 
@@ -130,7 +148,7 @@
             }
         }
         for (const held of [...paused.values()]) {
-            if (held.channel.key === key)
+            if (!held.via && held.channel.key === key)
                 unhold(held.r, why);
         }
     }
@@ -161,7 +179,11 @@
             }
             if (p.type === 'Document' && !previous && (!channel.mainFrame || p.frameId === channel.mainFrame) && !channel.worker)
                 newPage(channel, p);
-            const r = begin(channel, p.requestId, p.request.url, p.request.method, p.request.headers, p.walltime || wall(channel, p.timestamp));
+            // the network process may have told of it first (it held it): that record, by its number
+            const r = adopt(channel, p.requestId, p.request.url, p.type)
+                || begin(channel, p.requestId, p.request.url, p.request.method, p.request.headers, p.walltime || wall(channel, p.timestamp));
+            if (previous && p.redirectResponse)
+                chain(previous, r);
             r.start = p.timestamp;
             r.type = p.type || 'Other';
             r.frame = p.frameId;
@@ -257,7 +279,7 @@
                 fetchBody(r);
         },
         'Network.webSocketCreated'(channel, p) {
-            const r = begin(channel, p.requestId, p.url, 'GET', {}, Date.now() / 1000);
+            const r = adopt(channel, p.requestId, p.url, 'WebSocket') || begin(channel, p.requestId, p.url, 'GET', {}, Date.now() / 1000);
             r.type = 'WebSocket';
             r.socket = true;
             r.har._resourceType = 'websocket';
@@ -392,8 +414,14 @@
             r.timing = response.timing;
         if (response.source === 'memory-cache' || response.source === 'disk-cache')
             r.har._fromCache = response.source === 'memory-cache' ? 'memory' : 'disk';
-        else if (response.source === 'service-worker')
+        else if (response.source === 'service-worker') {
             r.har._fromServiceWorker = true;
+            // what the worker answered with (the network process says): CacheStorage, a response
+            // it made itself, or what it fetched
+            const source = workerSources.get(r.key.split('/')[0] + ' ' + r.requestId);
+            if (source)
+                r.har._serviceWorkerResponse = source;
+        }
         const tls = response.security && response.security.connection;
         if (tls && tls.protocol && tls.protocol !== 'Unknown')
             r.har._tls = tls;
@@ -561,7 +589,9 @@
     function interceptIn(channel) {
         if (channel.worker || channel.type === 'worker')
             return;
-        const want = intercept ? intercept.stages : {};
+        // with its body (--stage body), a response is the network process's to hold: it has the body
+        const stages = intercept ? intercept.stages : {};
+        const want = { request: stages.request, response: stages.response && !stages.body };
         const has = channel.intercepts || (channel.intercepts = {});
         const on = !!(want.request || want.response);
         if (on && !channel.intercepting)
@@ -591,21 +621,42 @@
         return null;
     }
 
+    // what else a --type can name it by: sync (a synchronous XMLHttpRequest), redirect (a hop after
+    // the first), service-worker, shared-worker, worker (any worker's), the network process's kind
+    function tagsOf(r) {
+        const tags = [];
+        const net = r.net || {};
+        if (net.kind === 'sync')
+            tags.push('sync');
+        if (r.redirectOf || net.hop > 0)
+            tags.push('redirect');
+        if (net.worker === 'service' || net.worker === 'shared')
+            tags.push(net.worker + '-worker', 'worker');
+        if (net.worker === 'dedicated' || (r.key && r.key.includes('/')))
+            tags.push('worker');
+        return tags;
+    }
+
     function interceptable(r, url, method) {
         const o = intercept;
         if (!o || !o.stages)
             return false;
-        if (o.types && !o.types.test(typeOf(r)))
+        if (o.types && !o.types.test(typeOf(r)) && !tagsOf(r).some(tag => o.types.test(tag)))
             return false;
         if (o.methods && !o.methods.includes(String(method || 'GET').toUpperCase()))
             return false;
         return !o.patterns.length || o.patterns.some(p => p.test(url || ''));
     }
 
+    // r (or a message of its WebSocket: what.n, a number of its own) waits for the agent; what.via:
+    // 'net' when the network process holds it (its id: what.netId), else the page's inspector
     function hold(r, channel, stage, what) {
-        paused.set(r.id, Object.assign({ r, channel, stage, since: Date.now() }, what));
-        r.paused = stage;
+        const held = Object.assign({ n: r.id, r, channel, stage, since: Date.now() }, what);
+        paused.set(held.n, held);
+        if (!held.message)
+            r.paused = stage;
         pauseSerial++;
+        return held;
     }
 
     function note(r, stage, action, extra) {
@@ -618,20 +669,26 @@
     // go of it too (it sends a request as it was; a canceled one stays canceled)
     function unhold(r, why, release) {
         const held = paused.get(r.id);
-        if (!held)
-            return;
-        paused.delete(r.id);
-        r.paused = null;
-        if (release)
-            send(held.channel, 'Network.interceptContinue', { requestId: r.requestId, stage: held.stage });
+        if (held)
+            letGo(held, why, release);
+    }
+
+    function letGo(held, why, release) {
+        paused.delete(held.n);
+        if (!held.message)
+            held.r.paused = null;
+        if (release && held.via)
+            netDecide(held.netId, {});
+        else if (release)
+            send(held.channel, 'Network.interceptContinue', { requestId: held.r.requestId, stage: held.stage });
         if (why)
-            note(r, held.stage, why);
+            note(held.r, held.stage, why, held.message ? { seq: held.message.seq } : undefined);
     }
 
     function pausedOf(which) {
-        const list = [...paused.values()].sort((a, b) => a.r.id - b.r.id);
+        const list = [...paused.values()].sort((a, b) => a.n - b.n);
         if (/^#?\d+$/.test(which))
-            return list.filter(h => h.r.id === +which.replace('#', ''));
+            return list.filter(h => h.n === +which.replace('#', ''));
         return which === 'all' ? list : list.filter(h => urlOf(h).includes(which));
     }
 
@@ -654,6 +711,8 @@
     }
 
     function methodOf(held) {
+        if (held.message)
+            return '-';
         return (held.request && held.request.method) || held.r.har.request.method || 'GET';
     }
 
@@ -661,7 +720,9 @@
         return ((Date.now() - held.since) / 1000).toFixed(1) + ' s';
     }
 
-    // [TEXT...] [--regex] [--case] [--type T[,T]] [--method M[,M]] [--stage request|response|both]
+    const STAGES = ['request', 'response', 'body', 'send', 'receive'];
+
+    // [TEXT...] [--regex] [--case] [--type T[,T]] [--method M[,M]] [--stage STAGE[,STAGE]]
     function interceptOptions(words) {
         const o = { texts: [], regex: false, caseSensitive: false, typeNames: null, types: null, methods: null,
                     stages: { request: true, response: false } };
@@ -676,17 +737,32 @@
             else if (w === '--method' && more)
                 o.methods = words[++i].toUpperCase().split(/[,\s]+/).filter(Boolean);
             else if (w === '--stage' && more) {
-                const stage = words[++i].toLowerCase();
-                if (!['request', 'response', 'both'].includes(stage))
-                    return 'E' + '--stage is request (the default: before it goes), response (before the page gets it) or both, not ' + stage;
-                o.stages = { request: stage !== 'response', response: stage !== 'request' };
+                // where it pauses: request (before it goes; a WebSocket's handshake), response (its
+                // status and headers, before the page gets them), body (the same with the whole body,
+                // to read and change), send / receive (a WebSocket's messages); both = request,response,
+                // messages = send,receive, all = request,body,messages
+                const stages = {};
+                for (const stage of words[++i].toLowerCase().split(/[,\s]+/).filter(Boolean)) {
+                    const named = { both: ['request', 'response'], messages: ['send', 'receive'], message: ['send', 'receive'],
+                                    all: ['request', 'response', 'body', 'send', 'receive'], handshake: ['request'], sent: ['send'],
+                                    received: ['receive'], bodies: ['body'] }[stage] || [stage];
+                    for (const one of named) {
+                        if (!STAGES.includes(one))
+                            return 'E' + '--stage takes request (the default: before it goes), response (before the page gets it), body (with the '
+                                + 'response\'s body), send, receive (a WebSocket\'s messages), both, messages, all — or several, by commas — not ' + stage;
+                        stages[one] = true;
+                    }
+                }
+                if (stages.body)
+                    stages.response = true;
+                o.stages = stages;
             } else if (w.startsWith('--'))
-                return 'E' + 'unknown option ' + w + ' (intercept on [TEXT...] [--regex] [--case] [--type T[,T]] [--method M[,M]] [--stage request|response|both])';
+                return 'E' + 'unknown option ' + w + ' (intercept on [TEXT...] [--regex] [--case] [--type T[,T]] [--method M[,M]] [--stage request|response|body|send|receive|both|messages|all])';
             else
                 o.texts.push(w);
         }
         if (o.typeNames && o.typeNames.length)
-            o.types = new RegExp('^(' + o.typeNames.map(t => TYPE_NAMES[t] || t.replace(/[^a-z]/g, '')).join('|') + ')$');
+            o.types = new RegExp('^(' + o.typeNames.map(t => TYPE_NAMES[t] || t.replace(/[^a-z-]/g, '')).join('|') + ')$');
         else
             o.typeNames = null;
         try {
@@ -705,11 +781,24 @@
         if (o.texts.length)
             what += ' whose address ' + (o.regex ? 'matches ' : 'has ') + o.texts.map(t => JSON.stringify(t)).join(' or ')
                 + (o.caseSensitive ? '' : ' (any case)');
-        const when = o.stages.request && o.stages.response
-            ? (one ? 'pauses before it goes, and its response before the page gets it' : 'pause before they go, and their responses before the page gets them')
-            : o.stages.response ? (one ? 'pauses with its response, before the page gets it' : 'pause with their responses, before the page gets them')
-            : (one ? 'pauses before it goes' : 'pause before they go');
-        return what + ' ' + when;
+        const st = o.stages, parts = [];
+        const response = st.body ? 'response (with its body)' : 'response';
+        if (st.request && st.response)
+            parts.push(one ? 'pauses before it goes, and its ' + response + ' before the page gets it'
+                           : 'pause before they go, and their ' + response.replace('response', 'responses').replace('its', 'their') + ' before the page gets them');
+        else if (st.response)
+            parts.push(one ? 'pauses with its ' + response + ', before the page gets it'
+                           : 'pause with their ' + response.replace('response', 'responses').replace('its', 'their') + ', before the page gets them');
+        else if (st.request)
+            parts.push(one ? 'pauses before it goes' : 'pause before they go');
+        let text = parts.length ? what + ' ' + parts.join('') : '';
+        if (st.send || st.receive) {
+            const which = st.send && st.receive ? 'sends and receives' : st.send ? 'sends' : 'receives';
+            text += (text ? '; ' : '') + 'each WebSocket message the page ' + which
+                + (o.texts.length ? ' on a socket whose address ' + (o.regex ? 'matches ' : 'has ') + o.texts.map(t => JSON.stringify(t)).join(' or ') : '')
+                + ' pauses before it goes on';
+        }
+        return text;
     }
 
     function interceptStatus() {
@@ -723,10 +812,36 @@
     const DECIDE_HINT = '(web intercept show N; send N [--url U] [--header \'NAME: VALUE\'] [--body TEXT] | drop N | respond N [--status S] --body TEXT;'
         + ' N: a number, all, or a part of the address)';
 
+    // request, response 200, body 200 (with its body), handshake (a WebSocket's), send 3 / receive 4
+    // (a WebSocket's third message sent, fourth received)
+    function stageLabel(held) {
+        if (held.message)
+            return held.stage + ' ' + held.message.seq;
+        if (held.websocket)
+            return 'handshake';
+        if (held.stage === 'request')
+            return 'request';
+        return held.stage + ' ' + ((held.response && held.response.status) || '');
+    }
+
+    // what is not a page's ordinary request, said after the address
+    function heldNote(held) {
+        const r = held.r, net = r.net || {}, notes = [];
+        if (held.message)
+            return '  (' + (held.message.opcode === 2 ? 'binary, ' : '') + size(held.message.size) + ' on WebSocket #' + r.id + ')';
+        if (net.kind === 'sync')
+            notes.push('synchronous');
+        if (net.worker === 'service' || net.worker === 'shared')
+            notes.push('a ' + net.worker + ' worker\'s');
+        if (held.event && held.event.hop > 0)
+            notes.push('redirect hop ' + held.event.hop + (r.redirectOf ? ' after #' + r.redirectOf : ''));
+        return notes.length ? '  (' + notes.join(', ') + ')' : '';
+    }
+
     function pausedRow(held) {
-        const stage = held.stage === 'request' ? 'request' : 'response ' + ((held.response && held.response.status) || '');
-        return pad(held.r.id, 4, true) + '  ' + pad(stage, 13) + ' ' + pad(methodOf(held), 7) + ' ' + pad(typeOf(held.r), 11) + ' '
-            + pad(waited(held), 8, true) + '  ' + shortened(urlOf(held), 100);
+        return pad(held.n, 4, true) + '  ' + pad(stageLabel(held), 13) + ' ' + pad(methodOf(held), 7) + ' '
+            + pad(held.message ? (held.message.opcode === 2 ? 'binary' : 'text') : typeOf(held.r), 11) + ' '
+            + pad(waited(held), 8, true) + '  ' + shortened(urlOf(held), 100) + heldNote(held);
     }
 
     // the requests waiting for the agent; lead: what comes before the count ("paused: ")
@@ -738,7 +853,113 @@
             + PAUSED_HEAD + '\n' + list.map(pausedRow).join('\n') + '\n' + DECIDE_HINT + '\n';
     }
 
+    // who loads it, as the network process says (its page, frame, worker; a synchronous load...)
+    function whoLoads(r) {
+        const net = r.net || {};
+        const kind = { sync: 'a synchronous XMLHttpRequest of the page', ping: r.type === 'Ping' ? 'a hyperlink\'s ping' : r.type === 'Beacon' ? 'a beacon (navigator.sendBeacon)' : 'a report',
+                       websocket: 'a WebSocket', preflight: 'a CORS preflight' }[net.kind];
+        const worker = net.worker === 'service' ? 'a service worker (its own process, id ' + net.workerId + ')'
+                     : net.worker === 'shared' ? 'a shared worker (its own process, id ' + net.workerId + ')'
+                     : net.worker === 'dedicated' || (r.key && r.key.includes('/')) ? 'a dedicated worker of the page' : '';
+        const parts = [];
+        if (kind)
+            parts.push(kind);
+        if (worker)
+            parts.push((kind ? 'from ' : '') + worker);
+        if (!parts.length)
+            parts.push('the page');
+        if (net.page)
+            parts.push('page ' + net.page + (net.frame ? ', frame ' + net.frame : ''));
+        return parts.join('; ');
+    }
+
+    // a body given as base64: its text, if it is text
+    function bodyText(base64, mimeType) {
+        if (base64 === undefined || base64 === null)
+            return null;
+        const text = fromBase64(base64);
+        return text !== null && (textual(mimeType || '', '') || !/[\u0000-\u0008\u000e-\u001f]/.test(text)) ? text : null;
+    }
+
+    function netDetail(held) {
+        const r = held.r, id = held.n, ev = held.event || {};
+        const lines = [];
+        const chainIds = chainOf(r);
+        if (held.message) {
+            const m = held.message;
+            lines.push('#' + id + ' ' + (held.stage === 'send' ? 'message the page sends' : 'message the page receives') + ' (#' + m.seq + ' that way) on WebSocket #' + r.id + ' ' + urlOf(held));
+            lines.push('paused before it goes on (waiting ' + waited(held) + ')   ' + (m.opcode === 2 ? 'binary' : 'text') + ', ' + size(m.size));
+            lines.push('', 'data' + (m.encoding === 'base64' ? ' (binary, as base64; web intercept body ' + id + ' FILE writes the bytes)' : '') + ':', preview(m.data || '', 4000));
+            lines.push('', 'web intercept send ' + id + '   on as it is; changed: --body TEXT | --body-file FILE [--opcode text|binary]',
+                'web intercept drop ' + id + '   ' + (held.stage === 'send' ? 'not sent' : 'the page does not get it') + ' (the messages after it go on)');
+            return lines.join('\n') + '\n';
+        }
+        lines.push('#' + id + ' ' + methodOf(held) + ' ' + urlOf(held));
+        if (held.stage === 'request') {
+            lines.push((held.websocket ? 'its opening handshake, paused before it goes' : 'paused before it goes') + ' (waiting ' + waited(held) + ', in the network process)   type: '
+                + typeOf(r) + (r.har.pageref ? '   page: ' + r.har.pageref : ''));
+            lines.push('loaded by: ' + whoLoads(r));
+            if (ev.hop > 0)
+                lines.push('redirect: hop ' + ev.hop + ', from ' + (ev.redirectedFrom || '?') + ' (' + (ev.redirectStatus || '?') + ')');
+            if (chainIds)
+                lines.push('redirect chain: ' + chainIds.map(n => '#' + n).join(' -> '));
+            lines.push('', 'request headers (as WebKit made them; the network adds Cookie, Host, Accept-Encoding, Connection' + (held.websocket ? ', and the WebSocket\'s Sec-WebSocket-* and Upgrade' : '') + '):');
+            const headers = headerList(held.request.headers);
+            lines.push(...(headers.length ? headerLines(headers) : ['  (none)']));
+            const query = queryOf(urlOf(held));
+            if (query.length)
+                lines.push('', 'query:', ...query.map(q => '  ' + q.name + ' = ' + q.value));
+            if (ev.protocols)
+                lines.push('', 'protocols: ' + ev.protocols);
+            if (held.body64 !== undefined) {
+                const text = bodyText(held.body64, header(held.request.headers, 'content-type'));
+                lines.push('', 'request body (' + (header(held.request.headers, 'content-type') || 'no type') + ', ' + size(base64Size(held.body64)) + (text === null ? ', binary: web intercept body ' + id + ' FILE' : '') + '):');
+                if (text !== null)
+                    lines.push(preview(text, 4000));
+            } else if (held.bodyFromFiles)
+                lines.push('', 'request body: read from files as it goes (not shown)');
+            if (held.websocket)
+                lines.push('', 'web intercept send ' + id + '   as it is; changed: [--url U] [--header \'NAME: VALUE\']... [--unset NAME]...',
+                    'web intercept drop ' + id + '   the page\'s WebSocket fails to connect');
+            else
+                lines.push('', 'web intercept send ' + id + '   as it is; changed: [--url U] [--method M] [--header \'NAME: VALUE\']... [--unset NAME]... [--body TEXT | --body-file FILE]',
+                    'web intercept drop ' + id + '   the page gets a network error [--error general|access|cancel|timeout]',
+                    'web intercept respond ' + id + '   answered here, not sent: [--status S] [--header \'NAME: VALUE\']... [--mime TYPE] [--body TEXT | --body-file FILE]');
+            return lines.join('\n') + '\n';
+        }
+        const response = held.response || {};
+        lines.push('paused with its response' + (held.stage === 'body' ? ' and its whole body' : '') + ', before the page gets it (waiting ' + waited(held) + ', in the network process)   type: ' + typeOf(r));
+        lines.push('loaded by: ' + whoLoads(r));
+        if (chainIds)
+            lines.push('redirect chain: ' + chainIds.map(n => '#' + n).join(' -> '));
+        lines.push('status: ' + response.status + (response.statusText ? ' ' + response.statusText : '') + '   ' + (response.mimeType || '') + (response.httpVersion ? '   ' + response.httpVersion : ''));
+        lines.push('', 'response headers:');
+        const headers = headerList(response.headers);
+        lines.push(...(headers.length ? headerLines(headers) : ['  (none)']));
+        if (held.stage === 'body') {
+            if (held.body64 !== undefined) {
+                const text = bodyText(held.body64, response.mimeType);
+                lines.push('', 'response body (' + size(base64Size(held.body64)) + ', as it came, decoded' + (text === null ? '; binary: web intercept body ' + id + ' FILE' : '; all of it: web intercept body ' + id) + '):');
+                if (text !== null)
+                    lines.push(preview(text, 4000));
+            } else
+                lines.push('', 'response body: not kept here (' + (response.bodyOmitted || 'too large') + ')');
+            lines.push('', 'web intercept send ' + id + '   the page gets it as it is; changed: [--status S] [--header \'NAME: VALUE\']... [--unset NAME]... [--mime TYPE] '
+                    + '[--body TEXT | --body-file FILE] (without --body, its own body with the changes)',
+                'web intercept drop ' + id + '   the page gets a network error instead [--error general|access|cancel|timeout]',
+                'web intercept respond ' + id + '   another response in its place: [--status S] [--header \'NAME: VALUE\']... [--mime TYPE] [--body TEXT | --body-file FILE]');
+        } else
+            lines.push('', 'its body has not come yet (--stage body reads it first, to read and change).',
+                'web intercept send ' + id + '   the page gets it as it is; changed: [--status S] [--header \'NAME: VALUE\']... [--unset NAME]... [--mime TYPE] '
+                    + '[--body TEXT | --body-file FILE] (without --body: its body is read, then given with the changes)',
+                'web intercept drop ' + id + '   the page gets a network error instead [--error general|access|cancel|timeout]',
+                'web intercept respond ' + id + '   another response in its place: [--status S] [--header \'NAME: VALUE\']... [--mime TYPE] [--body TEXT | --body-file FILE]');
+        return lines.join('\n') + '\n';
+    }
+
     function pausedDetail(held) {
+        if (held.via === 'net')
+            return netDetail(held);
         const r = held.r, id = r.id;
         const lines = ['#' + id + ' ' + methodOf(held) + ' ' + urlOf(held)];
         if (held.stage === 'request') {
@@ -846,8 +1067,169 @@
         return { document: 'text/html', stylesheet: 'text/css', script: 'text/javascript', fetch: 'application/json', xhr: 'application/json' }[typeOf(r)] || 'text/plain';
     }
 
+    // what the agent decided for one thing the network process holds: {net, line, note} (net: the
+    // decision it gets), {error} or {error, unsupported} (what WebKit cannot do with it here)
+    function netDecision1(held, action, o) {
+        const r = held.r, id = '#' + held.n;
+        const what = held.message ? id + ' (' + (held.stage === 'send' ? 'sent' : 'received') + ' message ' + held.message.seq + ' of WebSocket #' + r.id + ')'
+                   : id + ' ' + methodOf(held) + ' ' + shortened(urlOf(held), 150);
+        const hasBody = o.body !== undefined || o.body64 !== undefined;
+        const body64 = () => o.body64 !== undefined ? o.body64 : toBase64(o.body || '');
+        const bodySize = () => o.body64 !== undefined ? base64Size(o.body64) : utf8Length(o.body || '');
+        const status = o.status !== undefined ? +o.status : undefined;
+        const unsupported = text => ({ error: id + ': not supported: ' + text + ' (web --capabilities)', unsupported: true });
+        const errorType = () => ERRORS[(o.error || 'general').toLowerCase()];
+
+        if (held.message) {
+            if (action === 'respond')
+                return unsupported('a WebSocket message cannot be answered here: send it (changed: --body TEXT | --body-file FILE [--opcode text|binary]) or drop it');
+            if (o.url !== undefined || o.method !== undefined || o.headers.length || o.unset.length || status !== undefined || o.mime !== undefined)
+                return unsupported('a WebSocket message takes --body TEXT, --body-file FILE and --opcode text|binary only');
+            if (action === 'drop')
+                return { net: { action: 'drop' }, line: 'dropped ' + what + (held.stage === 'send' ? ': not sent' : ': the page does not get it'), note: ['dropped'] };
+            const decision = { action: 'continue' };
+            if (hasBody) {
+                decision.data = o.body64 !== undefined ? o.body64 : o.body;
+                decision.encoding = o.body64 !== undefined ? 'base64' : 'text';
+            }
+            if (o.opcode !== undefined)
+                decision.opcode = /^(2|bin|binary)$/i.test(o.opcode) ? 2 : 1;
+            const changed = hasBody || o.opcode !== undefined;
+            return { net: decision, line: 'sent ' + what + ' on' + (changed ? ' (changed: ' + size(bodySize()) + (decision.opcode === 2 ? ', binary' : decision.opcode === 1 ? ', text' : '') + ')' : ''),
+                     note: [changed ? 'sent changed' : 'sent', changed ? { changed: ['data'] } : undefined] };
+        }
+
+        if (held.websocket) {
+            if (action === 'respond')
+                return unsupported('a WebSocket\'s handshake cannot be answered here: send it (changed: --url U, --header \'NAME: VALUE\', --unset NAME) or drop it');
+            if (action === 'drop')
+                return { net: { action: 'fail' }, line: 'dropped ' + what + ': the page\'s WebSocket fails (not connected)', note: ['dropped'] };
+            if (o.method !== undefined || hasBody || status !== undefined || o.mime !== undefined)
+                return unsupported('a WebSocket\'s handshake takes --url, --header and --unset only');
+            const decision = { action: 'continue' }, changed = [];
+            const from = { url: r.har.request.url, method: 'GET' };
+            if (o.url !== undefined) {
+                decision.url = resolve(urlOf(held), o.url);
+                changed.push('url');
+            }
+            if (o.headers.length || o.unset.length) {
+                const headers = changedHeaders(held.request.headers, o.headers, o.unset);
+                if (typeof headers === 'string')
+                    return { error: id + ': ' + headers };
+                decision.headers = headers;
+                changed.push('headers');
+            }
+            // the record says where it went
+            if (decision.url) {
+                r.har.request.url = decision.url;
+                r.har.request.queryString = queryOf(decision.url);
+            }
+            return { net: decision, line: 'sent ' + what + (changed.length ? ' (changed: ' + changed.join(', ') + ')' : ''),
+                     note: [changed.length ? 'sent changed' : 'sent', changed.length ? { changed, from } : undefined] };
+        }
+
+        if (held.stage === 'request') {
+            if (action === 'drop')
+                return { net: { action: 'fail', error: errorType() },
+                         line: 'dropped ' + what + (errorType() === 'Cancellation' ? ' (canceled)' : ' (the page gets a network error' + (errorType() !== 'General' ? ': ' + errorType() : '') + ')'),
+                         note: ['dropped', { error: errorType() }] };
+            if (action === 'respond') {
+                const headers = changedHeaders({}, o.headers, []);
+                if (typeof headers === 'string')
+                    return { error: id + ': ' + headers };
+                const mimeType = o.mime || (header(headers, 'content-type') || '').split(';')[0].trim() || naturalType(r);
+                const code = status || 200;
+                return { net: { action: 'respond', status: code, statusText: o.statusText || REASONS[code] || '', headers, mimeType, body: body64() },
+                         line: 'answered ' + what + ' here: ' + code + (REASONS[code] ? ' ' + REASONS[code] : '') + ', ' + size(bodySize()) + ' of ' + mimeType + ' (not sent)',
+                         note: ['answered here', { status: code }] };
+            }
+            if (status !== undefined || o.mime !== undefined || o.statusText !== undefined)
+                return { error: id + ': --status and --mime are a response\'s (respond ' + held.n + ' answers it here)' };
+            const decision = { action: 'continue' }, changed = [];
+            const har = r.har.request, from = { url: har.url, method: har.method };
+            if (o.url !== undefined) {
+                decision.url = resolve(urlOf(held), o.url);
+                changed.push('url');
+            }
+            if (o.method !== undefined) {
+                decision.method = o.method.toUpperCase();
+                changed.push('method');
+            }
+            if (o.headers.length || o.unset.length) {
+                const headers = changedHeaders(held.request.headers, o.headers, o.unset);
+                if (typeof headers === 'string')
+                    return { error: id + ': ' + headers };
+                decision.headers = headers;
+                changed.push('headers');
+            }
+            if (hasBody) {
+                if (held.bodyFromFiles)
+                    return unsupported('its body is read from files as it goes: it cannot be replaced here');
+                decision.body = body64();
+                changed.push('body');
+            }
+            if (!changed.length)
+                return { net: decision, line: 'sent ' + what, note: ['sent'] };
+            if (decision.url) {
+                har.url = decision.url;
+                har.queryString = queryOf(decision.url);
+            }
+            if (decision.method)
+                har.method = decision.method;
+            if (decision.headers) {
+                har.headers = headerList(decision.headers);
+                har.cookies = requestCookies(decision.headers);
+            }
+            if (hasBody) {
+                const text = o.body64 !== undefined ? fromBase64(o.body64) : o.body;
+                har.postData = { mimeType: header(decision.headers || held.request.headers, 'content-type') || '', text: text !== null ? text : o.body64 };
+                if (text === null)
+                    har.postData.encoding = 'base64';
+                har.bodySize = bodySize();
+            }
+            return { net: decision, line: 'sent ' + id + ' ' + (decision.method || methodOf(held)) + ' ' + shortened(decision.url || urlOf(held), 150) + ' (changed: ' + changed.join(', ') + ')',
+                     note: ['sent changed', { changed, from }] };
+        }
+
+        // the response stage (status and headers), or with its body (body)
+        if (o.url !== undefined || o.method !== undefined)
+            return { error: id + ': its request has gone already (it waits with its response): --url and --method do not apply' };
+        const response = held.response || {};
+        if (action === 'drop')
+            return { net: { action: 'fail', error: errorType() }, line: 'dropped ' + what + ': the page gets a network error instead of its response (' + response.status + ')',
+                     note: ['dropped', { error: errorType() }] };
+        const unchanged = !o.headers.length && !o.unset.length && !hasBody && status === undefined && o.mime === undefined && o.statusText === undefined;
+        if (action === 'send' && unchanged)
+            return { net: { action: 'continue' }, line: 'sent ' + what + ' on: the page gets its response (' + response.status + ')', note: ['sent'] };
+        const headers = changedHeaders(action === 'send' ? response.headers : {}, o.headers, o.unset);
+        if (typeof headers === 'string')
+            return { error: id + ': ' + headers };
+        const code = status || (action === 'send' ? response.status : 200);
+        const mimeType = o.mime || (action === 'send' && response.mimeType) || (header(headers, 'content-type') || '').split(';')[0].trim() || naturalType(r);
+        let body = hasBody ? body64() : '', kept = false;
+        if (!hasBody && action === 'send') {
+            if (held.stage === 'response')
+                // its own body has not come: read it first, then the page gets it so (netResponse)
+                return { net: { action: 'body' }, pending: o,
+                         line: 'sent ' + what + ' on with its response changed (its body is read first, then the page gets it with the changes)',
+                         note: ['sent changed', { status: code }] };
+            if (held.body64 === undefined)
+                return { error: id + ': its body is too large to keep (' + (response.bodyOmitted || '') + '): --body gives the page another with the changes' };
+            body = held.body64;
+            kept = true;
+        }
+        const decision = { action: 'respond', status: code, statusText: o.statusText || (code === response.status ? response.statusText : REASONS[code]) || '', headers, mimeType, body };
+        const bytes = hasBody ? bodySize() : base64Size(body);
+        return { net: decision,
+                 line: (action === 'send' ? 'sent ' + what + ' on with its response changed: ' : 'answered ' + what + ' in its response\'s place: ') + code
+                     + (decision.statusText ? ' ' + decision.statusText : '') + ', ' + size(bytes) + ' of ' + mimeType + (kept ? ' (its own body)' : hasBody ? '' : ' (no body: --body gives one)'),
+                 note: [action === 'send' ? 'sent changed' : 'answered here', { status: code }] };
+    }
+
     // what the agent decided for one paused request: {method, params, line, note} or {error}
     function decision1(held, action, o) {
+        if (held.via === 'net')
+            return netDecision1(held, action, o);
         const r = held.r, id = '#' + r.id, requestId = r.requestId;
         const what = id + ' ' + methodOf(held) + ' ' + shortened(urlOf(held), 150);
         const hasBody = o.body !== undefined || o.body64 !== undefined;
@@ -923,7 +1305,8 @@
         }
         // the response stage
         if (action === 'drop')
-            return { error: id + ' waits with its response, and WebKit cannot fail a response: respond ' + r.id + ' --status 403 --body \'\' gives the page another' };
+            return { error: id + ': not supported: it waits with its response in the page\'s inspector, which cannot fail a response: respond ' + r.id
+                         + ' --status 403 --body \'\' gives the page another (web --capabilities)', unsupported: true };
         if (o.url !== undefined || o.method !== undefined)
             return { error: id + ': its request has gone already (it waits with its response): --url and --method do not apply' };
         const response = held.response || {};
@@ -947,8 +1330,8 @@
     function decide(action, words) {
         const o = { which: [], headers: [], unset: [] };
         const takes = { '--url': 'url', '--method': 'method', '--body': 'body', '--body64': 'body64', '--status': 'status',
-                        '--status-text': 'statusText', '--mime': 'mime', '--error': 'error' };
-        const allowed = { send: ['url', 'method', 'body', 'body64', 'status', 'statusText', 'mime', 'headers', 'unset'],
+                        '--status-text': 'statusText', '--mime': 'mime', '--error': 'error', '--opcode': 'opcode' };
+        const allowed = { send: ['url', 'method', 'body', 'body64', 'status', 'statusText', 'mime', 'headers', 'unset', 'opcode'],
                           respond: ['body', 'body64', 'status', 'statusText', 'mime', 'headers'], drop: ['error'] }[action];
         const given = new Set();
         for (let i = 0; i < words.length; i++) {
@@ -988,20 +1371,35 @@
             }
             found.forEach(held => chosen.add(held));
         }
+        // what WebKit cannot do with one of them: none is decided (the client asked for too much)
+        const steps = new Map();
+        for (const held of chosen) {
+            const step = decision1(held, action, o);
+            if (step.unsupported)
+                return 'U' + step.error;
+            steps.set(held, step);
+        }
         const id = nextDecision++;
         const d = { lines: [], waiting: 0, failed: false };
         for (const held of chosen) {
-            const step = decision1(held, action, o);
+            const step = steps.get(held);
             if (step.error) {
                 d.lines.push(step.error);
                 d.failed = true;
                 continue;
             }
             const at = d.lines.push(step.line) - 1;
-            unhold(held.r);
-            const n = note(held.r, held.stage, step.note[0], step.note[1]);
-            if (action === 'drop')
+            letGo(held);
+            const n = note(held.r, held.stage, step.note[0], Object.assign({}, step.note[1] || {}, held.message ? { seq: held.message.seq } : {}));
+            if (action === 'drop' && !held.message)
                 held.r.dropped = true;
+            if (held.via === 'net') {
+                // the network process takes it as it comes (no answer to wait for)
+                if (step.pending)
+                    held.r.pendingChange = Object.assign({}, o);
+                netDecide(held.netId, step.net);
+                continue;
+            }
             d.waiting++;
             send(held.channel, step.method, step.params, (result, error) => {
                 d.waiting--;
@@ -1014,6 +1412,391 @@
         }
         decisions.set(id, d);
         return 'P' + id;
+    }
+
+    // ── the network process: what the page's inspector cannot hold ───────────────────────────
+    // WebKit's network process (patch 0013) holds, when asked (netMask): every HTTP hop before it
+    // goes — synchronous loads, pings and beacons, what service and shared workers load (their own
+    // processes, which have no inspector here), a redirect's next hops (the page's own first hops
+    // are the inspector's) —, responses before the page gets them (with their whole bodies, read
+    // first, for --stage body), WebSockets' handshakes and their messages, each way, in order. Its
+    // events name the page ("page-<page>" is the inspector's target) and the resource ("0.<resource>"
+    // the inspector's request): what it holds is the inspector's record when there is one, else a
+    // record of its own, which the inspector's later word about it joins (adopt).
+
+    function netMask() {
+        if (!recording)
+            return 0;
+        let mask = NET.RECORD;
+        const st = intercept ? intercept.stages : {};
+        if (st.request)
+            mask |= NET.REQUEST | NET.PAGE_REQUESTS | NET.WS_HANDSHAKE;
+        if (st.body)
+            mask |= NET.BODY;
+        else if (st.response)
+            mask |= NET.RESPONSE | NET.PAGE_RESPONSES;
+        if (st.send)
+            mask |= NET.WS_SENT;
+        if (st.receive)
+            mask |= NET.WS_RECEIVED;
+        return mask;
+    }
+
+    // the network process holds what the rules may take from now on (it says when it has taken it)
+    function netConfigure() {
+        const mask = netMask();
+        if (mask === net.mask)
+            return;
+        net.mask = mask;
+        net.serial++;
+        if (net.connected)
+            netOutbox.push('C ' + mask + ' ' + net.serial);
+    }
+
+    function netDecide(id, decision) {
+        if (net.connected && id)
+            netOutbox.push('D ' + id + ' ' + JSON.stringify(decision || {}));
+    }
+
+    function netReceive(line) {
+        const kind = line[0], rest = line.slice(2);
+        if (kind === 'A')
+            net.acked = +rest || 0;
+        else if (kind === 'H')
+            net.pid = rest.trim();
+        else if (kind === 'F')
+            netForget(rest.trim());
+        else if (kind === 'N') {
+            const event = JSON.parse(rest);
+            if (typeof event.context === 'string')
+                event.context = JSON.parse(event.context);
+            netNote(event);
+        }
+        else if (kind === 'E') {
+            const space = rest.indexOf(' ');
+            const id = rest.slice(0, space), event = JSON.parse(rest.slice(space + 1));
+            const handler = { request: netRequest, response: netResponse, websocket: netHandshake, message: netMessage }[event.type];
+            if (handler)
+                handler(id, event);
+            else
+                netDecide(id, {});
+        }
+    }
+
+    function netForget(id) {
+        for (const held of [...paused.values()]) {
+            if (held.via === 'net' && held.netId === id)
+                letGo(held, 'gone (canceled before it was decided: the page or its worker gave it up)');
+        }
+    }
+
+    // the network process went away (or will hold no more): what it held went on as it was
+    function netGone() {
+        net.connected = false;
+        for (const held of [...paused.values()]) {
+            if (held.via === 'net')
+                letGo(held, 'went on as it was (the network process let go of it)');
+        }
+    }
+
+    // an inspector type for what the network process says the load is for
+    function netType(context, event) {
+        const c = context || {};
+        if (c.kind === 'websocket')
+            return 'WebSocket';
+        if (c.kind === 'ping') {
+            const type = (header(event.headers, 'content-type') || '').toLowerCase();
+            return type === 'text/ping' ? 'Ping' : /csp-report|reports\+json/.test(type) ? 'Other' : 'Beacon';
+        }
+        if (c.kind === 'preflight')
+            return 'Other';
+        const byDestination = { document: 'Document', iframe: 'Document', script: 'Script', style: 'StyleSheet', image: 'Image', font: 'Font',
+                                worker: 'Script', sharedworker: 'Script', serviceworker: 'Script', manifest: 'Other', json: 'Fetch', report: 'Other' };
+        if (byDestination[c.destination])
+            return byDestination[c.destination];
+        return c.kind === 'sync' ? 'XHR' : 'Fetch';
+    }
+
+    // the inspector's record of the resource the event is about (its latest hop), if it has one
+    function inspectorRecord(event) {
+        const c = event.context || {};
+        if (!c.page || !c.resource)
+            return null;
+        const target = 'page-' + c.page, requestId = '0.' + c.resource;
+        for (let i = records.length - 1; i >= 0; i--) {
+            const r = records[i];
+            if (r.requestId === requestId && r.key && r.key.split('/')[0] === target)
+                return r;
+        }
+        return null;
+    }
+
+    // the record the network process's event is about: the inspector's, or one made now (provisional
+    // when the inspector may tell of it yet: the page's own loads, pings, WebSockets)
+    function netRecordOf(event, isSocket) {
+        const c = event.context || {};
+        const known = isSocket ? netSockets.get(event.socket) : netTasks.get(event.task);
+        if (known && (isSocket || known.har.request.url === event.url || event.type !== 'request'))
+            return known;
+        let r = null;
+        if (!isSocket && c.kind !== 'ping') {
+            const found = inspectorRecord(event);
+            // the inspector's record of this hop (not of the one before it)
+            if (found && (event.type !== 'request' || found.har.request.url === event.url) && !(found.net && found.net.task && found.net.task !== event.task))
+                r = found;
+        } else if (c.page) {
+            // a ping's and a WebSocket's identifiers are not the inspector's: by the page and the address
+            const target = 'page-' + c.page, want = isSocket ? 'WebSocket' : null;
+            for (let i = records.length - 1; i >= 0 && records.length - i < 500; i--) {
+                const o = records[i];
+                if (o.net || !o.key || o.key.split('/')[0] !== target || o.har.request.url !== event.url)
+                    continue;
+                if (want ? o.type === want : ['Ping', 'Beacon', 'Other'].includes(o.type)) {
+                    r = o;
+                    break;
+                }
+            }
+        }
+        if (!r) {
+            const key = c.page ? 'page-' + c.page : 'net';
+            r = begin({ key: 'net' }, 'net-' + (isSocket ? 's' + event.socket : event.task + '.' + (event.hop || 0)), event.url,
+                      isSocket ? 'GET' : event.method, event.headers || {}, Date.now() / 1000);
+            r.type = netType(c, event);
+            r.har._resourceType = resourceType(r.type);
+            r.socket = isSocket || undefined;
+            if (isSocket)
+                r.har._webSocketMessages = [];
+            // the inspector may tell of it yet: then its word joins this record (adopt)
+            r.provisional = c.page && !(c.worker === 'service' || c.worker === 'shared') ? key : null;
+            if (event.body !== undefined && !isSocket) {
+                const text = fromBase64(event.body);
+                r.har.request.postData = { mimeType: header(event.headers, 'content-type') || '', text: text !== null ? text : event.body };
+                if (text === null)
+                    r.har.request.postData.encoding = 'base64';
+                r.har.request.bodySize = base64Size(event.body);
+            }
+            if (event.redirectedFrom) {
+                const before = netTasks.get(event.task) || inspectorRecord(event);
+                if (before)
+                    chain(before, r);
+                r.har._redirectedFrom = event.redirectedFrom;
+            }
+        }
+        r.net = Object.assign(r.net || {}, { kind: c.kind, page: c.page, frame: c.frame, worker: c.worker, workerId: c.workerId,
+                                             destination: c.destination, resource: c.resource, hop: event.hop || 0 });
+        if (event.task !== undefined)
+            r.net.task = event.task;
+        if (isSocket)
+            netSockets.set(event.socket, r);
+        else
+            netTasks.set(event.task, r);
+        return r;
+    }
+
+    // what the inspector tells of is a record the network process told of first (it held it)
+    function adopt(channel, requestId, url, type) {
+        const target = channel.key.split('/')[0];
+        for (let i = records.length - 1; i >= 0 && records.length - i < 500; i--) {
+            const r = records[i];
+            if (r.provisional !== target || r.har.request.url !== url)
+                continue;
+            const sameResource = r.net && r.net.resource && requestId === '0.' + r.net.resource;
+            const sameKind = type === 'WebSocket' ? r.socket : (type === 'Ping' || type === 'Beacon') && ['Ping', 'Beacon', 'Other'].includes(r.type);
+            if (!sameResource && !sameKind)
+                continue;
+            r.provisional = null;
+            open.delete(r.key + ' ' + r.requestId);
+            r.key = channel.key;
+            r.requestId = requestId;
+            if (!r.done)
+                open.set(r.key + ' ' + requestId, r);
+            return r;
+        }
+        return null;
+    }
+
+    // a redirect's hops, one after the other: each knows the one before (and the first)
+    function chain(before, after) {
+        if (before === after)
+            return;
+        after.redirectOf = before.id;
+        after.chainStart = before.chainStart || before.id;
+        before.redirectTo = after.id;
+    }
+
+    function chainOf(r) {
+        const ids = [];
+        let first = r;
+        for (let guard = 0; first.redirectOf && guard < 50; guard++) {
+            const before = records.find(o => o.id === first.redirectOf);
+            if (!before)
+                break;
+            first = before;
+        }
+        for (let o = first, guard = 0; o && guard < 50; guard++) {
+            ids.push(o.id);
+            o = o.redirectTo ? records.find(x => x.id === o.redirectTo) : null;
+        }
+        return ids.length > 1 ? ids : null;
+    }
+
+    // a request the network process holds before it goes (each hop; the inspector's first hops not)
+    function netRequest(id, event) {
+        const r = netRecordOf(event, false);
+        if (!r.done && event.hop > 0 && r.har.request.url !== event.url)
+            r.har.request.url = event.url;
+        if (!intercept || !intercept.stages.request || (event.context && event.context.kind === 'preflight')
+            || !interceptable(r, event.url, event.method))
+            return netDecide(id, {});
+        hold(r, null, 'request', { via: 'net', netId: id, request: { url: event.url, method: event.method, headers: event.headers || {} },
+                                   body64: event.body, bodyFromFiles: event.bodyFromFiles, event });
+    }
+
+    // a response (its status and headers; with --stage body, then with its body read)
+    function netResponse(id, event) {
+        const r = netRecordOf(event, false);
+        if (r.pendingChange && event.body !== undefined) {
+            // `send N --header ...` at the response stage: its body was read for it, now it goes so
+            const o = r.pendingChange;
+            delete r.pendingChange;
+            const held = { n: r.id, r, stage: 'body', via: 'net', netId: id, response: event, body64: event.body, event };
+            const step = decision1(held, 'send', o);
+            return netDecide(id, step.net || {});
+        }
+        if (!intercept || !(intercept.stages.response || intercept.stages.body) || !interceptable(r, event.requestUrl || event.url, event.method))
+            return netDecide(id, {});
+        if (intercept.stages.body && event.bodyAvailable && event.body === undefined && !event.bodyOmitted)
+            return netDecide(id, { action: 'body' }); // read first: it comes again with the body
+        hold(r, null, event.body !== undefined || event.bodyOmitted ? 'body' : 'response',
+             { via: 'net', netId: id, response: event, body64: event.body, event });
+    }
+
+    // a WebSocket's opening handshake, before it goes
+    function netHandshake(id, event) {
+        const r = netRecordOf(event, true);
+        if (!intercept || !intercept.stages.request || !interceptable(r, event.url, 'GET'))
+            return netDecide(id, {});
+        hold(r, null, 'request', { via: 'net', netId: id, websocket: true, request: { url: event.url, method: 'GET', headers: event.headers || {} }, event });
+    }
+
+    // a WebSocket's message, before it is sent (or before the page gets it)
+    function netMessage(id, event) {
+        const r = netRecordOf(event, true);
+        const stage = event.direction === 'send' ? 'send' : 'receive';
+        const o = intercept;
+        const typed = !o || !o.types || o.types.test('websocket');
+        if (!o || !o.stages[stage] || !typed || !(!o.patterns.length || o.patterns.some(p => p.test(event.url || ''))))
+            return netDecide(id, {});
+        hold(r, null, stage, { n: nextId++, via: 'net', netId: id, message: event, event });
+    }
+
+    // what the network process tells without holding anything: a service or shared worker's own
+    // requests (no inspector sees them here) and where a service worker's answers came from
+    function netNote(event) {
+        if (event.type === 'worker-response') {
+            const c = event.context || {};
+            if (c.page && c.resource) {
+                const key = 'page-' + c.page + ' 0.' + c.resource;
+                workerSources.set(key, event.source);
+                if (workerSources.size > 2000)
+                    workerSources.delete(workerSources.keys().next().value);
+                const r = inspectorRecord(event);
+                if (r && r.har._fromServiceWorker)
+                    r.har._serviceWorkerResponse = event.source;
+            }
+            return;
+        }
+        const r = netRecordOf(event, false);
+        if (event.type === 'sent') {
+            if (!r.done) {
+                r.har.request.headers = headerList(event.headers);
+                r.har.request.cookies = requestCookies(event.headers);
+                r.har.request.method = event.method || r.har.request.method;
+            }
+        } else if (event.type === 'received') {
+            respond(r, { status: event.status, statusText: event.statusText, headers: event.headers, mimeType: event.mimeType });
+            r.har.response.httpVersion = r.har.request.httpVersion = httpVersion(event.httpVersion);
+        } else if (event.type === 'done') {
+            if (r.done)
+                return;
+            if (event.error)
+                r.har.response._error = event.error;
+            r.har.response.content.size = event.bytes || 0;
+            r.har.response.bodySize = event.bytes || 0;
+            if (!r.kept && !r.bodyError)
+                r.bodyError = 'a ' + (r.net && r.net.worker === 'shared' ? 'shared' : 'service') + ' worker\'s response: its body is not kept (web intercept on --stage body shows it)';
+            end(r, undefined);
+        }
+    }
+
+    // ── what is paused, for programs (intercept list --json, show N --json, body N) ──────────
+
+    function heldJson(held, full) {
+        const r = held.r, ev = held.event || {}, net = r.net || {};
+        const target = r.key && r.key.startsWith('page-') ? r.key.split('/')[0].slice(5) : net.page || null;
+        const o = {
+            id: held.n, record: r.id, stage: held.stage, via: held.via === 'net' ? 'network-process' : 'inspector',
+            kind: held.message ? 'websocket-message' : held.websocket ? 'websocket-handshake' : net.kind === 'sync' ? 'sync-xhr' : typeOf(r),
+            type: typeOf(r), tags: tagsOf(r), method: held.message ? null : methodOf(held), url: urlOf(held),
+            waitedMs: Date.now() - held.since, page: target, frame: net.frame || r.frame || null,
+            worker: net.worker || (r.key && r.key.includes('/') ? 'dedicated' : null), hop: ev.hop || 0,
+        };
+        if (ev.redirectedFrom)
+            o.redirectedFrom = ev.redirectedFrom;
+        const chainIds = chainOf(r);
+        if (chainIds)
+            o.chain = chainIds;
+        o.actions = held.message || held.websocket ? ['send', 'drop'] : held.via || held.stage === 'request' ? ['send', 'drop', 'respond'] : ['send', 'respond'];
+        if (!full)
+            return o;
+        if (held.message) {
+            const m = held.message;
+            Object.assign(o, { direction: m.direction, seq: m.seq, opcode: m.opcode, size: m.size, encoding: m.encoding, data: m.data });
+            o.changes = ['data', 'opcode'];
+        } else if (held.stage === 'request') {
+            o.headers = held.request.headers || {};
+            const postData = held.request.postData;
+            if (held.body64 !== undefined)
+                Object.assign(o, { body: held.body64, bodyEncoding: 'base64' });
+            else if (postData !== undefined)
+                Object.assign(o, { body: toBase64(postData), bodyEncoding: 'base64' });
+            if (held.bodyFromFiles)
+                o.bodyFromFiles = true;
+            if (ev.protocols)
+                o.protocols = ev.protocols;
+            o.changes = held.websocket ? ['url', 'headers'] : ['url', 'method', 'headers', 'body'];
+        } else {
+            const response = held.response || {};
+            Object.assign(o, { status: response.status, statusText: response.statusText || '', mimeType: response.mimeType || '', headers: response.headers || {} });
+            if (held.body64 !== undefined)
+                Object.assign(o, { body: held.body64, bodyEncoding: 'base64' });
+            else if (held.stage === 'body')
+                o.bodyOmitted = response.bodyOmitted || 'too large';
+            o.changes = ['status', 'headers', 'mime', 'body'];
+            o.bodyReadable = held.stage === 'body';
+        }
+        return o;
+    }
+
+    // the body (or a message's data) of what is paused: "T" text, "B" base64, "E" why not
+    function heldBody(held) {
+        if (held.message)
+            return (held.message.encoding === 'base64' ? 'B' : 'T') + (held.message.data || '');
+        if (held.stage === 'request') {
+            if (held.body64 !== undefined) {
+                const text = bodyText(held.body64, header(held.request.headers, 'content-type'));
+                return text !== null ? 'T' + text : 'B' + held.body64;
+            }
+            if (held.request.postData !== undefined)
+                return 'T' + held.request.postData;
+            return 'E#' + held.n + ' has no body' + (held.bodyFromFiles ? ' to show (read from files as it goes)' : '');
+        }
+        if (held.stage !== 'body')
+            return 'E#' + held.n + ' waits with its status and headers: its body has not come (web intercept on --stage body reads it first)';
+        if (held.body64 === undefined)
+            return 'E#' + held.n + '\'s body is not kept here (' + ((held.response && held.response.bodyOmitted) || 'too large') + ')';
+        const text = bodyText(held.body64, held.response && held.response.mimeType);
+        return text !== null ? 'T' + text : 'B' + held.body64;
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────────────────────
@@ -1212,6 +1995,10 @@
             note += '  (' + response._error + ')';
         if (har._webSocketMessages)
             note += '  (' + (r.frames !== undefined ? r.frames : har._webSocketMessages.length) + ' messages' + (r.done ? '' : ', open') + ')';
+        if (har._serviceWorkerResponse)
+            note += '  (service worker: ' + har._serviceWorkerResponse + ')';
+        else if (r.net && (r.net.worker === 'service' || r.net.worker === 'shared'))
+            note += '  (' + r.net.worker + ' worker)';
         // what the agent made of it (web intercept): a dropped one says so as its error
         const changed = (har._intercepted || []).filter(n => !n.failed && (n.action === 'sent changed' || n.action === 'answered here'));
         if (changed.length)
@@ -1463,7 +2250,7 @@
     }
 
     function interceptedText(n) {
-        let text = n.stage + ' ' + n.action;
+        let text = (n.seq !== undefined ? n.stage + ' message ' + n.seq : n.stage) + ' ' + n.action;
         if (n.changed)
             text += ' (' + n.changed.join(', ') + (n.from && n.changed.includes('url') ? '; it was ' + n.from.method + ' ' + shortened(n.from.url, 150) : '') + ')';
         else if (n.status)
@@ -1493,6 +2280,15 @@
             lines.push('paused ' + (r.paused === 'request' ? 'before it goes' : 'with its response') + ', waiting for the agent (web intercept show ' + r.id + ')');
         if (har._intercepted)
             lines.push('intercepted: ' + har._intercepted.map(interceptedText).join('; '));
+        if (r.net && (r.net.kind !== 'load' || r.net.worker))
+            lines.push('loaded by: ' + whoLoads(r));
+        if (har._fromServiceWorker)
+            lines.push('answered by a service worker' + (har._serviceWorkerResponse ? ': ' + ({ 'cache-storage': 'from its CacheStorage (no network request)',
+                synthesized: 'a response it made itself (no network request)', network: 'what it fetched from the network', 'memory-cache': 'from the memory cache',
+                intercept: 'answered by web intercept' }[har._serviceWorkerResponse] || har._serviceWorkerResponse) : ''));
+        const chainIds = viewing ? null : chainOf(r);
+        if (chainIds)
+            lines.push('redirect chain: ' + chainIds.map(n => '#' + n + (n === r.id ? ' (this)' : '')).join(' -> '));
         if (response.redirectURL)
             lines.push('redirected to: ' + response.redirectURL);
         if (har.serverIPAddress)
@@ -1832,12 +2628,17 @@
             if (!pages.length && o.uri && !o.uri.startsWith('about:'))
                 pages.push({ id: 'page_1', startedDateTime: iso(Date.now() / 1000), title: o.title || o.uri, pageTimings: {}, key: null });
             command('Target.setPauseOnStart', { pauseOnStart: true });
+            recording = true;
+            netConfigure();
         },
         // devtools off: the frontend is gone; what was loading ends unfinished
         stop() {
+            // the inspector sends on what it held as its frontend goes; the network process is told
             for (const held of [...paused.values()])
-                unhold(held.r, 'sent as it was (the developer tools went off)');
+                letGo(held, 'sent as it was (the developer tools went off)', !!held.via);
             intercept = null;
+            recording = false;
+            netConfigure();
             for (const r of [...open.values()]) {
                 if (!r.socket)
                     r.har.response._error = r.har.response._error || 'the recording stopped first';
@@ -1860,6 +2661,7 @@
             intercept = o;
             for (const channel of channels.values())
                 interceptIn(channel);
+            netConfigure();
             return 'T' + interceptStatus();
         },
         // web intercept off: what waits goes as it was
@@ -1867,16 +2669,77 @@
             const was = !!intercept, released = paused.size;
             intercept = null;
             for (const held of [...paused.values()])
-                unhold(held.r, 'sent as it was (web intercept off)');
+                letGo(held, 'sent as it was (web intercept off)', !!held.via);
             for (const channel of channels.values())
                 interceptIn(channel);
+            netConfigure();
             return 'intercept: off' + (was ? '' : ' (it was)') + (released === 1 ? '; the paused request went on as it was'
                 : released ? '; the ' + released + ' paused requests went on as they were' : '') + '\n';
         },
         interceptStatus,
-        // "SERIAL COUNT ON": how many requests paused so far, how many wait now, whether it is on
+        // the network process: connected (and what it holds), for intercept status
+        netStatus() {
+            if (!net.connected)
+                return 'network process: not connected (web intercept holds what the page\'s inspector holds only)\n';
+            const m = net.mask, held = [];
+            if (m & NET.REQUEST)
+                held.push('requests' + (m & NET.PAGE_REQUESTS ? ' (the page\'s own first hops: its inspector)' : ''));
+            if (m & NET.RESPONSE)
+                held.push('responses' + (m & NET.PAGE_RESPONSES ? ' (the page\'s own: its inspector)' : ''));
+            if (m & NET.BODY)
+                held.push('responses with their bodies');
+            if (m & NET.WS_HANDSHAKE)
+                held.push('WebSocket handshakes');
+            if (m & NET.WS_SENT)
+                held.push('messages sent');
+            if (m & NET.WS_RECEIVED)
+                held.push('messages received');
+            return 'network process: connected' + (net.pid ? ' (pid ' + net.pid + ')' : '') + ', holding ' + (held.join(', ') || 'nothing')
+                + (net.acked < net.serial ? ' (settings on their way)' : '') + '\n';
+        },
+        // the network process's lines (browser.c): what it holds, notes, what went away
+        netReceive(line) {
+            netReceive(line);
+        },
+        // a network process connected: the settings it starts with
+        netConnected() {
+            net.connected = true;
+            net.connections++;
+            net.mask = netMask();
+            net.serial++;
+            net.acked = 0;
+            return 'C ' + net.mask + ' ' + net.serial;
+        },
+        netGone() {
+            netGone();
+        },
+        takeNetOutbox() {
+            return netOutbox.splice(0).join('\n');
+        },
+        // "1" once the network process has taken the latest settings (or there is none to take them)
+        netSettled() {
+            return !net.connected || net.acked >= net.serial ? '1' : '0';
+        },
+        // intercept list --json / show N --json: "T" and JSON, "N" and why none
+        pausedJson(which, full) {
+            const list = pausedOf(which || 'all');
+            if (which && which !== 'all' && !list.length)
+                return 'N' + notPaused(which);
+            const items = list.map(held => heldJson(held, full === '1'));
+            return 'T' + JSON.stringify(which && which !== 'all' && full === '1' ? items[items.length - 1] : { protocol: PROTOCOL, paused: items }, null, 1) + '\n';
+        },
+        // intercept body N: "T" text, "B" base64, "E"/"N" why not
+        pausedBody(which) {
+            const found = pausedOf(which);
+            if (!found.length)
+                return 'N' + notPaused(which);
+            return heldBody(found[found.length - 1]);
+        },
+        // "SERIAL COUNT ON BLOCKING": how many requests paused so far, how many wait now, whether it is on,
+        // and how many of them block the page (a synchronous request: its main thread waits)
         pauseState() {
-            return pauseSerial + ' ' + paused.size + ' ' + (intercept ? 1 : 0);
+            const blocking = [...paused.values()].filter(held => held.via && held.r.net && held.r.net.kind === 'sync' && held.stage !== 'send' && held.stage !== 'receive').length;
+            return pauseSerial + ' ' + paused.size + ' ' + (intercept ? 1 : 0) + ' ' + blocking;
         },
         pausedList(lead) {
             return pausedListing(lead);

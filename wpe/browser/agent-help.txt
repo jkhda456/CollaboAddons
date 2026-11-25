@@ -19,6 +19,8 @@ Topics
   network     developer tools: requests, details, bodies, search, HAR files, export as curl...
   intercept   pause the page's requests: show, send changed, drop, answer with a mock
   browsers    several browsers (-n NAME), start options, environment, logs, closing
+  proxy       a browser's requests through a proxy (HTTP, SOCKS; credentials; a TLS-reading
+              proxy's certificate authority)
   errors      exit statuses, error messages and what to do about each
   recipes     whole tasks: log in, search, fill a form, scrape, find and replay an API, mock...
 
@@ -40,7 +42,8 @@ The rules that matter most
   7. Quote every argument with single quotes; give JavaScript with quotes in it through stdin:
      `web run - <<'EOF' ... EOF`.
   8. Exit statuses: 0 done, 1 failed, 2 usage, 3 timed out, 4 not found, 5 no browser,
-     6 requests paused for you (web intercept). Messages go to stderr.
+     6 requests paused for you (web intercept), 7 not supported (web --capabilities). Messages
+     go to stderr.
   9. To search the web, `web search 'WORDS'` (it moves on from an engine that shows a robot check).
      When a page answers with a check (`web open` ends with a `challenge:` line), run
      `web challenge solve` before anything else; a picture puzzle it leaves to you (exit 1).
@@ -492,7 +495,8 @@ next request on; `web reload` shows the current page with it. `web settings` sho
                        `web resize 390x844`). The page's navigator, screen and window and
                        Chrome's Sec-CH-UA headers follow. `default` = safari
   web tz [ZONE | auto | default]   the time zone pages see (Date, Intl): Asia/Seoul, Europe/Berlin;
-                       auto: where the browser's address is (asks ipinfo.io once); default: UTC
+                       auto: where the browser's address is (asks ipinfo.io once, through
+                       the browser's proxy if it has one); default: UTC
   web humanize [on | off]   input as a person gives it (on, the default): the pointer travels to
                        a point inside what it clicks, buttons and keys are held and spaced as a
                        person's (about 0.1 s each, 0.15 s between keys; a long text faster), the
@@ -723,28 +727,50 @@ request outside the browser (`export`, then edit and run the curl), debug a fail
 Without the developer tools, `web network` says: "nothing recorded: the developer tools are
 off" (exit 1). `web --devtools open URL` records from the browser's start.
 
-## intercept: pause the page's requests for approval
+## intercept: pause the browser's requests (and WebSocket messages) for approval
 
 Like an intercepting proxy (Burp's Intercept), inside the browser: HTTPS needs nothing extra.
 Requests the rules take PAUSE before they go (or their responses before the page gets them)
-until you send, drop or answer them. Turns the developer tools on.
+until you send, drop or answer them. Turns the developer tools on. What pauses: the page's
+requests, its frames' and dedicated workers', and also a synchronous XMLHttpRequest, beacons
+(navigator.sendBeacon) and pings, a service or shared worker's own requests, every hop of a
+redirect, WebSocket handshakes, and (--stage send/receive) WebSocket messages each way.
 
   web intercept on [TEXT...] [--regex] [--case] [--type T[,T]] [--method M[,M]]
-                   [--stage request|response|both]     pause what matches (all with no rules)
-  web intercept [status] | off       the rules; off lets all paused ones go unchanged
-  web intercept list                 the paused requests (their numbers are web network's)
-  web intercept show N               what would go: method, address, headers, body
+                   [--stage STAGE[,STAGE]]        pause what matches (all requests with no rules)
+      STAGE: request (default: before it goes; a WebSocket's handshake), response (status and
+      headers, before the page gets them), body (the response WITH its whole body: read it,
+      change it), send / receive (WebSocket messages the page sends / gets); both =
+      request,response; messages = send,receive; all = everything
+      T: document script stylesheet image font fetch xhr beacon ping websocket other, and
+      sync (a synchronous XHR), redirect (a hop after the first), worker, service-worker,
+      shared-worker
+  web intercept [status] | off       the rules (and whether the network process is connected);
+                                     off lets all paused ones go unchanged
+  web intercept list [--json]        what is paused (a request's number is web network's; a
+                                     WebSocket message has its own)
+  web intercept show N [--json]      what would go: method, address, headers, body; who loads it
+                                     (a synchronous XHR, a service worker...); a redirect's chain
+  web intercept body N [FILE]        its body (a request's; a response's at --stage body; a
+                                     message's data); binary ones into FILE
   web intercept send N... [--url U] [--method M] [--header 'NAME: VALUE']... [--unset NAME]...
                    [--body TEXT | --body-file FILE]     let it go, changed so
+      a response: [--status S] [--header ...] [--unset ...] [--mime TYPE] [--body TEXT]
+      a message:  [--body TEXT | --body-file FILE] [--opcode text|binary]
   web intercept drop N... [--error general|access|cancel|timeout]   the page gets a network error
+                                     (a message: it is not delivered)
   web intercept respond N... [--status S] [--header 'NAME: VALUE']... [--mime TYPE]
                    [--body TEXT | --body-file FILE]     answer it yourself; nothing is sent
-  web intercept wait [TIMEOUT]       until a request pauses (30 s; exit 3 if none)
+  web intercept wait [TIMEOUT]       until something pauses (30 s; exit 3 if nothing did)
   N: a number, all, or a part of the address.
+  web --capabilities                 (no browser needed) all of this as JSON, for programs
 
-Exit 6: while a request is paused, commands that wait on the page (open, back, forward,
-reload, click, key, wait, run) stop waiting and list the paused requests with exit 6. Decide
-each (send / drop / respond), then `web wait load` (or `web wait text ...`) to go on.
+Exit 6: while something is paused, commands that wait on the page (open, back, forward,
+reload, click, key, wait, run; eval when a synchronous XHR it makes pauses) stop waiting and
+list what is paused, exit 6. Decide each
+(send / drop / respond), then `web wait load` (or `web wait text ...`) to go on.
+Exit 7: not supported for that one (answering a WebSocket handshake or message; dropping a
+response the page's inspector holds) — the message says what works instead.
 
 Real session (a local test page that loads, then fetches):
 
@@ -777,13 +803,56 @@ Real session (a local test page that loads, then fetches):
   $ web intercept off
   $ web wait load
 
+Beyond the page's own requests (real, tests/site/more.html):
+
+  $ web intercept on api/sync api/any ws2
+  $ web intercept status
+  intercept: on: every request the page makes whose address has "api/sync" or "api/any" or "ws2" (any case) pauses before it goes; 0 paused now
+  network process: connected, holding requests (the page's own first hops: its inspector), WebSocket handshakes
+  $ web eval 'syncXhr("one")'          # a synchronous XHR: the page's main thread waits
+  paused: 1 request paused, waiting for the agent:
+     #  stage         method  type          waited  url
+     1  request       POST    xhr            0.0 s  http://127.0.0.1:8000/api/sync?tag=one  (synchronous)
+  (web intercept show N; send N ...)
+  the script goes on in the page once they are decided; what it returns is lost
+  (exit 6)
+  $ web read                           # anything that needs the page ends at once until then
+  ... the page waits for a synchronous request that is paused (its main thread is stopped): decide it first (web intercept send|drop|respond N)
+  (exit 6; web intercept, network, info keep working)
+  $ web intercept send api/sync --header 'X-Agent: sync-agent' --body 'changed'
+  sent #1 POST http://127.0.0.1:8000/api/sync?tag=one (changed: headers, body)
+  $ web eval 'socket(); 1'; web intercept wait 20      # a WebSocket's opening handshake
+     2  handshake     GET     websocket      0.0 s  ws://127.0.0.1:8000/ws2
+  $ web intercept send ws2 --header 'X-Agent: ws-agent'
+  sent #2 GET ws://127.0.0.1:8000/ws2 (changed: headers)
+  $ web intercept on ws2 --stage messages
+  $ web eval 'ws.send("hi"); 1'; web intercept wait 20
+     3  send 1        -       text           0.0 s  ws://127.0.0.1:8000/ws2  (2 B on WebSocket #2)
+  $ web intercept send ws2 --body changed              # the server gets "changed"
+  sent #3 (sent message 1 of WebSocket #2) on (changed: 7 B)
+  $ web intercept wait 20                              # its answer, before the page gets it
+     4  receive 2     -       text           0.0 s  ws://127.0.0.1:8000/ws2  (12 B on WebSocket #2)
+  $ web intercept show ws2
+  #4 message the page receives (#2 that way) on WebSocket #2 ws://127.0.0.1:8000/ws2
+  paused before it goes on (waiting 0.0 s)   text, 12 B
+  data:
+  echo changed
+  $ web intercept send ws2                             # or drop it: the page never gets it
+  Also: a redirect's next hop pauses after the first went (show: "redirect: hop 1, from ...",
+  "redirect chain: #5 -> #6"); `--stage body` pauses responses with their bodies
+  (`web intercept body N` reads one; `send N --header ...` keeps it, `--body` replaces it).
+
 Notes
-  - At the response stage (--stage response) the body has not arrived: you can replace the
-    whole response (`send N --status S --body TEXT`) but not read or edit its body, and not
-    drop it.
-  - Headers shown at the request stage are the page's; the network adds Cookie, Host,
-    Accept-Encoding after.
-  - Not interceptable: WebSockets, synchronous XHR, sendBeacon, data: URLs, service workers.
+  - --stage response pauses before the body has come: `send N --header ...` (no --body) then
+    reads the body and gives it with the changes; --stage body shows and changes the body.
+    A response held by the page's inspector (the page's own loads at --stage response)
+    cannot be dropped (exit 7): respond with another instead; with --stage body it can.
+  - Headers shown at the request stage are WebKit's; the network adds Cookie, Host,
+    Accept-Encoding (and a WebSocket's Sec-WebSocket-*) after.
+  - A synchronous XHR blocks its page while paused: decide it before anything else on the page.
+  - A service worker's answers are marked in web network: (service worker: cache-storage),
+    synthesized (made by it) or network (what it fetched, which pauses as its own request).
+  - Not interceptable: data:/blob:/file: addresses, CORS preflights.
   - A paused request waits forever: always send/drop/respond it, or `web intercept off`.
 
 ## browsers: several browsers, options, environment, logs
@@ -815,6 +884,7 @@ Browser options go BEFORE the command. A browser this command starts gets them a
 one gets the settings among them and says the others need a new start (`web close` first):
   settings:   --user-agent PROFILE|UA   --header 'NAME: VALUE'   --header-for HOST 'NAME: VALUE'
               --lang LANGUAGES   --timezone ZONE|auto   --humanize on|off   --inject FILE   --devtools
+              --proxy URL|off   --proxy-bypass HOSTS|none|default   --proxy-ca FILE
   start only: --ephemeral (no cookies, storage or history kept)   --ignore-tls-errors
               --size WxH
 
@@ -822,8 +892,80 @@ one gets the settings among them and says the others need a new start (`web clos
 
 Environment of the `web` that starts a browser: WEB_USER_AGENT, WEB_HEADERS (lines NAME: VALUE),
 WEB_LANG, WEB_TIMEZONE (a zone or auto), WEB_HUMANIZE (on, off), WEB_DEVTOOLS (1, or
-text|all|none), WEB_BROWSER_ARGS (more options),
+text|all|none), WEB_PROXY (a URL), WEB_PROXY_BYPASS, WEB_PROXY_CA (FILE[:FILE...]),
+WEB_BROWSER_ARGS (more options),
 WEB_START_TIMEOUT (seconds to wait for the start, 300), WPE_BROWSER_DEBUG=1 (log loads).
+
+## proxy: a browser's requests through a proxy
+
+  web proxy                    where the requests go: straight to the sites (the default), or
+                               through which proxy; the hosts that go straight; the certificate
+                               authorities trusted besides the guest's
+  web proxy URL [--bypass HOSTS|none|default]
+                               through URL from now on: http://HOST:PORT (HOST:PORT alone too),
+                               https://HOST:PORT (TLS to the proxy), socks5://HOST:PORT
+                               (socks5h: the same, the proxy looks names up), socks4a://,
+                               socks4://; USER:PASSWORD@HOST:PORT for one that asks
+                               (percent-encode : @ / in them: %3A %40 %2F)
+  web proxy off                straight to the sites again
+  web proxy bypass HOSTS|none|default
+                               the hosts that go straight, comma-separated: example.com,
+                               *.example.com, 10.0.0.0/8, host:8080; default: localhost,
+                               127.0.0.0/8, ::1 (the sandbox itself); none: every host
+  web proxy ca FILE            trust the certificate authority in FILE (PEM or DER) from the next
+                               connection on: a proxy's that reads HTTPS (Burp, mitmproxy)
+  web proxy ca [clear]         the ones trusted; clear: take them out
+
+Each browser (-n NAME) has its own proxy, and EVERY request of it goes through: pages, frames,
+workers, fetch, WebSockets (ws:// and wss:// in a CONNECT tunnel), downloads, and the question
+`web tz auto` asks. A change applies at once and stops the loads under way: `web reload` after.
+web intercept, web devtools and the rest work as usual through it. Real (the tests' proxy):
+
+  $ web proxy http://127.0.0.1:8100 --bypass none
+  proxy: http://127.0.0.1:8100 (every request of the browser: pages, frames, workers, WebSockets, downloads; web tz auto)
+    straight to the sites: none, every host through the proxy (--bypass HOSTS | none | default)
+  certificate authorities trusted besides the guest's: none (web proxy ca FILE: a TLS-reading proxy's)
+  (from now on: the loads under way were stopped; web reload loads this page the new way)
+  $ web open 'https://127.0.0.1:8443/api/any?px=tls-untrusted'
+  failed to load https://127.0.0.1:8443/api/any?px=tls-untrusted: Unacceptable TLS certificate (checked against this sandbox's clock, 2026-11-21 10:44 UTC); web proxy ca FILE trusts a proxy's or your own certificate authority
+  http://127.0.0.1:8000/more.html
+  More
+  $ web proxy ca /t/certs/ca.der
+  trusted from the next connection on:
+  O=collaboCore wpe tests,CN=Collabo Test Proxy CA
+  certificate authorities trusted besides the guest's (web proxy ca):
+    /t/certs/ca.der: O=collaboCore wpe tests,CN=Collabo Test Proxy CA
+  $ web open 'https://127.0.0.1:8443/api/any?px=tls'
+  https://127.0.0.1:8443/api/any?px=tls
+  $ web proxy 'socks5://agent:pa%3Ass@127.0.0.1:8101' >/dev/null; web proxy
+  proxy: socks5://agent:****@127.0.0.1:8101 (every request of the browser: pages, frames, workers, WebSockets, downloads; web tz auto)
+    straight to the sites: none, every host through the proxy (--bypass HOSTS | none | default)
+  certificate authorities trusted besides the guest's (web proxy ca):
+    /t/certs/ca.der: O=collaboCore wpe tests,CN=Collabo Test Proxy CA
+
+From the start of a browser: options (`web -n p --proxy socks5://HOST:1080 --proxy-bypass none
+open URL`) or WEB_PROXY, WEB_PROXY_BYPASS, WEB_PROXY_CA. Given to a running browser, the options
+apply as `web proxy` (an unchanged proxy is left alone, loads are not stopped).
+
+Pitfalls
+  - The default bypass sends the sandbox's own servers (localhost, 127.x) straight: a proxy outside
+    could not reach them. To see them in the proxy too (a proxy in the sandbox): --bypass none.
+  - A proxy that reads HTTPS (Burp, mitmproxy) makes the TLS connection to the site itself: the
+    site sees that proxy's TLS, not the browser's Safari-like one, so robot checks may trip. A
+    plain HTTP (CONNECT) or SOCKS proxy keeps the browser's own TLS end to end.
+  - Its CA is trusted by this browser only; `curl` and the rest of the sandbox are not changed.
+    Without it every HTTPS page fails with "Unacceptable TLS certificate".
+  - `web network export` commands go straight: add `-x URL` to a curl command for the proxy.
+  - No proxy auto-config (PAC) files; one proxy for every scheme.
+
+Errors (exit 1, the page before stays)
+  the proxy http://127.0.0.1:8101 wants a user and password (407 Proxy Authentication Required): web proxy SCHEME://USER:PASSWORD@HOST:PORT
+  the proxy http://agent:****@127.0.0.1:8101 refused the user and password given (407 Proxy Authentication Required): web proxy SCHEME://USER:PASSWORD@HOST:PORT
+      Give the right ones in the address: web proxy 'http://USER:PASSWORD@HOST:PORT'.
+  failed to load http://127.0.0.1:8000/api/any?px=down: Could not connect to proxy server 127.0.0.1: Connection refused (through the proxy http://127.0.0.1:8199: web proxy)
+      The proxy is not there (address, port, is it running?): fix it, or web proxy off.
+  a proxy is http://, https://, socks5:// (socks5h://), socks4://, socks4a:// or socks:// (any of the SOCKS ones), not ftp:// (exit 2)
+  give the proxy's port: http://127.0.0.1:PORT (exit 2)
 
 ## errors: exit statuses and what to do
 
@@ -834,6 +976,9 @@ WEB_START_TIMEOUT (seconds to wait for the start, 300), WPE_BROWSER_DEBUG=1 (log
   4  not found: no element for a TARGET, no option, no request or match, no cookie
   5  no browser: it could not start (is the wpe add-on on?) or went away
   6  requests are paused for you (web intercept): decide them, then web wait load
+  7  not supported: web intercept was asked for what it cannot do with that one (answer a
+     WebSocket handshake or message, drop a response the page's inspector holds); the message
+     says what to do instead; web --capabilities lists what is supported
 
 Messages and what to do
   nothing matches "X" (exit 4)
@@ -854,6 +999,11 @@ Messages and what to do
         Example Domain
       A browser started with --ignore-tls-errors skips the check: web close, then
       `web --ignore-tls-errors open URL` (only for reading; do not send secrets that way).
+  failed to load URL: Unacceptable TLS certificate (...); web proxy ca FILE trusts ...
+      Also a proxy that reads HTTPS, or a server with its own certificate authority: trust that
+      authority with `web proxy ca FILE` (see web --agent-help proxy).
+  the proxy ... wants a user and password / refused the user and password given (407)
+      web proxy 'http://USER:PASSWORD@HOST:PORT' (see web --agent-help proxy).
   JavaScript error: ... (exit 1)
       Fix the script; `Unsupported result type`: eval returned a Promise or a DOM object (use
       run, return plain data).

@@ -60,6 +60,7 @@ compile "$A/browser/browser.c" "$OUT/browser.o" "$CC" -std=gnu11
 compile "$A/browser/extension.c" "$OUT/extension.o" "$CC" -std=gnu11
 compile "$A/browser/human.c" "$OUT/human.o" "$CC" -std=gnu11
 compile "$A/browser/tls.c" "$OUT/tls.o" "$CC" -std=gnu11
+compile "$A/browser/netintercept.c" "$OUT/netintercept.o" "$CC" -std=gnu11
 compile "$A/browser/main.cpp" "$OUT/main.o" "$CXX" -std=c++20 -fno-exceptions -fno-rtti
 
 # What CMake links WPEWebProcess with: the library and its dependencies, plus the WebKit objects

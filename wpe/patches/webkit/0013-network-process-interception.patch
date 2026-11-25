@@ -1,0 +1,1246 @@
+diff --git a/Source/WebKit/NetworkProcess/CollaboNetIntercept.h b/Source/WebKit/NetworkProcess/CollaboNetIntercept.h
+new file mode 100644
+index 00000000..411f2fa3
+--- /dev/null
++++ b/Source/WebKit/NetworkProcess/CollaboNetIntercept.h
+@@ -0,0 +1,196 @@
++/*
++ * The network process's side of the browser's interception (the wpe add-on: `web intercept`).
++ *
++ * What the network process sends, receives and gives the page can be held here until the browser
++ * (the UI process) decides it: each HTTP request as it is about to go (every hop of a redirect,
++ * synchronous loads, pings and beacons, the requests of service and shared workers), each response
++ * before the page gets it (also with its whole body, to read and change), a WebSocket's handshake
++ * and its messages each way. The program links in the functions below (browser/netintercept.c: a
++ * socket to the browser); without them nothing is held. All of it runs on the main run loop.
++ *
++ *   collabo_net_wants()          what the browser wants held now (the bits of CollaboNet::Want)
++ *   collabo_net_hold(E, F, C)    E (a JSON object) goes to the browser; F(C, decision) is called
++ *                                once with its decision (a JSON object), or with null when the
++ *                                browser is gone (go on as it was). 0: not held (go on at once).
++ *   collabo_net_forget(ID)       what was held went away first (canceled): F is not called, its C
++ *                                is given back
++ *   collabo_net_note(E)          tells the browser something (recorded, nothing held)
++ */
++#pragma once
++
++#include "NetworkResourceLoadParameters.h"
++#include <WebCore/FetchOptionsDestination.h>
++#include <WebCore/FormData.h>
++#include <WebCore/HTTPHeaderMap.h>
++#include <wtf/Function.h>
++#include <wtf/JSONValues.h>
++#include <wtf/text/Base64.h>
++#include <wtf/text/WTFString.h>
++
++extern "C" {
++__attribute__((weak)) unsigned collabo_net_wants(void);
++__attribute__((weak)) unsigned long long collabo_net_hold(const char* event, void (*decided)(void* context, const char* decision), void* context);
++__attribute__((weak)) void* collabo_net_forget(unsigned long long id);
++__attribute__((weak)) void collabo_net_note(const char* event);
++}
++
++namespace WebKit::CollaboNet {
++
++enum Want : unsigned {
++    Request = 1 << 0,                // an HTTP request before it goes
++    Response = 1 << 1,               // a response before the page gets it
++    ResponseBody = 1 << 2,           // the same, with its body read first
++    WebSocketHandshake = 1 << 3,     // a WebSocket's opening handshake
++    WebSocketSent = 1 << 4,          // a WebSocket's messages the page sends
++    WebSocketReceived = 1 << 5,      // and those it receives
++    PageRequestsByInspector = 1 << 6, // the page processes' own loads (first hop) are held by the inspector
++    PageResponsesByInspector = 1 << 7,
++};
++
++inline unsigned wants()
++{
++    return collabo_net_wants ? collabo_net_wants() : 0;
++}
++
++using Decided = Function<void(RefPtr<JSON::Object>&&)>;
++
++inline void decidedTrampoline(void* context, const char* decision)
++{
++    std::unique_ptr<Decided> decided(static_cast<Decided*>(context));
++    RefPtr<JSON::Object> object;
++    if (decision) {
++        if (auto value = JSON::Value::parseJSON(String::fromUTF8(decision)))
++            object = value->asObject();
++        if (!object)
++            object = JSON::Object::create();
++    }
++    (*decided)(WTF::move(object));
++}
++
++// 0: not held (no browser to ask): go on
++inline uint64_t hold(Ref<JSON::Object>&& event, Decided&& decided)
++{
++    if (!collabo_net_hold)
++        return 0;
++    auto* context = new Decided(WTF::move(decided));
++    uint64_t id = collabo_net_hold(event->toJSONString().utf8().data(), decidedTrampoline, context);
++    if (!id)
++        delete context;
++    return id;
++}
++
++inline void forget(uint64_t& id)
++{
++    if (!id)
++        return;
++    uint64_t was = std::exchange(id, 0);
++    if (collabo_net_forget)
++        delete static_cast<Decided*>(collabo_net_forget(was));
++}
++
++inline void note(Ref<JSON::Object>&& event)
++{
++    if (collabo_net_note && wants())
++        collabo_net_note(event->toJSONString().utf8().data());
++}
++
++inline String number(uint64_t n)
++{
++    return String::number(n);
++}
++
++inline ASCIILiteral destinationName(WebCore::FetchOptionsDestination destination)
++{
++    static constexpr ASCIILiteral names[] = {
++        ""_s, "audio"_s, "audioworklet"_s, "document"_s, "embed"_s, "environmentmap"_s, "font"_s, "iframe"_s, "image"_s,
++        "json"_s, "manifest"_s, "model"_s, "object"_s, "paintworklet"_s, "report"_s, "script"_s, "serviceworker"_s,
++        "sharedworker"_s, "speculationrules"_s, "style"_s, "track"_s, "video"_s, "worker"_s, "xslt"_s,
++    };
++    auto index = static_cast<unsigned>(destination);
++    return index < std::size(names) ? names[index] : ""_s;
++}
++
++inline Ref<JSON::Object> headersObject(const WebCore::HTTPHeaderMap& headers)
++{
++    auto object = JSON::Object::create();
++    for (auto& header : headers)
++        object->setString(header.key, header.value);
++    return object;
++}
++
++// a body made of bytes only (not of files or blobs) as base64; null otherwise
++inline String bodyBase64(const WebCore::FormData* body, bool& fromFiles)
++{
++    fromFiles = false;
++    if (!body || body->isEmpty())
++        return { };
++    for (auto& element : body->elements()) {
++        if (!std::holds_alternative<Vector<uint8_t>>(element.data)) {
++            fromFiles = true;
++            return { };
++        }
++    }
++    return base64EncodeToString(body->flatten().span());
++}
++
++// a header map's lines from a decision's "headers" (an object of strings)
++inline WebCore::HTTPHeaderMap headerMap(const JSON::Object& headers)
++{
++    WebCore::HTTPHeaderMap map;
++    for (auto& entry : headers) {
++        String value;
++        if (entry.value->asString(value))
++            map.set(entry.key, value);
++    }
++    return map;
++}
++
++inline std::optional<Vector<uint8_t>> bytes(const JSON::Object& decision, const String& name)
++{
++    String text;
++    if (!decision.getString(name, text))
++        return std::nullopt;
++    return base64Decode(text);
++}
++
++// who loads a resource, for the browser: kind (load, sync, ping, preflight...), the page and
++// frame, the resource's identifier (the page's inspector names its request "0.<resource>"), the
++// worker (a service or shared worker's own process), the destination (document, script...)
++inline String context(ASCIILiteral kind, const NetworkResourceLoadParameters& parameters)
++{
++    auto object = JSON::Object::create();
++    object->setString("kind"_s, kind);
++    object->setString("page"_s, number(parameters.webPageID.toUInt64()));
++    object->setString("frame"_s, number(parameters.webFrameID.toUInt64()));
++    if (parameters.parentFrameID)
++        object->setString("parentFrame"_s, number(parameters.parentFrameID->toUInt64()));
++    if (parameters.identifier)
++        object->setString("resource"_s, number(parameters.identifier->toUInt64()));
++    object->setString("destination"_s, destinationName(parameters.options.destination));
++    if (parameters.options.keepAlive)
++        object->setBoolean("keepalive"_s, true);
++    if (parameters.isMainFrameNavigation)
++        object->setBoolean("mainFrame"_s, true);
++    if (parameters.isInitiatedByDedicatedWorker)
++        object->setString("worker"_s, "dedicated"_s);
++    WTF::switchOn(parameters.workerIdentifier,
++        [](const std::monostate&) { },
++        [&](const WebCore::SharedWorkerIdentifier& identifier) {
++            object->setString("worker"_s, "shared"_s);
++            object->setString("workerId"_s, number(identifier.toUInt64()));
++        },
++        [&](const WebCore::ServiceWorkerIdentifier& identifier) {
++            object->setString("worker"_s, "service"_s);
++            object->setString("workerId"_s, number(identifier.toUInt64()));
++        });
++    if (parameters.serviceWorkersMode != WebCore::ServiceWorkersMode::None && parameters.serviceWorkerRegistrationIdentifier)
++        object->setBoolean("serviceWorkerControlled"_s, true);
++    return object->toJSONString();
++}
++
++inline bool fromServiceOrSharedWorker(const NetworkResourceLoadParameters& parameters)
++{
++    return !std::holds_alternative<std::monostate>(parameters.workerIdentifier);
++}
++
++} // namespace WebKit::CollaboNet
+diff --git a/Source/WebKit/NetworkProcess/NetworkCORSPreflightChecker.cpp b/Source/WebKit/NetworkProcess/NetworkCORSPreflightChecker.cpp
+index 84f0564d..0705daae 100644
+--- a/Source/WebKit/NetworkProcess/NetworkCORSPreflightChecker.cpp
++++ b/Source/WebKit/NetworkProcess/NetworkCORSPreflightChecker.cpp
+@@ -80,6 +80,7 @@ void NetworkCORSPreflightChecker::startPreflight()
+         m_loadInformation = NetworkTransactionInformation { NetworkTransactionInformation::Type::Preflight, loadParameters.request, { }, { } };
+ 
+     loadParameters.webPageProxyID = m_parameters.webPageProxyID;
++    loadParameters.collaboContext = "{\"kind\":\"preflight\"}"_s; // the wpe add-on's interception: never held
+     loadParameters.allowPrivacyProxy = m_parameters.allowPrivacyProxy;
+ 
+     if (CheckedPtr networkSession = m_networkProcess->networkSession(m_parameters.sessionID)) {
+diff --git a/Source/WebKit/NetworkProcess/NetworkLoadParameters.h b/Source/WebKit/NetworkProcess/NetworkLoadParameters.h
+index 845364c7..cc05d320 100644
+--- a/Source/WebKit/NetworkProcess/NetworkLoadParameters.h
++++ b/Source/WebKit/NetworkProcess/NetworkLoadParameters.h
+@@ -72,6 +72,14 @@ struct NetworkLoadParameters {
+     // the WebProcess). We should block storage access cookies on this load's network requests without
+     // revoking the frame's storage from JS until the navigation load commits.
+     bool navigationLosesFrameSpecificStorageAccess { false };
++
++    // the wpe add-on's interception (CollaboNetIntercept.h): who loads this, a JSON object's text
++    // (kind, page, frame, worker, the resource's identifier, its destination)
++    String collaboContext { };
++    // a page process's own load: the page's inspector holds its first hop already
++    bool collaboByInspector { false };
++    // what the inspector does not see (a service or shared worker's process): told to the browser
++    bool collaboRecord { false };
+ };
+ 
+ } // namespace WebKit
+diff --git a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
+index 2075c77b..6d6a6134 100644
+--- a/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
++++ b/Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
+@@ -27,6 +27,7 @@
+ #include "NetworkResourceLoader.h"
+ 
+ #include "ArgumentCoders.h"
++#include "CollaboNetIntercept.h"
+ #include "EarlyHintsResourceLoader.h"
+ #include "FormDataReference.h"
+ #include "LoadedWebArchive.h"
+@@ -426,6 +427,11 @@ void NetworkResourceLoader::startNetworkLoad(ResourceRequest&& request, FirstLoa
+ 
+     NetworkLoadParameters parameters = m_parameters.networkLoadParameters();
+     parameters.networkActivityTracker = m_networkActivityTracker;
++    // the wpe add-on's interception: a synchronous load is not the inspector's (it holds a page
++    // process's scheduled loads), nor what a service or shared worker's process loads
++    parameters.collaboContext = CollaboNet::context(isSynchronous() ? "sync"_s : "load"_s, m_parameters);
++    parameters.collaboByInspector = !isSynchronous() && !CollaboNet::fromServiceOrSharedWorker(m_parameters);
++    parameters.collaboRecord = CollaboNet::fromServiceOrSharedWorker(m_parameters);
+     if (parameters.storedCredentialsPolicy == WebCore::StoredCredentialsPolicy::Use && m_networkLoadChecker)
+         parameters.storedCredentialsPolicy = m_networkLoadChecker->storedCredentialsPolicy();
+ 
+diff --git a/Source/WebKit/NetworkProcess/PingLoad.cpp b/Source/WebKit/NetworkProcess/PingLoad.cpp
+index d9a8958b..76fc4c08 100644
+--- a/Source/WebKit/NetworkProcess/PingLoad.cpp
++++ b/Source/WebKit/NetworkProcess/PingLoad.cpp
+@@ -28,6 +28,7 @@
+ 
+ #include "AuthenticationChallengeDisposition.h"
+ #include "AuthenticationManager.h"
++#include "CollaboNetIntercept.h"
+ #include "Logging.h"
+ #include "NetworkConnectionToWebProcess.h"
+ #include "NetworkLoadChecker.h"
+@@ -124,6 +125,8 @@ void PingLoad::loadRequest(NetworkProcess& networkProcess, ResourceRequest&& req
+     if (CheckedPtr networkSession = networkProcess.networkSession(m_sessionID)) {
+         auto loadParameters = m_parameters.networkLoadParameters();
+         loadParameters.request = WTF::move(request);
++        // the wpe add-on's interception: a beacon, a hyperlink's ping, a report
++        loadParameters.collaboContext = CollaboNet::context("ping"_s, m_parameters);
+         Ref task = NetworkDataTask::create(*networkSession, *this, WTF::move(loadParameters));
+         m_task = task.copyRef();
+         task->resume();
+diff --git a/Source/WebKit/NetworkProcess/ServiceWorker/ServiceWorkerFetchTask.cpp b/Source/WebKit/NetworkProcess/ServiceWorker/ServiceWorkerFetchTask.cpp
+index 0ce20d0a..d766443c 100644
+--- a/Source/WebKit/NetworkProcess/ServiceWorker/ServiceWorkerFetchTask.cpp
++++ b/Source/WebKit/NetworkProcess/ServiceWorker/ServiceWorkerFetchTask.cpp
+@@ -26,6 +26,7 @@
+ #include "config.h"
+ #include "ServiceWorkerFetchTask.h"
+ 
++#include "CollaboNetIntercept.h"
+ #include "Connection.h"
+ #include "FormDataReference.h"
+ #include "Logging.h"
+@@ -273,6 +274,27 @@ void ServiceWorkerFetchTask::didReceiveResponse(WebCore::ResourceResponse&& resp
+     if (m_preloader && !m_preloader->isServiceWorkerNavigationPreloadEnabled())
+         cancelPreloadIfNecessary();
+ 
++    // the wpe add-on's interception: where the worker's answer came from, before it is marked the
++    // worker's (the page's inspector sees "service-worker" only)
++    if (CollaboNet::wants()) {
++        auto event = JSON::Object::create();
++        event->setString("type"_s, "worker-response"_s);
++        if (auto* loader = m_loader.get()) {
++            if (RefPtr context = JSON::Value::parseJSON(CollaboNet::context("load"_s, loader->parameters())))
++                event->setValue("context"_s, context.releaseNonNull());
++        }
++        event->setString("url"_s, response.url().string());
++        event->setInteger("status"_s, response.httpStatusCode());
++        event->setString("mimeType"_s, response.mimeType());
++        auto source = response.source();
++        event->setString("source"_s, source == ResourceResponse::Source::DOMCache ? "cache-storage"_s
++            : source == ResourceResponse::Source::Network || source == ResourceResponse::Source::DiskCache || source == ResourceResponse::Source::DiskCacheAfterValidation ? "network"_s
++            : source == ResourceResponse::Source::MemoryCache || source == ResourceResponse::Source::MemoryCacheAfterValidation ? "memory-cache"_s
++            : source == ResourceResponse::Source::ServiceWorker ? "service-worker"_s
++            : source == ResourceResponse::Source::InspectorOverride ? "intercept"_s : "synthesized"_s);
++        CollaboNet::note(WTF::move(event));
++    }
++
+     if (auto* loader = m_loader.get())
+         loader->setWorkerFinalRouterSource(RouterSourceEnum::FetchEvent);
+ 
+diff --git a/Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.cpp b/Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.cpp
+index ca86b7c6..bd117b15 100644
+--- a/Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.cpp
++++ b/Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.cpp
+@@ -28,6 +28,7 @@
+ 
+ #include "AuthenticationChallengeDisposition.h"
+ #include "AuthenticationManager.h"
++#include "CollaboNetIntercept.h"
+ #include "Download.h"
+ #include "NetworkLoad.h"
+ #include "NetworkProcess.h"
+@@ -64,7 +65,13 @@ NetworkDataTaskSoup::NetworkDataTaskSoup(NetworkSession& session, NetworkDataTas
+     , m_shouldPreconnectOnly(parameters.shouldPreconnectOnly)
+     , m_sourceOrigin(parameters.sourceOrigin)
+     , m_timeoutSource(RunLoop::mainSingleton(), "NetworkDataTaskSoup::TimeoutSource"_s, this, &NetworkDataTaskSoup::timeoutFired)
++    , m_collaboContext(parameters.collaboContext)
++    , m_collaboByInspector(parameters.collaboByInspector)
++    , m_collaboRecord(parameters.collaboRecord)
+ {
++    static uint64_t collaboTasks;
++    m_collaboTask = ++collaboTasks;
++    m_collaboPreflight = m_collaboContext.contains("\"preflight\""_s);
+     auto request = parameters.request;
+     if (request.url().protocolIsInHTTPFamily()) {
+         auto url = request.url();
+@@ -85,6 +92,7 @@ NetworkDataTaskSoup::NetworkDataTaskSoup(NetworkSession& session, NetworkDataTas
+ 
+ NetworkDataTaskSoup::~NetworkDataTaskSoup()
+ {
++    CollaboNet::forget(m_collaboHold);
+     clearRequest();
+ }
+ 
+@@ -250,23 +258,10 @@ void NetworkDataTaskSoup::resume()
+ 
+     RefPtr<NetworkDataTaskSoup> protectedThis(this);
+     if (m_soupMessage && !m_cancellable) {
+-        m_cancellable = adoptGRef(g_cancellable_new());
+-        if (m_shouldPreconnectOnly == PreconnectOnly::Yes) {
+-            soup_session_preconnect_async(static_cast<NetworkSessionSoup&>(*m_session).soupSession(), m_soupMessage.get(), RunLoopSourcePriority::AsyncIONetwork, m_cancellable.get(),
+-                reinterpret_cast<GAsyncReadyCallback>(preconnectCallback), protectedThis.leakRef());
+-        } else {
+-            // We need to protect cancellable here, because soup_session_send_async uses it after emitting SoupSession::request-queued, and we
+-            // might cancel the operation in a feature callback emitted on request-queued, for example hsts-enforced.
+-            GRefPtr<GCancellable> protectCancellable(m_cancellable);
+-            soup_session_send_async(static_cast<NetworkSessionSoup&>(*m_session).soupSession(), m_soupMessage.get(), RunLoopSourcePriority::AsyncIONetwork, m_cancellable.get(),
+-                reinterpret_cast<GAsyncReadyCallback>(sendRequestCallback), new SendRequestData({ m_soupMessage, WTF::move(protectedThis) }));
+-            if (!g_cancellable_is_cancelled(protectCancellable.get()) && !m_networkLoadMetrics.fetchStart) {
+-                auto* metrics = soup_message_get_metrics(m_soupMessage.get());
+-                m_networkLoadMetrics.fetchStart = MonotonicTime::fromRawSeconds(Seconds::fromMicroseconds(soup_message_metrics_get_fetch_start(metrics)).seconds());
+-                if (!m_networkLoadMetrics.redirectStart)
+-                    m_networkLoadMetrics.redirectStart = m_networkLoadMetrics.fetchStart;
+-            }
+-        }
++        // the wpe add-on's interception: it goes once the browser has decided
++        if (m_shouldPreconnectOnly == PreconnectOnly::No && collaboHoldRequest())
++            return;
++        sendRequest();
+         return;
+     }
+ 
+@@ -297,8 +292,38 @@ void NetworkDataTaskSoup::resume()
+     }
+ }
+ 
++void NetworkDataTaskSoup::sendRequest()
++{
++    RefPtr<NetworkDataTaskSoup> protectedThis(this);
++    m_cancellable = adoptGRef(g_cancellable_new());
++    if (m_shouldPreconnectOnly == PreconnectOnly::Yes) {
++        soup_session_preconnect_async(static_cast<NetworkSessionSoup&>(*m_session).soupSession(), m_soupMessage.get(), RunLoopSourcePriority::AsyncIONetwork, m_cancellable.get(),
++            reinterpret_cast<GAsyncReadyCallback>(preconnectCallback), protectedThis.leakRef());
++    } else {
++        // We need to protect cancellable here, because soup_session_send_async uses it after emitting SoupSession::request-queued, and we
++        // might cancel the operation in a feature callback emitted on request-queued, for example hsts-enforced.
++        GRefPtr<GCancellable> protectCancellable(m_cancellable);
++        soup_session_send_async(static_cast<NetworkSessionSoup&>(*m_session).soupSession(), m_soupMessage.get(), RunLoopSourcePriority::AsyncIONetwork, m_cancellable.get(),
++            reinterpret_cast<GAsyncReadyCallback>(sendRequestCallback), new SendRequestData({ m_soupMessage, WTF::move(protectedThis) }));
++        if (!g_cancellable_is_cancelled(protectCancellable.get()) && !m_networkLoadMetrics.fetchStart) {
++            auto* metrics = soup_message_get_metrics(m_soupMessage.get());
++            m_networkLoadMetrics.fetchStart = MonotonicTime::fromRawSeconds(Seconds::fromMicroseconds(soup_message_metrics_get_fetch_start(metrics)).seconds());
++            if (!m_networkLoadMetrics.redirectStart)
++                m_networkLoadMetrics.redirectStart = m_networkLoadMetrics.fetchStart;
++        }
++    }
++    if (m_collaboRecord && m_shouldPreconnectOnly == PreconnectOnly::No) {
++        auto event = collaboEvent("sent"_s);
++        event->setString("method"_s, m_currentRequest.httpMethod());
++        event->setString("url"_s, m_currentRequest.url().string());
++        event->setObject("headers"_s, CollaboNet::headersObject(m_currentRequest.httpHeaderFields()));
++        CollaboNet::note(WTF::move(event));
++    }
++}
++
+ void NetworkDataTaskSoup::cancel()
+ {
++    CollaboNet::forget(m_collaboHold);
+     if (m_state == State::Canceling || m_state == State::Completed)
+         return;
+ 
+@@ -441,6 +466,15 @@ void NetworkDataTaskSoup::dispatchDidReceiveResponse()
+ {
+     ASSERT(!m_response.isNull());
+ 
++    // the wpe add-on's interception: the client gets it once the browser has decided
++    if (collaboHoldResponse())
++        return;
++    if (m_collaboRecord) {
++        auto event = collaboEvent("received"_s);
++        collaboAddResponse(event.get());
++        CollaboNet::note(WTF::move(event));
++    }
++
+     // FIXME: This cannot be eliminated until other code no longer relies on ResourceResponse's NetworkLoadMetrics.
+     m_response.setDeprecatedNetworkLoadMetrics(Box<NetworkLoadMetrics>::create(m_networkLoadMetrics));
+ 
+@@ -917,6 +951,7 @@ void NetworkDataTaskSoup::read()
+ 
+ void NetworkDataTaskSoup::didRead(gssize bytesRead)
+ {
++    m_collaboBytes += bytesRead;
+     m_readBuffer.shrink(bytesRead);
+     if (m_downloadOutputStream) {
+         ASSERT(isDownload());
+@@ -945,6 +980,7 @@ void NetworkDataTaskSoup::didFinishRead()
+ 
+     clearRequest();
+     ASSERT(m_client);
++    collaboNoteDone({ });
+     dispatchDidCompleteWithError({ });
+ }
+ 
+@@ -1345,6 +1381,7 @@ void NetworkDataTaskSoup::didFail(const ResourceError& error)
+ 
+     clearRequest();
+     ASSERT(m_client);
++    collaboNoteDone(error);
+     dispatchDidCompleteWithError(error);
+ }
+ 
+@@ -1531,5 +1568,330 @@ void NetworkDataTaskSoup::didReadFile(GRefPtr<GInputStream>&& inputStream)
+     dispatchDidReceiveResponse();
+ }
+ 
++// ── the wpe add-on's interception (CollaboNetIntercept.h) ────────────────────────────────────
++// A request waits before it goes (each hop of a redirect: m_currentRequest's redirect count), a
++// response before the client gets it, until the browser decides: go on (changed, for a request:
++// its address, method, headers, body), fail, or answer in its place (a response of the browser's,
++// read from memory). The page processes' own first hops are the inspector's (held in the page).
++
++static constexpr size_t collaboMaxBody = 32 * 1024 * 1024;
++
++Ref<JSON::Object> NetworkDataTaskSoup::collaboEvent(ASCIILiteral type)
++{
++    auto event = JSON::Object::create();
++    event->setString("type"_s, type);
++    event->setString("task"_s, CollaboNet::number(m_collaboTask));
++    event->setInteger("hop"_s, m_currentRequest.redirectCount());
++    if (RefPtr context = JSON::Value::parseJSON(m_collaboContext))
++        event->setValue("context"_s, context.releaseNonNull());
++    if (m_collaboByInspector)
++        event->setBoolean("byInspector"_s, true);
++    if (isTopLevelNavigation())
++        event->setBoolean("topLevel"_s, true);
++    return event;
++}
++
++void NetworkDataTaskSoup::collaboAddResponse(JSON::Object& event)
++{
++    event.setString("url"_s, m_response.url().string());
++    event.setInteger("status"_s, m_response.httpStatusCode());
++    event.setString("statusText"_s, m_response.httpStatusText());
++    event.setString("mimeType"_s, m_response.mimeType());
++    event.setString("httpVersion"_s, m_response.httpVersion());
++    event.setDouble("expectedLength"_s, m_response.expectedContentLength());
++    event.setObject("headers"_s, CollaboNet::headersObject(m_response.httpHeaderFields()));
++}
++
++bool NetworkDataTaskSoup::collaboHoldRequest()
++{
++    unsigned wants = CollaboNet::wants();
++    if (!(wants & CollaboNet::Request) || m_collaboPreflight)
++        return false;
++    unsigned hop = m_currentRequest.redirectCount();
++    if (!hop && m_collaboByInspector && (wants & CollaboNet::PageRequestsByInspector))
++        return false;
++
++    auto event = collaboEvent("request"_s);
++    event->setString("method"_s, String::fromUTF8(soup_message_get_method(m_soupMessage.get())));
++    event->setString("url"_s, m_currentRequest.url().string());
++    auto headers = m_currentRequest.httpHeaderFields();
++    if (!headers.contains(HTTPHeaderName::Accept))
++        headers.set(HTTPHeaderName::Accept, "*/*"_s);
++    event->setObject("headers"_s, CollaboNet::headersObject(headers));
++    bool fromFiles = false;
++    String body = CollaboNet::bodyBase64(m_currentRequest.httpBody(), fromFiles);
++    if (!body.isNull())
++        event->setString("body"_s, body);
++    if (fromFiles)
++        event->setBoolean("bodyFromFiles"_s, true);
++    if (hop && !m_response.isNull()) {
++        // the hop before: the redirect that brought it here
++        event->setString("redirectedFrom"_s, m_response.url().string());
++        event->setInteger("redirectStatus"_s, m_response.httpStatusCode());
++    }
++
++    stopTimeout();
++    m_collaboHold = CollaboNet::hold(WTF::move(event), [this](RefPtr<JSON::Object>&& decision) {
++        m_collaboHold = 0;
++        collaboRequestDecided(WTF::move(decision));
++    });
++    if (!m_collaboHold) {
++        startTimeout();
++        return false;
++    }
++    return true;
++}
++
++void NetworkDataTaskSoup::collaboRequestDecided(RefPtr<JSON::Object>&& decision)
++{
++    Ref protectedThis { *this };
++    if (m_state == State::Canceling || m_state == State::Completed || !m_client) {
++        clearRequest();
++        return;
++    }
++    String action = decision ? decision->getString("action"_s) : String();
++    if (action == "fail"_s) {
++        collaboFail(*decision);
++        return;
++    }
++    if (action == "respond"_s) {
++        collaboRespond(*decision, false);
++        return;
++    }
++    if (decision) {
++        ResourceRequest request = m_currentRequest;
++        bool changed = false;
++        String url = decision->getString("url"_s);
++        if (!url.isEmpty()) {
++            request.setURL(URL { url });
++            changed = true;
++        }
++        String method = decision->getString("method"_s);
++        if (!method.isEmpty()) {
++            request.setHTTPMethod(method);
++            changed = true;
++        }
++        if (RefPtr headers = decision->getObject("headers"_s)) {
++            request.setHTTPHeaderFields(CollaboNet::headerMap(*headers));
++            changed = true;
++        }
++        if (auto body = CollaboNet::bytes(*decision, "body"_s)) {
++            request.setHTTPBody(body->isEmpty() ? nullptr : RefPtr { FormData::create(body->span()) });
++            changed = true;
++        }
++        if (changed) {
++            // a new message for what goes now (nothing was sent of the old one)
++            if (m_soupMessage)
++                g_signal_handlers_disconnect_matched(m_soupMessage.get(), G_SIGNAL_MATCH_DATA, 0, 0, nullptr, nullptr, this);
++            m_soupMessage = nullptr;
++            createRequest(WTF::move(request), m_isBlockingCookies ? WasBlockingCookies::Yes : WasBlockingCookies::No);
++            if (!m_soupMessage)
++                return; // not an address that can be loaded: createRequest failed it
++        }
++    }
++    startTimeout();
++    sendRequest();
++}
++
++void NetworkDataTaskSoup::collaboFail(const JSON::Object& decision)
++{
++    String type = decision.getString("error"_s);
++    auto errorType = type == "AccessControl"_s ? ResourceError::Type::AccessControl
++        : type == "Cancellation"_s ? ResourceError::Type::Cancellation
++        : type == "Timeout"_s ? ResourceError::Type::Timeout : ResourceError::Type::General;
++    didFail(ResourceError(errorDomainWebKitInternal, 0, m_currentRequest.url(), "Blocked by web intercept"_s, errorType));
++}
++
++// a response of the browser's: before anything was sent (request stage) or in the place of the
++// one that came; its body from memory
++void NetworkDataTaskSoup::collaboRespond(const JSON::Object& decision, bool inPlaceOfResponse)
++{
++    auto body = CollaboNet::bytes(decision, "body"_s).value_or(Vector<uint8_t> { });
++    int status = decision.getInteger("status"_s).value_or(200);
++    String mimeType = decision.getString("mimeType"_s);
++    RefPtr headers = decision.getObject("headers"_s);
++    String contentType = headers ? headers->getString("Content-Type"_s) : String();
++    if (headers && contentType.isNull()) {
++        for (auto& entry : *headers) {
++            if (equalLettersIgnoringASCIICase(entry.key, "content-type"_s))
++                entry.value->asString(contentType);
++        }
++    }
++    if (mimeType.isEmpty())
++        mimeType = extractMIMETypeFromMediaType(contentType);
++    if (mimeType.isEmpty())
++        mimeType = "text/plain"_s;
++    // text without a charset is UTF-8 here (what the browser makes a body of)
++    String charset = extractCharsetFromMediaType(contentType).toString();
++    if (charset.isEmpty() && (mimeType.startsWith("text/"_s) || MIMETypeRegistry::isSupportedJSONMIMEType(mimeType) || mimeType.endsWith("+xml"_s) || mimeType == "image/svg+xml"_s))
++        charset = "UTF-8"_s;
++
++    ResourceResponse response(URL { m_currentRequest.url() }, String { mimeType }, body.size(), String { charset });
++    response.setHTTPStatusCode(status);
++    response.setHTTPStatusText(decision.getString("statusText"_s));
++    response.setHTTPVersion(inPlaceOfResponse && !m_response.httpVersion().isEmpty() ? String { m_response.httpVersion() } : String { "HTTP/1.1"_s });
++    // its headers, less what no longer holds for the body as it is given: an encoding, a length
++    HTTPHeaderMap headerMap = headers ? CollaboNet::headerMap(*headers) : HTTPHeaderMap { };
++    headerMap.remove(HTTPHeaderName::ContentEncoding);
++    headerMap.remove(HTTPHeaderName::TransferEncoding);
++    headerMap.set(HTTPHeaderName::ContentLength, String::number(body.size()));
++    response.setHTTPHeaderFields(WTF::move(headerMap));
++    if (inPlaceOfResponse)
++        response.setCertificateInfo(m_response.certificateInfo().value_or(CertificateInfo { }));
++    response.setSource(ResourceResponse::Source::InspectorOverride);
++
++    // what came is not read: the message's I/O ends (canceled, not closed: a close would read the
++    // rest of its body here, blocking)
++    if (m_inputStream && !m_collaboBody)
++        g_cancellable_cancel(m_cancellable.get());
++    m_cancellable = adoptGRef(g_cancellable_new());
++    m_multipartInputStream = nullptr;
++    m_response = WTF::move(response);
++    auto size = body.size();
++    m_inputStream = adoptGRef(g_memory_input_stream_new_from_data(g_memdup2(body.span().data(), size), size, g_free));
++    m_collaboAnswered = true;
++    m_collaboResponseDecided = true;
++    startTimeout();
++    dispatchDidReceiveResponse();
++}
++
++bool NetworkDataTaskSoup::collaboHoldResponse()
++{
++    if (std::exchange(m_collaboResponseDecided, false))
++        return false;
++    if (!m_soupMessage || !m_inputStream || m_multipartInputStream || isDownload() || m_collaboPreflight)
++        return false;
++    unsigned wants = CollaboNet::wants();
++    if (!(wants & (CollaboNet::Response | CollaboNet::ResponseBody)))
++        return false;
++    bool withBody = wants & CollaboNet::ResponseBody;
++    if (!withBody && m_collaboByInspector && (wants & CollaboNet::PageResponsesByInspector))
++        return false;
++
++    // first without the body: the browser says whether it wants it read (if it holds this one)
++    auto event = collaboEvent("response"_s);
++    collaboAddResponse(event.get());
++    event->setString("requestUrl"_s, m_currentRequest.url().string());
++    event->setString("method"_s, m_currentRequest.httpMethod());
++    if (withBody)
++        event->setBoolean("bodyAvailable"_s, true);
++    stopTimeout();
++    m_collaboHold = CollaboNet::hold(WTF::move(event), [this](RefPtr<JSON::Object>&& decision) {
++        m_collaboHold = 0;
++        collaboResponseDecided(WTF::move(decision));
++    });
++    if (!m_collaboHold) {
++        startTimeout();
++        return false;
++    }
++    return true;
++}
++
++void NetworkDataTaskSoup::collaboResponseDecided(RefPtr<JSON::Object>&& decision)
++{
++    Ref protectedThis { *this };
++    if (m_state == State::Canceling || m_state == State::Completed || !m_client) {
++        clearRequest();
++        return;
++    }
++    String action = decision ? decision->getString("action"_s) : String();
++    if (action == "body"_s) {
++        collaboReadBody();
++        return;
++    }
++    if (action == "fail"_s) {
++        collaboFail(*decision);
++        return;
++    }
++    if (action == "respond"_s) {
++        collaboRespond(*decision, true);
++        return;
++    }
++    m_collaboResponseDecided = true;
++    startTimeout();
++    dispatchDidReceiveResponse();
++}
++
++// the whole body into memory, then held again with it (the client reads it from there)
++void NetworkDataTaskSoup::collaboReadBody()
++{
++    if (m_collaboBody) {
++        collaboHoldResponseWithBody();
++        return;
++    }
++    if (m_response.expectedContentLength() > static_cast<long long>(collaboMaxBody)) {
++        collaboHoldResponseWithBody();
++        return;
++    }
++    GRefPtr<GOutputStream> output = adoptGRef(g_memory_output_stream_new_resizable());
++    startTimeout();
++    g_output_stream_splice_async(output.get(), m_inputStream.get(), static_cast<GOutputStreamSpliceFlags>(G_OUTPUT_STREAM_SPLICE_CLOSE_SOURCE | G_OUTPUT_STREAM_SPLICE_CLOSE_TARGET),
++        RunLoopSourcePriority::AsyncIONetwork, m_cancellable.get(), reinterpret_cast<GAsyncReadyCallback>(collaboReadBodyCallback), RefPtr { this }.leakRef());
++}
++
++void NetworkDataTaskSoup::collaboReadBodyCallback(GOutputStream* output, GAsyncResult* result, NetworkDataTaskSoup* task)
++{
++    RefPtr<NetworkDataTaskSoup> protectedThis = adoptRef(task);
++    GUniqueOutPtr<GError> error;
++    gssize read = g_output_stream_splice_finish(output, result, &error.outPtr());
++    if (task->m_state == State::Canceling || task->m_state == State::Completed || !task->m_client) {
++        task->clearRequest();
++        return;
++    }
++    if (read < 0) {
++        task->didFail(ResourceError::genericGError(task->m_currentRequest.url(), error.get()));
++        return;
++    }
++    task->m_collaboBytes += read;
++    task->m_collaboBody = adoptGRef(g_memory_output_stream_steal_as_bytes(G_MEMORY_OUTPUT_STREAM(output)));
++    task->m_inputStream = adoptGRef(g_memory_input_stream_new_from_bytes(task->m_collaboBody.get()));
++    task->collaboHoldResponseWithBody();
++}
++
++void NetworkDataTaskSoup::collaboHoldResponseWithBody()
++{
++    auto event = collaboEvent("response"_s);
++    collaboAddResponse(event.get());
++    event->setString("requestUrl"_s, m_currentRequest.url().string());
++    event->setString("method"_s, m_currentRequest.httpMethod());
++    if (m_collaboBody) {
++        gsize size = 0;
++        auto* data = static_cast<const uint8_t*>(g_bytes_get_data(m_collaboBody.get(), &size));
++        if (size <= collaboMaxBody)
++            event->setString("body"_s, base64EncodeToString(unsafeMakeSpan(data, size)));
++        else
++            event->setString("bodyOmitted"_s, makeString("larger than "_s, collaboMaxBody / 1024 / 1024, " MB"_s));
++        event->setDouble("bodySize"_s, size);
++    } else
++        event->setString("bodyOmitted"_s, makeString("larger than "_s, collaboMaxBody / 1024 / 1024, " MB"_s));
++    stopTimeout();
++    m_collaboHold = CollaboNet::hold(WTF::move(event), [this](RefPtr<JSON::Object>&& decision) {
++        m_collaboHold = 0;
++        if (decision && decision->getString("action"_s) == "body"_s)
++            decision->setString("action"_s, "continue"_s);
++        collaboResponseDecided(WTF::move(decision));
++    });
++    if (!m_collaboHold) {
++        m_collaboResponseDecided = true;
++        startTimeout();
++        dispatchDidReceiveResponse();
++    }
++}
++
++// what a service or shared worker loaded: how it ended
++void NetworkDataTaskSoup::collaboNoteDone(const ResourceError& error)
++{
++    if (!m_collaboRecord)
++        return;
++    auto event = collaboEvent("done"_s);
++    if (!error.isNull())
++        event->setString("error"_s, error.localizedDescription().isEmpty() ? "failed"_s : error.localizedDescription());
++    event->setDouble("bytes"_s, m_collaboBytes);
++    if (m_collaboAnswered)
++        event->setBoolean("answeredHere"_s, true);
++    CollaboNet::note(WTF::move(event));
++}
++
+ } // namespace WebKit
+ 
++
+diff --git a/Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.h b/Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.h
+index 40110b64..84898682 100644
+--- a/Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.h
++++ b/Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.h
+@@ -32,6 +32,7 @@
+ #include <WebCore/PageIdentifier.h>
+ #include <WebCore/ProtectionSpace.h>
+ #include <WebCore/ResourceResponse.h>
++#include <wtf/JSONValues.h>
+ #include <wtf/RunLoop.h>
+ #include <wtf/glib/GRefPtr.h>
+ #include <wtf/text/CString.h>
+@@ -149,6 +150,32 @@ private:
+ 
+     WebCore::AdditionalNetworkLoadMetricsForWebInspector& additionalNetworkLoadMetricsForWebInspector();
+ 
++    // the wpe add-on's interception (CollaboNetIntercept.h): a request held before it goes (each
++    // hop), a response before the client gets it (with its body read first, if asked)
++    void sendRequest();
++    Ref<JSON::Object> collaboEvent(ASCIILiteral type);
++    void collaboAddResponse(JSON::Object&);
++    bool collaboHoldRequest();
++    void collaboRequestDecided(RefPtr<JSON::Object>&&);
++    bool collaboHoldResponse();
++    void collaboHoldResponseWithBody();
++    void collaboResponseDecided(RefPtr<JSON::Object>&&);
++    void collaboReadBody();
++    static void collaboReadBodyCallback(GOutputStream*, GAsyncResult*, NetworkDataTaskSoup*);
++    void collaboRespond(const JSON::Object&, bool inPlaceOfResponse);
++    void collaboFail(const JSON::Object&);
++    void collaboNoteDone(const WebCore::ResourceError&);
++    String m_collaboContext;
++    bool m_collaboByInspector { false };
++    bool m_collaboRecord { false };
++    bool m_collaboPreflight { false };
++    uint64_t m_collaboTask { 0 };
++    uint64_t m_collaboHold { 0 };
++    bool m_collaboResponseDecided { false };
++    bool m_collaboAnswered { false };
++    GRefPtr<GBytes> m_collaboBody;
++    uint64_t m_collaboBytes { 0 };
++
+     Markable<WebCore::FrameIdentifier> m_frameID;
+     Markable<WebCore::PageIdentifier> m_pageID;
+     State m_state { State::Suspended };
+diff --git a/Source/WebKit/NetworkProcess/soup/NetworkSessionSoup.cpp b/Source/WebKit/NetworkProcess/soup/NetworkSessionSoup.cpp
+index 597173a0..395a8e00 100644
+--- a/Source/WebKit/NetworkProcess/soup/NetworkSessionSoup.cpp
++++ b/Source/WebKit/NetworkProcess/soup/NetworkSessionSoup.cpp
+@@ -31,10 +31,12 @@
+ #include "WebCookieManager.h"
+ #include "WebSocketTaskSoup.h"
+ #include <WebCore/DeprecatedGlobalSettings.h>
++#include <WebCore/IsInitiatedByDedicatedWorker.h>
+ #include <WebCore/NetworkStorageSession.h>
+ #include <WebCore/ResourceRequest.h>
+ #include <WebCore/SoupNetworkSession.h>
+ #include <libsoup/soup.h>
++#include <wtf/JSONValues.h>
+ #include <wtf/TZoneMallocInlines.h>
+ 
+ namespace WebKit {
+@@ -117,7 +119,16 @@ RefPtr<WebSocketTask> NetworkSessionSoup::createWebSocketTask(WebPageProxyIdenti
+     if (shouldBlockCookies)
+         soup_message_disable_feature(soupMessage.get(), SOUP_TYPE_COOKIE_JAR);
+ 
+-    return WebSocketTask::create(channel, request, soupSession(), soupMessage.get(), protocol);
++    // the wpe add-on's interception: whose socket this is
++    auto context = JSON::Object::create();
++    context->setString("kind"_s, "websocket"_s);
++    if (pageID)
++        context->setString("page"_s, String::number(pageID->toUInt64()));
++    if (frameID)
++        context->setString("frame"_s, String::number(frameID->toUInt64()));
++    if (isInitiatedByDedicatedWorker == IsInitiatedByDedicatedWorker::Yes)
++        context->setString("worker"_s, "dedicated"_s);
++    return WebSocketTask::create(channel, request, soupSession(), soupMessage.get(), protocol, context->toJSONString());
+ }
+ 
+ void NetworkSessionSoup::setIgnoreTLSErrors(bool ignoreTLSErrors)
+diff --git a/Source/WebKit/NetworkProcess/soup/WebSocketTaskSoup.cpp b/Source/WebKit/NetworkProcess/soup/WebSocketTaskSoup.cpp
+index a06ddeb2..4052bf3a 100644
+--- a/Source/WebKit/NetworkProcess/soup/WebSocketTaskSoup.cpp
++++ b/Source/WebKit/NetworkProcess/soup/WebSocketTaskSoup.cpp
+@@ -26,6 +26,7 @@
+ #include "config.h"
+ #include "WebSocketTaskSoup.h"
+ 
++#include "CollaboNetIntercept.h"
+ #include "NetworkProcess.h"
+ #include "NetworkSession.h"
+ #include "NetworkSocketChannel.h"
+@@ -34,6 +35,7 @@
+ #include <WebCore/ResourceRequest.h>
+ #include <WebCore/ResourceResponse.h>
+ #include <WebCore/ThreadableWebSocketChannel.h>
++#include <WebCore/URLSoup.h>
+ #include <wtf/RunLoop.h>
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/glib/GSpanExtras.h>
+@@ -51,23 +53,23 @@ static inline bool isConnectionError(GError* error)
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(WebSocketTask);
+ 
+-Ref<WebSocketTask> WebSocketTask::create(NetworkSocketChannel& channel, const WebCore::ResourceRequest& request, SoupSession* session, SoupMessage* msg, const String& protocol)
++Ref<WebSocketTask> WebSocketTask::create(NetworkSocketChannel& channel, const WebCore::ResourceRequest& request, SoupSession* session, SoupMessage* msg, const String& protocol, const String& collaboContext)
+ {
+-    return adoptRef(*new WebSocketTask(channel, request, session, msg, protocol));
++    return adoptRef(*new WebSocketTask(channel, request, session, msg, protocol, collaboContext));
+ }
+ 
+-WebSocketTask::WebSocketTask(NetworkSocketChannel& channel, const WebCore::ResourceRequest& request, SoupSession* session, SoupMessage* msg, const String& protocol)
++WebSocketTask::WebSocketTask(NetworkSocketChannel& channel, const WebCore::ResourceRequest& request, SoupSession* session, SoupMessage* msg, const String& protocol, const String& collaboContext)
+     : m_channel(channel)
+     , m_request(request)
+     , m_handshakeMessage(msg)
+     , m_cancellable(adoptGRef(g_cancellable_new()))
+     , m_delayFailTimer(RunLoop::mainSingleton(), "WebSocketTask::DelayFailTimer"_s, this, &WebSocketTask::delayFailTimerFired)
++    , m_collaboContext(collaboContext)
+ {
+     auto protocolList = protocol.split(',');
+-    GUniquePtr<char*> protocols;
+     if (!protocolList.isEmpty()) {
+-        protocols.reset(static_cast<char**>(g_new0(char*, protocolList.size() + 1)));
+-        auto protocolsSpan = unsafeMakeSpan(protocols.get(), protocolList.size());
++        m_protocols.reset(static_cast<char**>(g_new0(char*, protocolList.size() + 1)));
++        auto protocolsSpan = unsafeMakeSpan(m_protocols.get(), protocolList.size());
+         unsigned i = 0;
+         for (auto& subprotocol : protocolList)
+             protocolsSpan[i++] = g_strdup(subprotocol.trim(isASCIIWhitespaceWithoutFF<char16_t>).utf8().data());
+@@ -88,7 +90,38 @@ WebSocketTask::WebSocketTask(NetworkSocketChannel& channel, const WebCore::Resou
+         return TRUE;
+     }), this);
+ 
+-    soup_session_websocket_connect_async(session, msg, nullptr, protocols.get(), RunLoopSourcePriority::AsyncIONetwork, m_cancellable.get(),
++    g_signal_connect(msg, "starting", G_CALLBACK(+[](SoupMessage* msg, WebSocketTask* task) {
++        task->m_request.updateFromSoupMessageHeaders(soup_message_get_request_headers(msg));
++        protect(task->m_channel)->didSendHandshakeRequest(WTF::move(task->m_request));
++    }), this);
++
++    // the wpe add-on's interception: the handshake goes once the browser has decided
++    static uint64_t collaboSockets;
++    m_collaboSocket = ++collaboSockets;
++    if (CollaboNet::wants() & CollaboNet::WebSocketHandshake) {
++        auto event = collaboEvent("websocket"_s);
++        auto headers = JSON::Object::create();
++        soup_message_headers_foreach(soup_message_get_request_headers(msg), [](const char* name, const char* value, gpointer data) {
++            auto* object = static_cast<JSON::Object*>(data);
++            String key = String::fromUTF8(name);
++            String previous;
++            object->setString(key, object->getString(key, previous) ? makeString(previous, ", "_s, String::fromUTF8(value)) : String::fromUTF8(value));
++        }, headers.ptr());
++        event->setObject("headers"_s, WTF::move(headers));
++        event->setString("protocols"_s, protocol);
++        m_collaboHandshakeHold = CollaboNet::hold(WTF::move(event), [this, session = GRefPtr<SoupSession>(session)](RefPtr<JSON::Object>&& decision) mutable {
++            m_collaboHandshakeHold = 0;
++            collaboHandshakeDecided(WTF::move(decision), WTF::move(session));
++        });
++        if (m_collaboHandshakeHold)
++            return;
++    }
++    connect(session);
++}
++
++void WebSocketTask::connect(SoupSession* session)
++{
++    soup_session_websocket_connect_async(session, m_handshakeMessage.get(), nullptr, m_protocols.get(), RunLoopSourcePriority::AsyncIONetwork, m_cancellable.get(),
+         [] (GObject* session, GAsyncResult* result, gpointer userData) {
+             GUniqueOutPtr<GError> error;
+             GRefPtr<SoupWebsocketConnection> connection = adoptGRef(soup_session_websocket_connect_finish(SOUP_SESSION(session), result, &error.outPtr()));
+@@ -105,11 +138,6 @@ WebSocketTask::WebSocketTask(NetworkSocketChannel& channel, const WebCore::Resou
+             else
+                 task->didFail(String::fromUTF8(error->message));
+         }, this);
+-
+-    g_signal_connect(msg, "starting", G_CALLBACK(+[](SoupMessage* msg, WebSocketTask* task) {
+-        task->m_request.updateFromSoupMessageHeaders(soup_message_get_request_headers(msg));
+-        protect(task->m_channel)->didSendHandshakeRequest(WTF::move(task->m_request));
+-    }), this);
+ }
+ 
+ WebSocketTask::~WebSocketTask()
+@@ -164,6 +192,8 @@ void WebSocketTask::didReceiveMessageCallback(WebSocketTask* task, SoupWebsocket
+         return;
+ 
+     std::span data = span(message);
++    if (task->collaboQueue(false, dataType, data, nullptr))
++        return;
+     switch (dataType) {
+     case SOUP_WEBSOCKET_DATA_TEXT:
+         protect(task->m_channel)->didReceiveText(String::fromUTF8(data));
+@@ -222,12 +252,15 @@ void WebSocketTask::didClose(unsigned short code, const String& reason)
+     if (m_receivedDidClose)
+         return;
+ 
++    collaboForget();
+     m_receivedDidClose = true;
+     protect(m_channel)->didClose(code, reason);
+ }
+ 
+ void WebSocketTask::sendString(std::span<const uint8_t> utf8, CompletionHandler<void()>&& callback)
+ {
++    if (collaboQueue(true, SOUP_WEBSOCKET_DATA_TEXT, utf8, WTF::move(callback)))
++        return;
+     if (m_connection && soup_websocket_connection_get_state(m_connection.get()) == SOUP_WEBSOCKET_STATE_OPEN) {
+         // Soup is going to copy the data immediately, so we can use g_bytes_new_static() here to avoid more data copies.
+         GRefPtr<GBytes> bytes = adoptGRef(g_bytes_new_static(utf8.data(), utf8.size()));
+@@ -238,6 +271,8 @@ void WebSocketTask::sendString(std::span<const uint8_t> utf8, CompletionHandler<
+ 
+ void WebSocketTask::sendData(std::span<const uint8_t> data, CompletionHandler<void()>&& callback)
+ {
++    if (collaboQueue(true, SOUP_WEBSOCKET_DATA_BINARY, data, WTF::move(callback)))
++        return;
+     if (m_connection && soup_websocket_connection_get_state(m_connection.get()) == SOUP_WEBSOCKET_STATE_OPEN)
+         soup_websocket_connection_send_binary(m_connection.get(), data.data(), data.size());
+     callback();
+@@ -250,6 +285,7 @@ void WebSocketTask::close(int32_t code, const String& reason)
+ 
+     if (!m_connection) {
+         g_cancellable_cancel(m_cancellable.get());
++        collaboForget();
+         didClose(code ? code : SOUP_WEBSOCKET_CLOSE_ABNORMAL, reason);
+         return;
+     }
+@@ -264,6 +300,7 @@ void WebSocketTask::close(int32_t code, const String& reason)
+ void WebSocketTask::cancel()
+ {
+     g_cancellable_cancel(m_cancellable.get());
++    collaboForget();
+ 
+     if (m_connection) {
+         g_signal_handlers_disconnect_matched(m_connection.get(), G_SIGNAL_MATCH_DATA, 0, 0, nullptr, nullptr, this);
+@@ -280,4 +317,158 @@ void WebSocketTask::delayFailTimerFired()
+     didFail(WTF::move(m_delayErrorMessage));
+ }
+ 
++// ── the wpe add-on's interception (CollaboNetIntercept.h) ────────────────────────────────────
++
++Ref<JSON::Object> WebSocketTask::collaboEvent(ASCIILiteral type)
++{
++    auto event = JSON::Object::create();
++    event->setString("type"_s, type);
++    event->setString("socket"_s, CollaboNet::number(m_collaboSocket));
++    event->setString("url"_s, m_request.url().string());
++    if (RefPtr context = JSON::Value::parseJSON(m_collaboContext))
++        event->setValue("context"_s, context.releaseNonNull());
++    return event;
++}
++
++void WebSocketTask::collaboHandshakeDecided(RefPtr<JSON::Object>&& decision, GRefPtr<SoupSession>&& session)
++{
++    Ref protectedThis { *this };
++    if (g_cancellable_is_cancelled(m_cancellable.get()) || !m_handshakeMessage)
++        return;
++    String action = decision ? decision->getString("action"_s) : String();
++    if (action == "fail"_s) {
++        didFail(String { "WebSocket blocked by web intercept"_s });
++        return;
++    }
++    if (decision) {
++        String url = decision->getString("url"_s);
++        if (!url.isEmpty()) {
++            URL changed { url };
++            if (auto uri = WebCore::urlToSoupURI(changed)) {
++                soup_message_set_uri(m_handshakeMessage.get(), uri.get());
++                m_request.setURL(WTF::move(changed));
++            }
++        }
++        if (RefPtr headers = decision->getObject("headers"_s)) {
++            auto* soupHeaders = soup_message_get_request_headers(m_handshakeMessage.get());
++            soup_message_headers_clear(soupHeaders);
++            for (auto& entry : *headers) {
++                String value;
++                if (entry.value->asString(value))
++                    soup_message_headers_append(soupHeaders, entry.key.utf8().data(), value.utf8().data());
++            }
++            m_request.setHTTPHeaderFields(CollaboNet::headerMap(*headers));
++        }
++    }
++    connect(session.get());
++}
++
++// true: queued (behind what waits already, or to be held itself), delivered once decided
++bool WebSocketTask::collaboQueue(bool sent, SoupWebsocketDataType type, std::span<const uint8_t> data, CompletionHandler<void()>&& callback)
++{
++    uint64_t seq = ++m_collaboSeq[sent];
++    auto& queue = m_collaboQueue[sent];
++    if (queue.isEmpty() && !(CollaboNet::wants() & (sent ? CollaboNet::WebSocketSent : CollaboNet::WebSocketReceived)))
++        return false;
++    queue.append({ type, adoptGRef(g_bytes_new(data.data(), data.size())), WTF::move(callback), seq });
++    if (!m_collaboHolds[sent])
++        collaboNext(sent);
++    return true;
++}
++
++void WebSocketTask::collaboNext(bool sent)
++{
++    auto& queue = m_collaboQueue[sent];
++    while (!queue.isEmpty() && !m_collaboHolds[sent]) {
++        auto& message = queue.first();
++        if (CollaboNet::wants() & (sent ? CollaboNet::WebSocketSent : CollaboNet::WebSocketReceived)) {
++            auto event = collaboEvent("message"_s);
++            event->setString("direction"_s, sent ? "send"_s : "receive"_s);
++            event->setInteger("opcode"_s, message.type == SOUP_WEBSOCKET_DATA_TEXT ? 1 : 2);
++            event->setDouble("seq"_s, message.seq);
++            std::span bytes = span(message.data.get());
++            if (message.type == SOUP_WEBSOCKET_DATA_TEXT) {
++                event->setString("data"_s, String::fromUTF8(bytes));
++                event->setString("encoding"_s, "text"_s);
++            } else {
++                event->setString("data"_s, base64EncodeToString(bytes));
++                event->setString("encoding"_s, "base64"_s);
++            }
++            event->setDouble("size"_s, bytes.size());
++            m_collaboHolds[sent] = CollaboNet::hold(WTF::move(event), [this, sent](RefPtr<JSON::Object>&& decision) {
++                m_collaboHolds[sent] = 0;
++                collaboMessageDecided(sent, WTF::move(decision));
++            });
++            if (m_collaboHolds[sent])
++                return;
++        }
++        auto taken = queue.takeFirst();
++        collaboDeliver(sent, taken.type, taken.data.get());
++        if (taken.callback)
++            taken.callback();
++    }
++}
++
++void WebSocketTask::collaboMessageDecided(bool sent, RefPtr<JSON::Object>&& decision)
++{
++    Ref protectedThis { *this };
++    auto& queue = m_collaboQueue[sent];
++    if (queue.isEmpty())
++        return;
++    auto taken = queue.takeFirst();
++    String action = decision ? decision->getString("action"_s) : String();
++    if (action != "drop"_s && !g_cancellable_is_cancelled(m_cancellable.get())) {
++        GRefPtr<GBytes> data = taken.data;
++        auto type = taken.type;
++        String text;
++        if (decision && decision->getString("data"_s, text)) {
++            if (decision->getString("encoding"_s) == "base64"_s) {
++                if (auto bytes = base64Decode(text))
++                    data = adoptGRef(g_bytes_new(bytes->span().data(), bytes->size()));
++            } else {
++                auto utf8 = text.utf8();
++                data = adoptGRef(g_bytes_new(utf8.data(), utf8.length()));
++            }
++        }
++        if (auto opcode = decision ? decision->getInteger("opcode"_s) : std::nullopt)
++            type = *opcode == 2 ? SOUP_WEBSOCKET_DATA_BINARY : SOUP_WEBSOCKET_DATA_TEXT;
++        collaboDeliver(sent, type, data.get());
++    }
++    if (taken.callback)
++        taken.callback();
++    collaboNext(sent);
++}
++
++void WebSocketTask::collaboDeliver(bool sent, SoupWebsocketDataType type, GBytes* data)
++{
++    if (sent) {
++        if (m_connection && soup_websocket_connection_get_state(m_connection.get()) == SOUP_WEBSOCKET_STATE_OPEN)
++            soup_websocket_connection_send_message(m_connection.get(), type, data);
++        return;
++    }
++    RefPtr channel = m_channel.get();
++    if (!channel)
++        return;
++    std::span bytes = span(data);
++    if (type == SOUP_WEBSOCKET_DATA_TEXT)
++        channel->didReceiveText(String::fromUTF8(bytes));
++    else
++        channel->didReceiveBinaryData(bytes);
++}
++
++// it went away (closed, canceled): nothing of it is held any more, what waited is not delivered
++void WebSocketTask::collaboForget()
++{
++    CollaboNet::forget(m_collaboHandshakeHold);
++    for (bool sent : { false, true }) {
++        CollaboNet::forget(m_collaboHolds[sent]);
++        while (!m_collaboQueue[sent].isEmpty()) {
++            auto taken = m_collaboQueue[sent].takeFirst();
++            if (taken.callback)
++                taken.callback();
++        }
++    }
++}
++
+ } // namespace WebKit
++
+diff --git a/Source/WebKit/NetworkProcess/soup/WebSocketTaskSoup.h b/Source/WebKit/NetworkProcess/soup/WebSocketTaskSoup.h
+index 954d62c5..2e655514 100644
+--- a/Source/WebKit/NetworkProcess/soup/WebSocketTaskSoup.h
++++ b/Source/WebKit/NetworkProcess/soup/WebSocketTaskSoup.h
+@@ -27,7 +27,10 @@
+ 
+ #include <WebCore/ResourceRequest.h>
+ #include <libsoup/soup.h>
++#include <wtf/Deque.h>
++#include <wtf/JSONValues.h>
+ #include <wtf/RunLoop.h>
++#include <wtf/glib/GUniquePtr.h>
+ #include <wtf/TZoneMalloc.h>
+ #include <wtf/glib/GRefPtr.h>
+ 
+@@ -38,7 +41,7 @@ struct SessionSet;
+ class WebSocketTask : public ThreadSafeRefCountedAndCanMakeThreadSafeWeakPtr<WebSocketTask> {
+     WTF_MAKE_TZONE_ALLOCATED(WebSocketTask);
+ public:
+-    static Ref<WebSocketTask> create(NetworkSocketChannel&, const WebCore::ResourceRequest&, SoupSession*, SoupMessage*, const String& protocol);
++    static Ref<WebSocketTask> create(NetworkSocketChannel&, const WebCore::ResourceRequest&, SoupSession*, SoupMessage*, const String& protocol, const String& collaboContext = { });
+     ~WebSocketTask();
+ 
+     void sendString(std::span<const uint8_t>, CompletionHandler<void()>&&);
+@@ -51,7 +54,9 @@ public:
+     SessionSet* sessionSet() { return nullptr; }
+ 
+ private:
+-    WebSocketTask(NetworkSocketChannel&, const WebCore::ResourceRequest&, SoupSession*, SoupMessage*, const String& protocol);
++    WebSocketTask(NetworkSocketChannel&, const WebCore::ResourceRequest&, SoupSession*, SoupMessage*, const String& protocol, const String& collaboContext);
++
++    void connect(SoupSession*);
+ 
+     void didConnect(GRefPtr<SoupWebsocketConnection>&&);
+     void didFail(String&&);
+@@ -73,6 +78,29 @@ private:
+     bool m_receivedDidClose { false };
+     String m_delayErrorMessage;
+     RunLoop::Timer m_delayFailTimer;
++    GUniquePtr<char*> m_protocols;
++
++    // the wpe add-on's interception (CollaboNetIntercept.h): the handshake held before it goes,
++    // the messages each way held in their order (index 1: those the page sends, 0: those it gets)
++    Ref<JSON::Object> collaboEvent(ASCIILiteral type);
++    void collaboHandshakeDecided(RefPtr<JSON::Object>&&, GRefPtr<SoupSession>&&);
++    bool collaboQueue(bool sent, SoupWebsocketDataType, std::span<const uint8_t>, CompletionHandler<void()>&&);
++    void collaboNext(bool sent);
++    void collaboMessageDecided(bool sent, RefPtr<JSON::Object>&&);
++    void collaboDeliver(bool sent, SoupWebsocketDataType, GBytes*);
++    void collaboForget();
++    struct CollaboMessage {
++        SoupWebsocketDataType type;
++        GRefPtr<GBytes> data;
++        CompletionHandler<void()> callback;
++        uint64_t seq;
++    };
++    Deque<CollaboMessage> m_collaboQueue[2];
++    uint64_t m_collaboHolds[2] { 0, 0 };
++    uint64_t m_collaboSeq[2] { 0, 0 };
++    uint64_t m_collaboHandshakeHold { 0 };
++    uint64_t m_collaboSocket { 0 };
++    String m_collaboContext;
+ };
+ 
+ } // namespace WebKit

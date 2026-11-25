@@ -16,7 +16,7 @@ RT="${1:-$ROOT/dist/runtime/collabo-core-$platform}"
 cp "$A/addon.json" "$A/out/wpe.json"
 chmod +x "$T/guest.sh"
 cd "$RT"
-time timeout 1500 bin/collabo-core-engine exec --kernel app/images/vmlinux.wasm \
+time timeout 2400 bin/collabo-core-engine exec --kernel app/images/vmlinux.wasm \
   --initramfs app/images/initramfs.cpio --initramfs app/images/python.cpio --tools-image app/images/tools.cpio \
   --addon-dir "$A/out" --addon wpe --mount "$T:/t" -- /bin/sh /t/guest.sh > "$T/engine.log" 2>&1 || true
 python3 "$T/check.py" "$T/out"

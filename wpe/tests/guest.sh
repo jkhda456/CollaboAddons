@@ -3,7 +3,7 @@
 T=/t
 OUT=$T/out
 rm -rf $OUT; mkdir -p $OUT
-python3 $T/server.py 8000 >/dev/null 2>&1 &
+python3 $T/server.py 8000 8443 >/dev/null 2>&1 &
 sleep 2
 step() { name=$1; shift; ( "$@" ) > $OUT/$name.out 2> $OUT/$name.err; echo $? > $OUT/$name.code; }
 export WEB_START_TIMEOUT=600
@@ -220,9 +220,150 @@ step ioffopen    web open http://127.0.0.1:8000/second.html
 step ioff        web intercept off
 step ioffload    web wait load 30
 step ihar        web har $OUT/intercept.har
+# intercept in the network process (WebKit patch 0013): what the page's inspector cannot hold — a
+# synchronous XMLHttpRequest, beacons, a redirect's next hop, a response with its body, a WebSocket's
+# handshake and messages, a service worker's own requests. The server says what reached it (/api/seen).
+SEEN=http://127.0.0.1:8000/api/seen
+step ncaps       web --capabilities
+step nclear      curl -s "$SEEN?clear=1"
+step nopen       web open http://127.0.0.1:8000/more.html 60
+step non         web intercept on api/sync api/beacon api/any ws2
+step nstatus     web intercept status
+step nsync       web eval 'syncXhr("one")'
+step nsynclist   web intercept list
+step nsyncjson   web intercept show api/sync --json
+step nsyncbody   web intercept body api/sync
+step nsyncseen   curl -s "$SEEN"
+step nsyncnet    web network api/sync
+step nsyncblock  web read
+step nsyncsend   web intercept send api/sync --header 'X-Agent: sync-agent' --body 'changed sync body'
+step nsyncdone   web wait text 'sync 200' 20
+step nsyncseen2  curl -s "$SEEN?clear=1"
+step nbeacon     sh -c 'web eval "beacon(\"drop\")" >/dev/null; web intercept wait 20'
+step nbeaconshow web intercept show beacon
+step nbeacondrop web intercept drop beacon
+step nbeacon2    sh -c 'web eval "beacon(\"two\")" >/dev/null; web intercept wait 20'
+step nbeaconsend web intercept send beacon --url '/api/beacon?tag=changed' --header 'X-Agent: beacon-agent' --body 'changed beacon'
+step nbeaconseen sh -c 'sleep 2; curl -s "$0?clear=1"' "$SEEN"
+step nping       sh -c 'web click Ping >/dev/null; web intercept wait 20'
+step npingshow   web intercept show ping=1 --json
+step npingsend   web intercept send ping=1 --header 'X-Agent: ping-agent'
+step npingseen   sh -c 'sleep 1; curl -s "$0?clear=1"' "$SEEN"
+step nredir      sh -c 'web eval "redirect(\"r1\"); 1" >/dev/null; web intercept wait 20'
+step nredirseen  curl -s "$SEEN"
+step nredirshow  web intercept show any?hop
+step nredirsend  web intercept send any?hop --url '/api/any?hop=changed'
+step nredirdone  web wait text 'redirect {' 20
+step nredirnet   web network show hop=changed
+step nredirseen2 curl -s "$SEEN?clear=1"
+step nws         sh -c 'web eval "socket(); 1" >/dev/null; web intercept wait 20'
+step nwsshow     web intercept show ws2
+step nwsrespond  web intercept respond ws2 --body x
+step nwssend     web intercept send ws2 --header 'X-Agent: ws-agent' --url '/ws2?changed=1'
+step nwsopen     web wait text 'hello /ws2?changed=1 x-agent=ws-agent' 20
+step nmsgon      web intercept on ws2 --stage messages
+step nmsg        sh -c 'web eval "ws.send(\"hello there\"); 1" >/dev/null; web intercept wait 20'
+step nmsglist    web intercept list
+step nmsgshow    web intercept show ws2
+step nmsgrespond web intercept respond ws2
+step nmsgsend    web intercept send ws2 --body 'changed text'
+step nmsgrecv    web intercept wait 20
+step nmsgrshow   web intercept show ws2 --json
+step nmsgrsend   web intercept send ws2 --body 'echo replaced'
+step nmsgseen    web wait text 'echo replaced' 20
+step nmsgbin     sh -c 'web eval "ws.send(new Uint8Array([1, 2, 3])); 1" >/dev/null; web intercept wait 20'
+step nmsgbinbody web intercept body ws2 $OUT/msg.bin
+step nmsgbinsend web intercept send ws2
+step nmsgbinrecv web intercept wait 20
+step nmsgbinshow web intercept show ws2
+step nmsgbindrop web intercept drop ws2
+step nmsgafter   sh -c 'web eval "ws.send(\"after\"); 1" >/dev/null; web intercept wait 20 >/dev/null; web intercept send ws2 >/dev/null; web intercept wait 20 >/dev/null; web intercept send ws2'
+step nmsgpage    sh -c 'sleep 1; web eval "said.join(\" | \")"'
+step nmsgseen2   curl -s "$SEEN?clear=1"
+step nmsgnet     web network show ws2
+step nbodyon     web intercept on api/any --stage body
+step nbody       sh -c 'web eval "fetch(\"/api/any?body=1\").then(r => r.text()).then(t => say(\"body \" + t)); 1" >/dev/null; web intercept wait 20'
+step nbodyshow   web intercept show body=1
+step nbodyread   web intercept body body=1
+step nbodysend   web intercept send body=1 --header 'X-Extra: 1' --body '{"replaced":true}'
+step nbodydone   web wait text 'body {"replaced":true}' 20
+step nbody2      sh -c 'web eval "fetch(\"/api/any?body=2\").then(r => r.text()).then(t => say(\"second \" + t), e => say(\"second failed \" + e.name)); 1" >/dev/null; web intercept wait 20'
+step nbodydrop   web intercept drop body=2
+step nbodydropped web wait text 'second failed' 20
+step nbody3      sh -c 'web eval "fetch(\"/api/any?body=3\").then(r => r.text()).then(t => say(\"third \" + t)); 1" >/dev/null; web intercept wait 20'
+step nbodykeep   web intercept send body=3 --header 'X-Kept: 1'
+step nbodykept   web wait text 'third {' 20
+step nother      sh -c 'web -n other open http://127.0.0.1:8000/more.html 60 >/dev/null; web -n other eval "syncXhr(\"other\")"'
+step notherlist  web intercept list --json
+step notherclose web -n other close
+step nnavon      web intercept on api/sync
+step nnav        sh -c 'web eval "setTimeout(() => syncXhr(\"nav\"), 10); 1" >/dev/null; web intercept wait 20'
+step nnavopen    web open http://127.0.0.1:8000/second.html 30
+step nnavdrop    web intercept drop api/sync
+step nnavopen2   web open http://127.0.0.1:8000/second.html 30
+step nswon       web intercept on --type service-worker
+step nswopen     sh -c 'web open http://127.0.0.1:8000/sw/page.html 60 >/dev/null; web wait text controlled 60'
+step nswnet      sh -c 'web eval "ask(\"/sw/net\"); 1" >/dev/null; web intercept wait 30'
+step nswlist     web intercept list
+step nswsend     web intercept send sw=1 --header 'X-Agent: sw-agent'
+step nswanswers  sh -c 'web wait text "/sw/net 200" 30 >/dev/null; web eval "ask(\"/sw/cached\").then(() => ask(\"/sw/made\")); 1" >/dev/null; web wait text "/sw/made 200" 30; web eval "said.join(\" | \")"'
+step nswnetlist  web network /sw/
+step nswrecord   web network show sw=1
+step nswseen     curl -s "$SEEN?clear=1"
+step nswoff      sh -c 'web intercept off; web eval "navigator.serviceWorker.getRegistration(\"/sw/\").then(r => r && r.unregister()); 1"'
+step nhar        web har $OUT/net-intercept.har
+step ncancel     sh -c 'web open http://127.0.0.1:8000/more.html 30 >/dev/null; web intercept on api/any >/dev/null; web eval "redirect(\"gone\"); 1" >/dev/null; web intercept wait 20'
+step ncancelopen web open http://127.0.0.1:8000/second.html 30
+step ncancellist sh -c 'sleep 1; web intercept list'
+step ncancelnet  web network hop=gone
+step ncancelseen curl -s "$SEEN?clear=1"
 step idtoffopen  sh -c 'web intercept on >/dev/null; web reload'
 step idtoff      web devtools off
 step idtoffload  web wait load 30
+# web proxy: a browser (-n px) through the tests' proxy (proxy.py: HTTP, CONNECT, SOCKS; it logs
+# what it forwarded); the server says what reached it ($SEEN); the other browsers go straight
+python3 $T/proxy.py 8100 $OUT/proxy.log >/dev/null 2>&1 &
+python3 $T/proxy.py 8101 $OUT/proxy-auth.log --auth 'agent:pa:ss' >/dev/null 2>&1 &
+sleep 1
+curl -s "$SEEN?clear=1" >/dev/null
+step pxnone      web -n px proxy
+step pxbad       web -n px proxy ftp://127.0.0.1:21
+step pxnoport    web -n px proxy http://127.0.0.1
+step pxset       web -n px proxy http://127.0.0.1:8100 --bypass none
+step pxopen      web -n px open 'http://127.0.0.1:8000/api/any?px=http' 60
+step pxws        sh -c 'web -n px open http://127.0.0.1:8000/more.html 60 >/dev/null; web -n px eval "socket(); 1" >/dev/null; web -n px wait text "hello /ws2" 20'
+step pxtlsfail   web -n px open 'https://127.0.0.1:8443/api/any?px=tls-untrusted' 60
+step pxca        web -n px proxy ca $T/certs/ca.der
+step pxtls       web -n px open 'https://127.0.0.1:8443/api/any?px=tls' 60
+step pxwss       sh -c 'web -n px open https://127.0.0.1:8443/more.html 60 >/dev/null; web -n px eval "const w = new WebSocket(\"wss://127.0.0.1:8443/ws2?wss=1\"); w.onmessage = e => say(e.data); 1" >/dev/null; web -n px wait text "hello /ws2?wss=1" 20'
+step pxother     web open 'http://127.0.0.1:8000/api/any?px=other-browser' 60
+step pxdefault   sh -c 'web -n px proxy bypass default >/dev/null; web -n px open "http://127.0.0.1:8000/api/any?px=bypassed" 60'
+step pxsocks     sh -c 'web -n px proxy socks5h://127.0.0.1:8100 --bypass none >/dev/null; web -n px open "http://localhost:8000/api/any?px=socks5" 60'
+step pxsocks4    sh -c 'web -n px proxy socks4://127.0.0.1:8100 >/dev/null; web -n px open "http://127.0.0.1:8000/api/any?px=socks4" 60'
+step pxauthnone  sh -c 'web -n px proxy "http://127.0.0.1:8101" >/dev/null; web -n px open "http://127.0.0.1:8000/api/any?px=auth-none" 60'
+step pxauthbad   sh -c 'web -n px proxy "http://agent:wrong@127.0.0.1:8101" >/dev/null; web -n px open "http://127.0.0.1:8000/api/any?px=auth-bad" 60'
+step pxauthbadtls web -n px open 'https://127.0.0.1:8443/api/any?px=auth-bad-tls' 60
+step pxauth      sh -c 'web -n px proxy "http://agent:pa%3Ass@127.0.0.1:8101" >/dev/null; web -n px open "http://127.0.0.1:8000/api/any?px=auth" 60'
+step pxauthtls   web -n px open 'https://127.0.0.1:8443/api/any?px=auth-tls' 60
+step pxauthws    sh -c 'web -n px open http://127.0.0.1:8000/more.html 60 >/dev/null; web -n px eval "socket(); 1" >/dev/null; web -n px wait text "hello /ws2" 20'
+step pxauthagain sh -c 'web -n px proxy "http://agent:wrong2@127.0.0.1:8101" >/dev/null; web -n px open "http://127.0.0.1:8000/api/any?px=auth-again" 60'
+step pxsocksauth sh -c 'web -n px proxy "socks5://agent:pa%3Ass@127.0.0.1:8101" >/dev/null; web -n px open "http://127.0.0.1:8000/api/any?px=socks-auth" 60'
+step pxstatus    web -n px proxy
+step pxsite401   web -n px open 'http://127.0.0.1:8000/api/auth' 30
+step pxsettings  web -n px settings
+step pxintercept sh -c 'web -n px proxy http://127.0.0.1:8100 >/dev/null; web -n px intercept on px=held >/dev/null; web -n px eval "fetch(\"/api/any?px=held\"); 1" >/dev/null; web -n px intercept wait 20 >/dev/null; web -n px intercept send px=held --header "X-Agent: through"; sleep 1; web -n px intercept off'
+step pxdown      sh -c 'web -n px proxy http://127.0.0.1:8199 >/dev/null; web -n px open "http://127.0.0.1:8000/api/any?px=down" 30'
+step pxoff       sh -c 'web -n px proxy off >/dev/null; web -n px open "http://127.0.0.1:8000/api/any?px=off" 60'
+step pxcaclear   web -n px proxy ca clear
+step pxclose     web -n px close
+step pxenv       env WEB_PROXY=http://127.0.0.1:8100 WEB_PROXY_BYPASS=none WEB_PROXY_CA=$T/certs/ca.pem web -n pxenv open 'https://127.0.0.1:8443/api/any?px=env' 180
+step pxopt       web -n pxenv --proxy socks5://127.0.0.1:8100 open 'http://127.0.0.1:8000/api/any?px=option' 60
+step pxenvset    web -n pxenv proxy
+step pxenvclose  web -n pxenv close
+step pxlog       cat $OUT/proxy.log
+step pxauthlog   cat $OUT/proxy-auth.log
+step pxseen      curl -s "$SEEN?clear=1"
+step pxcaps      web --capabilities
 step close       web close
 sleep 2
 step gone        web list
@@ -231,6 +372,7 @@ step agenthelp   web --agent-help
 step agenttopics web --agent-help topics
 step agentparts  web --agent-help net inter
 step agentcmd    web -n helponly agent-help act
+step agentproxy  web --agent-help proxy
 step agentbad    web --agent-help nope
 step agentnone   web list
 step helpline    web --help

@@ -19,6 +19,7 @@ int NetworkProcessMain(int argc, char** argv);
 
 extern "C" int wpe_browser_main(int argc, char** argv);
 extern "C" void wpe_register_tls_backend(void);
+extern "C" void collabo_net_start(void);
 
 // abort() (libc++ with exceptions off, failed assertions of the libraries) would end the process
 // with no word of where; a trap there instead has the engine report the program's frames
@@ -44,7 +45,10 @@ int main(int argc, char** argv)
     }
     // TLS for GIO is a module glib-networking would load; here it is linked in
     wpe_register_tls_backend();
-    if (!std::strcmp(name, "WPENetworkProcess"))
+    if (!std::strcmp(name, "WPENetworkProcess")) {
+        // web intercept: the socket to the browser (netintercept.c), before WebKit takes requests
+        collabo_net_start();
         _exit(WebKit::NetworkProcessMain(argc, argv));
+    }
     return wpe_browser_main(argc, argv);
 }

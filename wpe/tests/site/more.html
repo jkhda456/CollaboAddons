@@ -1,0 +1,40 @@
+<!doctype html>
+<html><head><meta charset="utf-8"><title>More</title></head>
+<body>
+<h1>More</h1>
+<p id="out">-</p>
+<button onclick="syncXhr('click')">Sync</button>
+<a href="#pinged" ping="/api/any?ping=1">Ping</a>
+<script>
+// What `web intercept` holds in the network process (tests/guest.sh): a synchronous XMLHttpRequest,
+// a beacon, a redirect's next hop, a WebSocket's handshake and messages.
+window.said = [];
+function say(text) {
+    said.push(text);
+    document.getElementById('out').textContent = said.join(' | ');
+}
+function syncXhr(tag) {
+    const x = new XMLHttpRequest();
+    x.open('POST', '/api/sync?tag=' + tag, false);
+    x.setRequestHeader('Content-Type', 'text/plain');
+    x.send('sync body ' + tag);
+    say('sync ' + x.status + ' ' + x.responseText);
+    return x.status + ' ' + x.responseText;
+}
+function beacon(tag) {
+    return navigator.sendBeacon('/api/beacon?tag=' + tag, 'beacon body ' + tag);
+}
+function redirect(tag) {
+    fetch('/redirect2?n=' + tag).then(r => r.text()).then(t => say('redirect ' + t), e => say('redirect failed ' + e.name));
+}
+function socket() {
+    const ws = new WebSocket('ws://127.0.0.1:8000/ws2');
+    window.ws = ws;
+    ws.binaryType = 'arraybuffer';
+    ws.onmessage = e => say(typeof e.data === 'string' ? e.data : 'bytes ' + [...new Uint8Array(e.data)].join(','));
+    ws.onerror = () => say('ws error');
+    ws.onclose = e => say('ws closed ' + e.code);
+    return new Promise(done => { ws.onopen = () => { say('ws open'); done('open'); }; });
+}
+</script>
+</body></html>

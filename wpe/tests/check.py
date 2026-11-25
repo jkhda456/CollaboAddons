@@ -184,6 +184,7 @@ check("agenttopics", contains=("start       how the browser works", "intercept "
 check("agentparts", contains=("## network:", "## intercept:", "web network export"),
       absent=("## start:", "## recipes:", "The rules that matter most"))
 check("agentcmd", contains=("## act:", "KimLee", "ctrl+a"), absent=("## wait:",))
+check("agentproxy", contains=("## proxy:", "web proxy ca FILE", "socks5://agent:****@"), absent=("## errors:",))
 check("agentbad", 2, contains=('no topic "nope"', "web --agent-help topics"))
 check("agentnone", contains=("no browser is running",))
 check("helpline", contains=("web --agent-help [TOPIC...]",))
@@ -273,7 +274,7 @@ check("ibad", 2, contains=("drop takes no --url",))
 check("iresp", contains=("pauses with its response",))
 check("irespwait", contains=("response 200", "resp=1"))
 check("irespshow", contains=("paused with its response", "status: 200 OK", "its body has not come yet"))
-check("irespdrop", 1, contains=("cannot fail a response",))
+check("irespdrop", 7, contains=("cannot fail a response", "not supported"))
 check("irespedit", contains=("299", "its response changed"))
 check("iresptitle", contains=('got {"edited":1}',))
 check("iclick", 6, contains=("clicked", "Ask", "api/data?clicked=1"))
@@ -293,6 +294,113 @@ check("ioffopen", 6, contains=("second.html",))
 check("ioff", contains=("intercept: off", "went on as it was"))
 check("ioffload", contains=("second.html", "Second"))
 check("ihar", contains=("intercept.har",))
+
+
+# intercept in the network process (WebKit patch 0013)
+def caps_ok():
+    try:
+        caps = json.loads(get("ncaps", "out") or "")
+    except ValueError as e:
+        return [f"web --capabilities is not JSON: {e}"]
+    problems = []
+    i = caps.get("intercept", {})
+    if caps.get("protocol") != 2 or set(i.get("stages", {})) != {"request", "response", "body", "send", "receive"}:
+        problems.append(f"protocol/stages: {caps.get('protocol')} {list(i.get('stages', {}))}")
+    if "respond" not in i.get("http", {}).get("request", {}) or i.get("websocket", {}).get("messages", {}).get("send") != ["data", "opcode"]:
+        problems.append("http/websocket actions missing")
+    if caps.get("exitStatus", {}).get("7", "").find("not supported") < 0:
+        problems.append("exit 7 not described")
+    return problems
+
+
+problems = caps_ok()
+print(f"{'ok  ' if not problems else 'FAIL'} capabilities json{': ' + '; '.join(problems) if problems else ''}")
+failed += bool(problems)
+check("non", contains=("pauses before it goes",))
+check("nstatus", contains=("intercept: on", "network process: connected", "holding requests", "WebSocket handshakes"))
+check("nsync", 6, contains=("api/sync?tag=one", "synchronous", "what it returns is lost"))
+check("nsynclist", contains=("1 request paused", "POST", "xhr", "(synchronous)"))
+check("nsyncjson", contains=('"kind": "sync-xhr"', '"via": "network-process"', '"bodyEncoding": "base64"', '"page":', '"frame":'))
+check("nsyncbody", contains=("sync body one",))
+check("nsyncseen", absent=("tag=one",))
+check("nsyncnet", contains=("paused", "api/sync?tag=one"))
+check("nsyncblock", 6, contains=("synchronous request that is paused",))
+check("nsyncsend", contains=("sent #", "changed: headers, body"))
+check("nsyncdone", contains=("found",))
+check("nsyncseen2", contains=('"/api/sync?tag=one"', '"sync-agent"', '"changed sync body"'), absent=('"sync body one"',))
+check("nbeacon", contains=("api/beacon?tag=drop",))
+check("nbeaconshow", contains=("beacon body drop",))
+check("nbeacondrop", contains=("dropped #",))
+check("nbeacon2", contains=("api/beacon?tag=two",))
+check("nbeaconsend", contains=("sent #", "changed: url, headers, body"))
+check("nbeaconseen", contains=('"/api/beacon?tag=changed"', '"beacon-agent"', '"changed beacon"'), absent=("tag=drop", "tag=two"))
+check("nping", contains=("ping=1",))
+check("npingshow", contains=('"type": "ping"', '"kind": "ping"', '"Ping-To"'))
+check("npingsend", contains=("sent #", "changed: headers"))
+check("npingseen", contains=('"/api/any?ping=1"', '"ping-agent"'))
+check("nredir", contains=("api/any?hop=r1", "redirect hop 1"))
+check("nredirseen", contains=('"/redirect2?n=r1"',), absent=("hop=r1",))
+check("nredirshow", contains=("redirect: hop 1, from http://127.0.0.1:8000/redirect2?n=r1 (302)", "redirect chain: #"))
+check("nredirsend", contains=("changed: url",))
+check("nredirdone", contains=("found",))
+check("nredirnet", contains=("redirect chain: #", "(this)", "intercepted: request sent changed (url"))
+check("nredirseen2", contains=('"/api/any?hop=changed"',), absent=("hop=r1",))
+check("nws", contains=("handshake", "ws2"))
+check("nwsshow", contains=("its opening handshake", "web intercept drop"))
+check("nwsrespond", 7, contains=("not supported", "handshake cannot be answered"))
+check("nwssend", contains=("changed: url, headers",))
+check("nwsopen", contains=("found",))
+check("nmsgon", contains=("each WebSocket message the page sends and receives",))
+check("nmsg", contains=("send 1", "ws2"))
+check("nmsglist", contains=("send 1", "text", "on WebSocket #"))
+check("nmsgshow", contains=("message the page sends", "hello there", "--opcode text|binary"))
+check("nmsgrespond", 7, contains=("cannot be answered here",))
+check("nmsgsend", contains=("sent #", "changed:"))
+check("nmsgrecv", contains=("receive",))
+check("nmsgrshow", contains=('"kind": "websocket-message"', '"direction": "receive"', '"data": "echo changed text"'))
+check("nmsgrsend", contains=("sent #",))
+check("nmsgseen", contains=("found",))
+check("nmsgbin", contains=("binary",))
+check("nmsgbinbody", contains=("msg.bin: 3 bytes",))
+check("nmsgbinsend", contains=("sent #",))
+check("nmsgbinrecv", contains=("receive",))
+check("nmsgbinshow", contains=("binary", "AwIB"))  # 3,2,1 as base64
+check("nmsgbindrop", contains=("dropped #", "the page does not get it"))
+check("nmsgafter", contains=("sent #",))
+check("nmsgpage", contains=("echo replaced", "echo after"), absent=("bytes 3,2,1", "echo hello there"))
+check("nmsgseen2", contains=('"changed text"', '"010203"', '"after"'), absent=('"hello there"',))
+check("nmsgnet", contains=("send message 1 sent changed", "receive message 2 sent changed", "receive message 3 dropped"))
+check("nbodyon", contains=("(with its body)",))
+check("nbody", contains=("body 200", "body=1"))
+check("nbodyshow", contains=("and its whole body", '"query": "body=1"'))
+check("nbodyread", contains=('"query": "body=1"',))
+check("nbodysend", contains=("its response changed", "200"))
+check("nbodydone", contains=("found",))
+check("nbody2", contains=("body=2",))
+check("nbodydrop", contains=("dropped #", "network error instead"))
+check("nbodydropped", contains=("found",))
+check("nbodykeep", contains=("its own body",))
+check("nbodykept", contains=("found",))
+check("nother", contains=('200 {"got": "sync body other"',))
+check("notherlist", absent=("tag=other",))
+check("nnav", contains=("api/sync?tag=nav",))
+check("nnavopen", 6, contains=("synchronous request that is paused",))
+check("nnavdrop", contains=("dropped #",))
+check("nnavopen2", contains=("second.html",))
+check("nswopen", contains=("found",))
+check("nswnet", contains=("api/any?sw=1",))
+check("nswlist", contains=("a service worker's",))
+check("nswsend", contains=("changed: headers",))
+check("nswanswers", contains=('/sw/net 200 {"query": "sw=1", "x-agent": "sw-agent"}', "/sw/cached 200 from the cache storage", "/sw/made 200 made by the worker"))
+check("nswnetlist", contains=("service worker: network", "service worker: cache-storage", "service worker: synthesized"))
+check("nswrecord", contains=("loaded by: a service worker", "200", "X-Agent: sw-agent"))
+check("nswseen", contains=('"/api/any?sw=1"', '"sw-agent"'))
+check("nhar", contains=("net-intercept.har",))
+check("ncancel", contains=("api/any?hop=gone", "redirect hop 1"))
+check("ncancelopen", contains=("second.html",))
+check("ncancellist", contains=("no request is paused",))
+check("ncancelnet", contains=("hop=gone",), absent=("paused",))
+check("ncancelseen", absent=("hop=gone",))
 check("idtoffopen", 6, contains=("second.html",))
 check("idtoff", contains=("intercept: off too", "went on as they were"))
 check("idtoffload", contains=("second.html",))
@@ -540,6 +648,89 @@ def shots_ok():
         problems.append("shot-denied.png written though capture is off")
     return problems
 
+
+# web proxy: through tests/proxy.py (what it forwarded: proxy.log, proxy-auth.log); the server's
+# /api/seen says what reached it
+check("pxnone", contains=("proxy: none",))
+check("pxbad", 2, contains=("not ftp://",))
+check("pxnoport", 2, contains=("give the proxy's port",))
+check("pxset", contains=("proxy: http://127.0.0.1:8100", "none, every host through the proxy", "loads under way were stopped"))
+check("pxopen", contains=("px=http",))
+check("pxws", contains=("found",))
+check("pxtlsfail", 1, contains=("Unacceptable TLS certificate", "web proxy ca FILE"))
+check("pxca", contains=("trusted from the next connection on", "CN=Collabo Test Proxy CA", "/t/certs/ca.der"))
+check("pxtls", contains=("https://127.0.0.1:8443/api/any?px=tls",))
+check("pxwss", contains=("found",))
+check("pxother", contains=("px=other-browser",))
+check("pxdefault", contains=("px=bypassed",))
+check("pxsocks", contains=("px=socks5",))
+check("pxsocks4", contains=("px=socks4",))
+check("pxauthnone", 1, contains=("the proxy http://127.0.0.1:8101 wants a user and password", "407"))
+check("pxauthbad", 1, contains=("refused the user and password given", "agent:****@"), absent=("wrong",))
+check("pxauthbadtls", 1, contains=("refused the user and password given",))
+check("pxauth", contains=("px=auth",))
+check("pxauthtls", contains=("px=auth-tls",))
+check("pxauthws", contains=("found",))
+check("pxauthagain", 1, contains=("refused the user and password given",))  # the right ones before are not reused
+check("pxsocksauth", contains=("px=socks-auth",))
+check("pxstatus", contains=("socks5://agent:****@127.0.0.1:8101", "ca.der: O=collaboCore wpe tests,CN=Collabo Test Proxy CA"),
+      absent=("pa:ss", "pa%3Ass"))
+check("pxsite401", contains=("/api/auth",))
+check("pxsettings", contains=("proxy: socks5://agent:****@127.0.0.1:8101",))
+check("pxintercept", contains=("sent #", "px=held", "changed: headers"))
+check("pxdown", 1, contains=("Could not connect to proxy", "through the proxy http://127.0.0.1:8199"))
+check("pxoff", contains=("px=off",))
+check("pxcaclear", contains=("none from the next connection on",))
+check("pxenv", contains=("px=env",))
+check("pxopt", contains=("px=option",))
+check("pxenvset", contains=("proxy: socks5://127.0.0.1:8100", "/t/certs/ca.pem"))
+
+
+def proxy_ok():
+    problems = []
+    log, auth = get("pxlog", "out") or "", get("pxauthlog", "out") or ""
+    for line in ("http GET http://127.0.0.1:8000/api/any?px=http", "connect 127.0.0.1:8000", "connect 127.0.0.1:8443",
+                 "socks5 localhost:8000 (a name", "socks4 127.0.0.1:8000", "http GET http://127.0.0.1:8000/api/any?px=held",
+                 "socks5 127.0.0.1:8000"):
+        if line not in log:
+            problems.append(f"proxy.log has no {line!r}")
+    for text in ("px=other-browser", "px=bypassed", "px=off", "GET ws://"):
+        if text in log:
+            problems.append(f"proxy.log has {text!r} (went straight, or a WebSocket not in a tunnel)")
+    for line in ("407 GET http://127.0.0.1:8000/api/any?px=auth-none", "407 GET http://127.0.0.1:8000/api/any?px=auth-bad",
+                 "407 CONNECT 127.0.0.1:8443", "http GET http://127.0.0.1:8000/api/any?px=auth", "connect 127.0.0.1:8443",
+                 "connect 127.0.0.1:8000", "socks5 127.0.0.1:8000"):
+        if line not in auth:
+            problems.append(f"proxy-auth.log has no {line!r}")
+    if auth.count("px=auth-bad\n") > 2:
+        problems.append(f"wrong credentials tried {auth.count('px=auth-bad')} times")
+    try:
+        seen = {r["path"]: r for r in json.loads(get("pxseen", "out") or "[]")}
+    except ValueError as e:
+        return problems + [f"pxseen: {e}"]
+    for q in ("px=http", "px=tls", "px=other-browser", "px=bypassed", "px=socks5", "px=socks4", "px=auth", "px=auth-tls",
+              "px=socks-auth", "px=held", "px=off", "px=env", "px=option"):
+        if "/api/any?" + q not in seen:
+            problems.append(f"the server did not get {q}")
+    if seen.get("/api/any?px=held", {}).get("x-agent") != "through":
+        problems.append("the intercepted request did not arrive changed")
+    if "/ws2?wss=1" not in seen:
+        problems.append("no wss through the proxy")
+    for q in ("px=auth-none", "px=auth-bad", "px=auth-bad-tls", "px=auth-again", "px=tls-untrusted", "px=down"):
+        if "/api/any?" + q in seen:
+            problems.append(f"the server got {q}, which the proxy or TLS should have stopped")
+    try:
+        caps = json.loads(get("pxcaps", "out") or "")
+        if "socks5" not in caps.get("proxy", {}).get("schemes", []):
+            problems.append("web --capabilities says nothing of the proxy")
+    except ValueError as e:
+        problems.append(f"pxcaps: {e}")
+    return problems
+
+
+problems = proxy_ok()
+print(f"{'ok  ' if not problems else 'FAIL'} proxy logs{': ' + '; '.join(problems) if problems else ''}")
+failed += bool(problems)
 
 problems = input_timing_ok()
 print(f"{'ok  ' if not problems else 'FAIL'} input timing{': ' + '; '.join(problems) if problems else ''}")

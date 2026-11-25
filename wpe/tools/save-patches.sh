@@ -46,9 +46,18 @@ declare -A TOPICS=(
   # browser/extension.c through webkit_collabo_identity_set
   [0012-identity-answered-natively]="Source/WebCore/page/NavigatorBase.cpp Source/WebCore/page/Navigator.cpp
       Source/WebCore/platform/wpe/PlatformScreenWPE.cpp Source/WebKit/WebProcess/WebCoreSupport/WebChromeClient.cpp"
+  # web intercept in the network process: every HTTP hop (synchronous loads, pings and beacons,
+  # workers' own requests, redirects), responses with their bodies, WebSockets' handshakes and
+  # messages, held until the browser decides (browser/netintercept.c)
+  [0013-network-process-interception]="Source/WebKit/NetworkProcess/CollaboNetIntercept.h
+      Source/WebKit/NetworkProcess/NetworkLoadParameters.h Source/WebKit/NetworkProcess/NetworkResourceLoader.cpp
+      Source/WebKit/NetworkProcess/PingLoad.cpp Source/WebKit/NetworkProcess/NetworkCORSPreflightChecker.cpp
+      Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.h Source/WebKit/NetworkProcess/soup/NetworkDataTaskSoup.cpp
+      Source/WebKit/NetworkProcess/soup/WebSocketTaskSoup.h Source/WebKit/NetworkProcess/soup/WebSocketTaskSoup.cpp
+      Source/WebKit/NetworkProcess/soup/NetworkSessionSoup.cpp Source/WebKit/NetworkProcess/ServiceWorker/ServiceWorkerFetchTask.cpp"
 )
 
-git -C "$S" add -N -- Source/WebKit/WPEPlatform/wpe/collabo   # new files show in the diff
+git -C "$S" add -N -- Source/WebKit/WPEPlatform/wpe/collabo Source/WebKit/NetworkProcess/CollaboNetIntercept.h   # new files show in the diff
 changed="$(git -C "$S" diff --name-only)"
 covered=""
 rm -f "$OUT"/*.patch
